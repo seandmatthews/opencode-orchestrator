@@ -57,12 +57,19 @@ npm run skeleton -- \
   --gate "build=node build.js" \
   --gate "test=node test.js" \
   --candidates 3
+
+npm run clean -- --run <runId>    # dispose a run's worktrees + swarm/* branches
+npm run clean -- --all            # same, for every run except the newest
 ```
 
 Artifacts land in `C:\swarm\<runId>\`: `report.json`, per-candidate `worker.log` and
 `diff.patch`, and the candidate worktrees themselves (unless `--clean`).
 
 Exit code is 0 whenever the run completes mechanically; `report.json` carries verdicts.
+
+`npm run clean` disposes a run's git worktrees and `swarm/*` branches but never its
+evidence (`report.json`, `diff.patch`, logs). A worktree holding uncommitted changes
+is refused unless `--force` — un-captured changes may be the only copy.
 
 ## Docs
 

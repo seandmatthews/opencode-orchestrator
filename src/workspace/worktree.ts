@@ -7,6 +7,11 @@ function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true })
 }
 
+/** Lease ids become branch names: `wt/c01` → `swarm/wt-c01`. */
+export function branchForLeaseId(id: string): string {
+  return `swarm/${id.replaceAll(/[\\/]/g, '-').replaceAll('_', '-')}`
+}
+
 /**
  * Git worktrees as disposable candidate workspaces. Every candidate in a
  * run is pinned to the same base SHA, so diffs are directly comparable and
@@ -20,11 +25,11 @@ export class WorktreeProvider implements WorkspaceProvider {
 
   lease(id: string, baseRef: string): WorkspaceLease {
     const path = join(this.rootDir, id)
-    const branch = id.replaceAll(/[\\/]/g, '-').replaceAll('_', '-')
     mkdirSync(this.rootDir, { recursive: true })
     const baseSha = git(this.repo, ['rev-parse', baseRef]).trim()
-    git(this.repo, ['worktree', 'add', path, '-b', `swarm/${branch}`, baseSha])
-    return { id, path, branch: `swarm/${branch}`, baseSha }
+    const branch = branchForLeaseId(id)
+    git(this.repo, ['worktree', 'add', path, '-b', branch, baseSha])
+    return { id, path, branch, baseSha }
   }
 
   diff(lease: WorkspaceLease): string {

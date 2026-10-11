@@ -4,7 +4,7 @@
 // All subprocesses are list-form and shell-free: npm.cmd shims and string-joined
 // commands are exactly how Windows quoting bugs happen (AGENTS.md #4).
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -58,6 +58,89 @@ try {
   fail(`parser self-check failed: ${e.status ?? e.message}`)
   finish()
 }
+
+// ---------- Gate 1.5: run artifact cleanup (T-002) ----------
+section('Gate 1.5 — run artifact cleanup (fast tier)')
+const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')
+const cleanRoot = 'C:/swarm/verify-clean'
+const cleanRepo = join(cleanRoot, 'repo')
+const cleanRuns = join(cleanRoot, 'runs')
+rmSync(cleanRoot, { recursive: true, force: true })
+mkdirSync(cleanRepo, { recursive: true })
+const cgit = (...args) => run('git', ['-C', cleanRepo, ...args])
+const identity = ['-c', 'user.name=verify', '-c', 'user.email=verify@local']
+try {
+  cgit('init', '-b', 'main')
+  writeFileSync(join(cleanRepo, 'file.txt'), 'baseline\n')
+  cgit(...identity, 'add', '-A')
+  cgit(...identity, 'commit', '-m', 'baseline')
+} catch (e) {
+  fail(`cleanup sandbox setup failed: ${e.status ?? e.message}`)
+  finish()
+}
+
+// A throwaway run dir with real worktrees + swarm/* branches, the way a run
+// leaves them. Omitting report.json pins the wt/-discovery fallback path.
+function makeCleanRun(runId, { withReport, ids = ['c01', 'c02'], dirtyIds = [] }) {
+  const runDir = join(cleanRuns, runId)
+  mkdirSync(join(runDir, 'wt'), { recursive: true })
+  const candidates = []
+  for (const id of ids) {
+    const wt = join(runDir, 'wt', id)
+    cgit('worktree', 'add', wt, '-b', `swarm/wt-${id}`, 'HEAD')
+    if (dirtyIds.includes(id)) writeFileSync(join(wt, 'file.txt'), 'uncommitted change\n')
+    candidates.push({ id, workspacePath: withReport ? wt : null })
+  }
+  if (withReport) writeFileSync(join(runDir, 'report.json'), JSON.stringify({ repo: cleanRepo, candidates }, null, 2))
+  return runDir
+}
+
+const expectClean = (expectedCode, label, args) => {
+  let code = 0
+  let out = ''
+  try {
+    run(process.execPath, [tsxCli, join(root, 'src', 'clean.ts'), ...args])
+  } catch (e) {
+    code = e.status ?? -1
+    out = `${e.stdout ?? ''}${e.stderr ?? e.message}`
+  }
+  if (code !== expectedCode) console.error(`--- clean output (${label}) ---\n${out}`)
+  return code
+}
+const swarmBranches = () => cgit('branch', '--list', 'swarm/*').split('\n').map((l) => l.replace(/^[*+]\s*/, '').trim()).filter(Boolean).join(',')
+const worktreeCount = () => cgit('worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).length
+
+// AC#1 — report-driven clean: exit 0, worktrees + swarm/* branches gone, evidence kept.
+makeCleanRun('20991010120000', { withReport: true })
+let code = expectClean(0, 'recorded run', ['--run', '20991010120000', '--run-root', cleanRuns])
+ok(code === 0, `clean --run on a recorded run exits 0 (got ${code})`)
+ok(worktreeCount() === 1, 'recorded run: only main remains in worktree list')
+ok(swarmBranches() === '', 'recorded run: no swarm/* branches left')
+ok(!existsSync(join(cleanRuns, '20991010120000', 'wt', 'c01')), 'recorded run: worktree directories removed')
+ok(existsSync(join(cleanRuns, '20991010120000', 'report.json')), 'recorded run: evidence (report.json) survives cleanup')
+
+// AC#2 — dirty worktree refused without --force (clean sibling still disposed,
+// per-item result, non-zero exit), disposed with --force. No report.json, so
+// this also exercises wt/-discovery.
+makeCleanRun('20991010120001', { withReport: false, dirtyIds: ['c01'] })
+code = expectClean(1, 'dirty refusal', ['--run', '20991010120001', '--run-root', cleanRuns])
+ok(code === 1, `clean --run refuses a dirty worktree with exit 1 (got ${code})`)
+ok(cgit('branch', '--list', 'swarm/wt-c01').trim() !== '', 'refused run: branch of the dirty worktree survives')
+ok(swarmBranches() === 'swarm/wt-c01', 'refused run: clean sibling worktree was still disposed (only the dirty branch remains)')
+ok(cgit('worktree', 'list', '--porcelain').includes('wt-c01'), 'refused run: dirty worktree still registered')
+code = expectClean(0, 'dirty force', ['--run', '20991010120001', '--run-root', cleanRuns, '--force'])
+ok(code === 0, `clean --run --force disposes the dirty worktree (got ${code})`)
+ok(worktreeCount() === 1 && swarmBranches() === '', 'after --force: only main remains, no swarm/* branches')
+
+// --all — cleans every run except the newest.
+makeCleanRun('20991010120002', { withReport: false, ids: ['c03', 'c04'] })
+makeCleanRun('20991010120003', { withReport: false, ids: ['c05', 'c06'] })
+code = expectClean(0, 'all', ['--all', '--run-root', cleanRuns])
+ok(code === 0, `clean --all exits 0 (got ${code})`)
+ok(cgit('branch', '--list', 'swarm/wt-c03').trim() === '', '--all disposed the older run (swarm/wt-c03 gone)')
+ok(cgit('branch', '--list', 'swarm/wt-c05').trim() !== '', '--all kept the newest run (swarm/wt-c05 intact)')
+code = expectClean(0, 'final sweep', ['--run', '20991010120003', '--run-root', cleanRuns, '--force'])
+ok(code === 0 && worktreeCount() === 1 && swarmBranches() === '', 'sandbox fully disposed after the checks')
 
 if (tier === 'fast') finish()
 
@@ -116,31 +199,19 @@ for (const stray of ['calc.js', 'test.js']) {
   ok(!existsSync(join(root, stray)), `no stray ${stray} in orchestrator root (contamination check)`)
 }
 
-let disposalFailures = 0
-for (const c of report.candidates) {
-  const wt = c.workspacePath
-  if (wt && existsSync(wt)) {
-    try {
-      git(fixture, 'worktree', 'remove', '--force', wt)
-      console.log(`ok: removed worktree ${wt}`)
-    } catch (e) {
-      disposalFailures++
-      fail(`could not remove worktree ${wt}: ${e.status ?? e.message}`)
-    }
-  }
-  const branch = `swarm/wt-${c.id}`
-  try {
-    git(fixture, 'branch', '-D', branch)
-    console.log(`ok: deleted branch ${branch}`)
-  } catch (e) {
-    disposalFailures++
-    fail(`could not delete branch ${branch}: ${e.status ?? e.message}`)
-  }
+// Post-run disposal goes through the clean command (T-002) instead of
+// hand-rolled loops. --force is correct here: the run itself captured the
+// evidence (diff.patch) before disposal, so the leftover uncommitted changes
+// in the worktrees are disposable by definition.
+console.log(`$ tsx src/clean.ts --run ${runDirs[0]} --run-root ${verifyRoot} --force`)
+try {
+  run(process.execPath, [tsxCli, join(root, 'src', 'clean.ts'), '--run', runDirs[0], '--run-root', verifyRoot.replace(/\//g, '\\'), '--force'], { cwd: root, stdio: 'inherit' })
+  ok(true, `clean command disposed run ${runDirs[0]} (exit 0)`)
+} catch (e) {
+  fail(`clean command failed: ${e.status ?? e.message}`)
 }
-if (disposalFailures === 0) {
-  ok(git(fixture, 'worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).length === 1, 'only main remains in worktree list')
-  ok(git(fixture, 'branch', '--list', 'swarm/*').trim() === '', 'no swarm/* branches left')
-}
+ok(git(fixture, 'worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).length === 1, 'only main remains in worktree list')
+ok(git(fixture, 'branch', '--list', 'swarm/*').trim() === '', 'no swarm/* branches left')
 
 finish()
 

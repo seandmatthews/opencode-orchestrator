@@ -7,6 +7,7 @@
     "typecheck": "tsc --noEmit",
     "demo": "node scripts/demo-target.mjs",
     "skeleton": "tsx src/cli.ts",
+    "clean": "tsx src/clean.ts",
     "verify": "node scripts/verify.mjs fast",
     "verify:full": "node scripts/verify.mjs full"
   },

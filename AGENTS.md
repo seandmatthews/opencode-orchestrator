@@ -18,10 +18,12 @@ npm run demo             # Gate 1 — regenerate + baseline-check the demo fixtu
 npm run verify           # fast tier (typecheck + fixture)
 npm run verify:full      # full tier: real e2e run, 2 candidates, ~3-5 min, model tokens
 npm run skeleton -- --repo C:\swarm\demo-target --goal "..." --gate "build=node build.js"
+npm run clean -- --run <runId>   # dispose a run's worktrees + swarm/* branches (evidence kept)
 ```
 
 Runs write artifacts to `C:\swarm\<runId>\` (`report.json`, per-candidate `worker.log`
-and `diff.patch`, worktrees under `wt/` unless `--clean`).
+and `diff.patch`, worktrees under `wt/` unless `--clean`). Post-run disposal goes
+through `npm run clean`, never hand-rolled shell loops.
 
 ## Ground rules (non-negotiable)
 
@@ -69,6 +71,7 @@ src/
   gate/command.ts       shell-command gates
   runner.ts             planner phase + candidate fan-out + report
   cli.ts                flag parsing, worker registry, run header/summary
+  clean.ts              run artifact disposal: worktrees + swarm/* branches, evidence kept
 scripts/
   demo-target.mjs       generates the throwaway fixture repo (baseline passes build+test)
   diag-pwd.mjs          harness directory-resolution probe

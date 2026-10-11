@@ -33,6 +33,31 @@ baseline `node build.js` + `node test.js`. Pass: exit 0, `build ok` + `tests ok`
 printed, one commit on `main`. This is the harness the skeleton runs against; a broken
 fixture invalidates every downstream gate.
 
+## Gate 1.5 — run artifact cleanup (seconds, fast tier)
+
+```bash
+npm run clean -- --run <runId> [--force] [--run-root <path>]
+npm run clean -- --all [--force] [--run-root <path>]
+```
+
+Disposes a run's git worktrees and `swarm/*` branches (T-002). Never deletes
+evidence — `report.json`, `diff.patch`, logs survive. A worktree holding
+uncommitted changes is refused (non-zero exit, per-item message) unless `--force`:
+un-captured changes may be the only copy. `--all` cleans every run directory under
+the run root except the newest (run directories are 14-digit timestamp names).
+Worktrees come from the run's `report.json` plus anything else discovered under its
+`wt/`; the target repo comes from the report's `repo` field, falling back to the
+worktrees' own `.git` pointers (crash-mid-run recovery). All git subprocess calls
+are list-form — this command exists partly to retire the Known issues #4 quoting
+hazard.
+
+The fast tier pins this against a throwaway sandbox repo: a recorded run cleans
+with exit 0, leaving only `main` in `worktree list` and no `swarm/*` branches, with
+`report.json` intact; a dirty worktree is refused while its clean sibling is still
+disposed (per-item results), and disposed under `--force` (no report.json, so the
+`wt/`-discovery path is exercised too); `--all` disposes the older run and leaves
+the newest untouched.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
@@ -53,7 +78,9 @@ fresh fixture, then asserts on the artifacts:
   `worktree list`, no `swarm/*` branches left),
 - no stray fixture files in this repo directory (the contamination check from the
   PWD-bug incident),
-- the run's worktrees and branches are disposed.
+- the run's worktrees and branches are disposed through the clean command
+  (`tsx src/clean.ts --run <runId> --run-root <verify root> --force`; `--force`
+  is correct here — the run captured the evidence before disposal) (T-002).
 
 Required when touching `src/runner.ts`, any adapter, gates, workspace handling, or
 anything that changes report shape. Fast tier alone does not clear you here.
@@ -85,6 +112,8 @@ get trusted with worktrees — see Known issues #1.
    pipeline. Always pass `--model`/`-m` explicitly; never trust harness defaults.
 4. **Git Bash mangles variables inside double-quoted backslash paths** (`wt\$c` became
    a literal `$`). Use forward-slash paths or explicit literals in shell commands.
+   Post-run disposal no longer touches this hazard at all: it goes through
+   `src/clean.ts`, whose git calls are list-form (T-002).
 5. **CRLF warnings from git on fixture files are benign** (`.gitattributes` normalizes;
    the fixture regenerates from scratch each run).
 6. **The planner's read-only-ness is prompt-reinforced only** — it runs with build-agent

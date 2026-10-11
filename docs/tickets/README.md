@@ -38,4 +38,4 @@ Rules:
 | ID | Ticket | Priority | Status |
 |---|---|---|---|
 | T-001 | Reviewer tier: advisory post-gate review | high | done 2026-10-11 |
-| T-002 | Run artifact cleanup automation | high | proposed |
+| T-002 | Run artifact cleanup automation | high | done 2026-10-10 |
