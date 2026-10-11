@@ -258,6 +258,183 @@ ok(code === 0 && worktreeCount() === 1 && swarmBranches() === '', 'clean-repo sa
 ok(r2Branches() === '' && r2git('worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).length === 1, 'repo2 sandbox fully disposed after lock checks')
 ok(lockFilesIn(cleanRuns).length === 0 && lockFilesIn(join(runCheckRoot, 'locks')).length === 0, 'no lock files anywhere after the lock checks')
 
+// ---------- Gate 1.5: integration replay (T-005) ----------
+section('Gate 1.5 — integration replay (fast tier)')
+const intRoot = 'C:/swarm/verify-integrate'
+const intRepo = join(intRoot, 'repo')
+const intRuns = join(intRoot, 'runs')
+rmSync(intRoot, { recursive: true, force: true })
+mkdirSync(intRuns, { recursive: true })
+const igit = (...args) => run('git', ['-C', intRepo, ...args])
+const expectIntegrate = (expectedCode, label, args) => {
+  let code = 0
+  let out = ''
+  try {
+    run(process.execPath, [tsxCli, join(root, 'src', 'integrate.ts'), ...args], { timeout: 120_000 })
+  } catch (e) {
+    code = e.status ?? -1
+    out = `${e.stdout ?? ''}${e.stderr ?? e.message}`
+  }
+  if (code !== expectedCode) console.error(`--- integrate output (${label}, exit ${code}) ---\n${out}`)
+  return { code, out }
+}
+
+try {
+  mkdirSync(intRepo, { recursive: true })
+  igit('init', '-b', 'main')
+  writeFileSync(join(intRepo, 'file.txt'), 'alpha\nbeta\ngamma\n')
+  writeFileSync(join(intRepo, 'other.txt'), 'unrelated\n')
+  igit(...identity, 'add', '-A')
+  igit(...identity, 'commit', '-m', 'baseline')
+} catch (e) {
+  fail(`integrate sandbox setup failed: ${e.status ?? e.message}`)
+  finish()
+}
+const INT_BASE = igit('rev-parse', 'HEAD').trim()
+const REPORT_GATES = [
+  { name: 'check-a', passed: true, exitCode: 0, durationMs: 10, outputTail: 'ok' },
+  { name: 'check-b', passed: true, exitCode: 0, durationMs: 10, outputTail: 'ok' },
+]
+const CLI_GATES = ['--gate', 'check-a=node -e "process.exit(0)"', '--gate', 'check-b=node -e "process.exit(0)"']
+
+// Capture a diff exactly like src/workspace/worktree.ts: add -A --intent-to-add, diff HEAD.
+function captureDiff(modifier) {
+  const maker = join(intRoot, 'wt-maker')
+  igit('worktree', 'add', maker, '--detach', 'HEAD')
+  try {
+    modifier(maker)
+    run('git', ['-C', maker, 'add', '-A', '--intent-to-add', '.'])
+    return run('git', ['-C', maker, 'diff', 'HEAD'])
+  } finally {
+    igit('worktree', 'remove', '--force', maker)
+  }
+}
+
+function makeIntRun(runId, { diff, id = 'c01', gates = REPORT_GATES, passedAllGates = true, diffPath = null, diffBytes = null, writeDiff = true }) {
+  const runDir = join(intRuns, runId)
+  mkdirSync(join(runDir, id), { recursive: true })
+  const dp = diffPath ?? join(runDir, id, 'diff.patch')
+  if (writeDiff) writeFileSync(dp, diff)
+  writeFileSync(join(runDir, 'report.json'), JSON.stringify({
+    runId,
+    repo: intRepo,
+    baseSha: INT_BASE,
+    goal: 'integrate fixture goal',
+    model: 'zai-coding-plan/glm-5.3-flash',
+    startedAt: '2026-10-11T00:00:00.000Z',
+    finishedAt: '2026-10-11T00:01:00.000Z',
+    candidates: [{
+      id, workerId: 'opencode', model: 'zai-coding-plan/glm-5.3-flash', brief: 'b',
+      workspacePath: null, workerOk: true, workerTimedOut: false, workerDurationMs: 1000,
+      diffPath: dp, diffBytes: diffBytes ?? Buffer.byteLength(diff),
+      gates, passedAllGates,
+    }],
+  }, null, 2))
+  return runDir
+}
+
+// AC#1 — clean replay onto drifted HEAD: exit 0, every gate PASS at post-drift HEAD,
+// change present in the replayed worktree, canonical checkout untouched.
+const diffA = captureDiff((maker) => {
+  writeFileSync(join(maker, 'file.txt'), 'alpha\nbeta\ngamma\ndelta\n')
+  writeFileSync(join(maker, 'extra.txt'), 'new file\n')
+})
+makeIntRun('20991011030000', { diff: diffA })
+writeFileSync(join(intRepo, 'other.txt'), 'unrelated\nadvanced\n')
+igit(...identity, 'add', '-A')
+igit(...identity, 'commit', '-m', 'unrelated drift')
+const driftHead = igit('rev-parse', 'HEAD').trim()
+ok(driftHead !== INT_BASE, 'sandbox: target main advanced past the run base')
+const intA = expectIntegrate(0, 'clean replay', ['--run', '20991011030000', '--candidate', 'c01', ...CLI_GATES, '--run-root', intRuns])
+ok(intA.code === 0, `integrate onto drifted HEAD exits 0 (got ${intA.code})`)
+const artifactA = JSON.parse(readFileSync(join(intRuns, '20991011030000', 'integrate', 'c01.json'), 'utf8'))
+ok(artifactA.applied === true && artifactA.treeChanged === true && artifactA.passed === true, 'artifact records applied + treeChanged + passed')
+ok(artifactA.gates.length === 2 && artifactA.gates.every((g) => g.passed), 'artifact records every gate PASS')
+ok(artifactA.targetHead === driftHead, `artifact targetHead is the post-drift HEAD (${driftHead.slice(0, 12)})`)
+ok(artifactA.runBaseSha === INT_BASE, 'artifact runBaseSha is the run base')
+ok(artifactA.worktreePath.replaceAll('\\', '/').endsWith('20991011030000/wt/int-c01'), 'artifact names the integration worktree')
+ok(readFileSync(join(intRuns, '20991011030000', 'wt', 'int-c01', 'file.txt'), 'utf8').includes('delta')
+  && existsSync(join(intRuns, '20991011030000', 'wt', 'int-c01', 'extra.txt')), 'replayed worktree contains the change')
+
+// AC#5 — prepares-only: no new commits, no new branches, unchanged refs, detached worktree.
+ok(igit('status', '--porcelain').trim() === '', 'canonical checkout untouched (status empty)')
+ok(igit('rev-parse', 'HEAD').trim() === driftHead, 'canonical HEAD unchanged')
+ok(igit('branch', '--list').split('\n').map((l) => l.replace(/^[*+]\s*/, '').trim()).filter(Boolean).join(',') === 'main', 'no new branches on the target')
+ok(igit('worktree', 'list', '--porcelain').includes('detached'), 'integration worktree shows as detached')
+
+// AC#2 — conflict refusal: same-lines drift, atomic (no partial state).
+const diffB = captureDiff((maker) => writeFileSync(join(maker, 'file.txt'), 'alpha\nBETA\ngamma\n'))
+makeIntRun('20991011030001', { diff: diffB, id: 'c02' })
+writeFileSync(join(intRepo, 'file.txt'), 'alpha\nchanged-by-drift\ngamma\n')
+igit(...identity, 'add', '-A')
+igit(...identity, 'commit', '-m', 'same-lines drift')
+const intB = expectIntegrate(1, 'conflict', ['--run', '20991011030001', '--candidate', 'c02', ...CLI_GATES, '--run-root', intRuns])
+ok(intB.code === 1, `conflicting replay refuses with exit 1 (got ${intB.code})`)
+ok(/apply/i.test(intB.out), 'refusal names the apply failure')
+ok(run('git', ['-C', join(intRuns, '20991011030001', 'wt', 'int-c02'), 'status', '--porcelain']).trim() === '', 'conflict leaves the integration worktree untouched (atomic)')
+ok(!existsSync(join(intRuns, '20991011030001', 'integrate', 'c02.json')), 'a refusal produces no artifact')
+
+// AC#3 — evidence and policy refusals; a missing or empty diff is NEVER a pass.
+const intUnknown = expectIntegrate(1, 'unknown candidate', ['--run', '20991011030000', '--candidate', 'c99', ...CLI_GATES, '--run-root', intRuns])
+ok(intUnknown.code === 1 && /no such candidate/.test(intUnknown.out), 'unknown candidate id refuses')
+const diffC = captureDiff((maker) => writeFileSync(join(maker, 'file.txt'), 'alpha\nbeta\ngamma\ndelta-2\n'))
+makeIntRun('20991011030002', { diff: diffC, id: 'c03', passedAllGates: false })
+const intEliminated = expectIntegrate(1, 'non-survivor', ['--run', '20991011030002', '--candidate', 'c03', ...CLI_GATES, '--run-root', intRuns])
+ok(intEliminated.code === 1 && /survivor/i.test(intEliminated.out), 'non-survivor candidate refuses')
+ok(!existsSync(join(intRuns, '20991011030002', 'integrate')), 'non-survivor produced no artifact')
+makeIntRun('20991011030003', { diff: diffC, id: 'c04', diffPath: join(intRuns, '20991011030003', 'c04', 'absent.patch'), writeDiff: false })
+const intMissing = expectIntegrate(1, 'missing diff', ['--run', '20991011030003', '--candidate', 'c04', ...CLI_GATES, '--run-root', intRuns])
+ok(intMissing.code === 1 && /missing on disk/.test(intMissing.out), 'missing diff file refuses')
+makeIntRun('20991011030004', { diff: '', id: 'c05', diffBytes: 0 })
+const intEmpty = expectIntegrate(1, 'empty diff', ['--run', '20991011030004', '--candidate', 'c05', ...CLI_GATES, '--run-root', intRuns])
+ok(intEmpty.code === 1 && /zero-byte|NO-OP/i.test(intEmpty.out), 'zero-byte diff refuses — never a pass')
+// no-op apply: hand-crafted hunk whose - and + lines are identical, so the patch
+// applies cleanly and the tree is unchanged. Main's file.txt first re-gains the
+// hunk context the drift in AC#2 replaced.
+writeFileSync(join(intRepo, 'file.txt'), 'alpha\nbeta\ngamma\n')
+igit(...identity, 'add', '-A')
+igit(...identity, 'commit', '-m', 'restore hunk context')
+const NOOP_PATCH = 'diff --git a/file.txt b/file.txt\nindex 0000000..0000000 100644\n--- a/file.txt\n+++ b/file.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+beta\n gamma\n'
+makeIntRun('20991011030005', { diff: NOOP_PATCH, id: 'c06' })
+const intNoop = expectIntegrate(1, 'no-op apply', ['--run', '20991011030005', '--candidate', 'c06', ...CLI_GATES, '--run-root', intRuns])
+ok(intNoop.code === 1 && /changed nothing|NO-OP/i.test(intNoop.out), 'no-op apply refuses')
+if (existsSync(join(intRuns, '20991011030005', 'integrate', 'c06.json'))) {
+  const noopArtifact = JSON.parse(readFileSync(join(intRuns, '20991011030005', 'integrate', 'c06.json'), 'utf8'))
+  ok(noopArtifact.applied === true && noopArtifact.treeChanged === false && noopArtifact.passed === false, 'no-op artifact records applied but never passes')
+} else {
+  ok(false, 'no-op artifact records applied but never passes (c06.json missing)')
+}
+
+// AC#4 — gate-name contract: extra, missing, renamed names refuse before any worktree exists.
+makeIntRun('20991011030006', { diff: diffC, id: 'c07' })
+const intExtra = expectIntegrate(1, 'extra gate', ['--run', '20991011030006', '--candidate', 'c07', ...CLI_GATES, '--gate', 'check-c=node -e "process.exit(0)"', '--run-root', intRuns])
+ok(intExtra.code === 1 && /not in the run's recorded gate set/.test(intExtra.out), 'extra gate name refuses')
+const intMissingName = expectIntegrate(1, 'missing gate', ['--run', '20991011030006', '--candidate', 'c07', '--gate', 'check-a=node -e "process.exit(0)"', '--run-root', intRuns])
+ok(intMissingName.code === 1 && /missing: check-b/.test(intMissingName.out), 'missing gate name refuses')
+const intRenamed = expectIntegrate(1, 'renamed gate', ['--run', '20991011030006', '--candidate', 'c07', '--gate', 'check-x=node -e "process.exit(0)"', '--gate', 'check-b=node -e "process.exit(0)"', '--run-root', intRuns])
+ok(intRenamed.code === 1 && /missing: check-a/.test(intRenamed.out) && /check-x/.test(intRenamed.out), 'renamed gate name refuses')
+ok(!existsSync(join(intRuns, '20991011030006', 'wt')), 'gate-contract refusals happen before any worktree exists')
+
+// AC#6 — disposal, both faces: plain clean refuses the dirty integration worktree,
+// --force disposes it via wt/-discovery, evidence survives.
+const refusedClean = runClean(['--run', '20991011030000', '--run-root', intRuns])
+ok(refusedClean.code === 1, `plain clean refuses the dirty integration worktree (got ${refusedClean.code})`)
+ok(/refused/.test(refusedClean.out) && existsSync(join(intRuns, '20991011030000', 'wt', 'int-c01')), 'refused clean left the integration worktree in place')
+const forcedClean = runClean(['--run', '20991011030000', '--run-root', intRuns, '--force'])
+ok(forcedClean.code === 0, `clean --force disposes the integration worktree (got ${forcedClean.code})`)
+ok(!existsSync(join(intRuns, '20991011030000', 'wt', 'int-c01')), 'integration worktree removed by clean --force')
+ok(existsSync(join(intRuns, '20991011030000', 'integrate', 'c01.json'))
+  && existsSync(join(intRuns, '20991011030000', 'c01', 'diff.patch'))
+  && existsSync(join(intRuns, '20991011030000', 'report.json')), 'evidence (verdict, diff.patch, report.json) survives cleanup')
+
+// tidy: dispose the remaining replay worktrees.
+code = expectClean(0, 'integrate sweep --all', ['--all', '--run-root', intRuns])
+ok(code === 0, `--all sweep over the integrate sandbox exits 0 (got ${code})`)
+code = expectClean(0, 'integrate sweep last', ['--run', '20991011030006', '--run-root', intRuns])
+ok(code === 0, `last integrate run disposes (got ${code})`)
+ok(igit('worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).length === 1, 'only main remains in the integrate sandbox')
+ok(lockFilesIn(intRuns).length === 0, 'no residual lock files after the integrate checks (released on every path)')
+
 // ---------- Gate 1.6: store ingest (T-003) ----------
 section('Gate 1.6 — store ingest (fast tier)')
 try {

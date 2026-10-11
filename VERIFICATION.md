@@ -94,6 +94,42 @@ codes, stdout, `report.json`) was proven unchanged once by a real
 `npm run verify:full` recorded in T-004's Landed section — not a permanent
 Gate 2 extension.
 
+### Integration replay (T-005)
+
+```bash
+npm run integrate -- --run <runId> --candidate cXX --gate "name=command" [...]
+```
+
+Replays a surviving candidate's captured `diff.patch` onto a fresh detached
+worktree of the target repo at its **current HEAD** and re-runs the
+operator-supplied gates there (spec §17.2 steps 1-4 and 6; no model
+involvement anywhere). The `--gate` name set must exactly match the gates the
+candidate passed in the run — gate commands are not recorded in `report.json`,
+so the name set is the integrity check. Policy refusals (non-zero, nothing
+created): non-survivor candidate, missing/empty diff (a NO-OP is never a
+pass), unknown candidate id, gate-name mismatch, already-present integration
+worktree. `git apply --check` then `git apply` (atomic — a rejecting patch
+leaves the tree untouched); an apply that lands but changes nothing is a NO-OP
+refusal; a diff touching a binary file can never replay (capture lacks
+`--binary`) and is refused with a pointer at the carved-off capture fix. The
+verdict artifact `<runDir>/integrate/<id>.json` records
+applied/treeChanged/gates/passed; exit 0 iff applied + treeChanged + all gates
+passed. Replay never commits, never branches, never moves a ref (§17.4).
+
+The replayed worktree is left in place for inspection, dirty by construction:
+plain `clean` refuses it (dirty-protection proven intact on this worktree
+class) and `clean --force` disposes it via the existing `wt/`-discovery, while
+`integrate/<id>.json`, `diff.patch`, and `report.json` survive. The whole flow
+runs under the T-004 checkout lock, released on every path.
+
+The fast tier pins all of it against a throwaway sandbox (diffs captured
+exactly like `src/workspace/worktree.ts`): clean replay onto drifted HEAD
+(exit 0, post-drift `targetHead`, change present, canonical checkout and HEAD
+untouched, no new branches, detached worktree), conflict refusal with an empty
+worktree, every policy refusal, gate-name contract (extra/missing/renamed)
+refusing before any worktree exists, both disposal faces, and no residual
+lock files afterward.
+
 ## Gate 1.6 — store ingest (seconds, fast tier)
 
 ```bash

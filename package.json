@@ -8,6 +8,7 @@
     "demo": "node scripts/demo-target.mjs",
     "skeleton": "tsx src/cli.ts",
     "clean": "tsx src/clean.ts",
+    "integrate": "tsx src/integrate.ts",
     "verify": "node scripts/verify.mjs fast",
     "verify:full": "node scripts/verify.mjs full"
   },

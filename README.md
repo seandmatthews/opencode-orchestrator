@@ -60,6 +60,12 @@ npm run skeleton -- \
 
 npm run clean -- --run <runId>    # dispose a run's worktrees + swarm/* branches
 npm run clean -- --all            # same, for every run except the newest
+
+npm run integrate -- --run <runId> --candidate c01 \
+  --gate "build=node build.js" --gate "test=node test.js"
+# replay a surviving candidate's diff.patch onto the target repo at its
+# current HEAD and re-run the gates (same gate NAMES the run passed;
+# exit 0 iff the diff applies, changes the tree, and all gates pass)
 ```
 
 Artifacts land in `C:\swarm\<runId>\`: `report.json`, per-candidate `worker.log` and
@@ -73,6 +79,13 @@ and never influences them — a failed DB write prints one loud line and the run
 is otherwise unaffected.
 
 Exit code is 0 whenever the run completes mechanically; `report.json` carries verdicts.
+
+`npm run integrate` re-verifies a survivor from its evidence alone (spec §17):
+a candidate's `(baseSha, diff.patch)` is replayed onto a fresh detached worktree
+at the target repo's current HEAD, gates are re-run there, and the verdict lands
+in `<runId>/integrate/<candidate>.json`. It prepares a candidate — humans merge.
+The replayed worktree is kept for inspection: plain `clean` refuses it (it holds
+uncommitted changes), `clean --force` disposes it, evidence always survives.
 
 `npm run clean` disposes a run's git worktrees and `swarm/*` branches but never its
 evidence (`report.json`, `diff.patch`, logs). A worktree holding uncommitted changes

@@ -1,6 +1,6 @@
 # T-005 — Integration replay: re-verify a survivor's diff at current HEAD
 
-**Status:** proposed
+**Status:** done 2026-10-11
 **Category:** engine
 **Value (1-5):** 3 · **Risk (1-5):** 2
 **Depends on:** T-004
@@ -134,7 +134,7 @@ is small, token-free, and makes T-002's disposal safe rather than lossy.
 
 ## Acceptance criteria
 
-- [ ] Clean replay onto drifted HEAD: sandbox repo (Gate 1.5 throwaway pattern,
+- [x] Clean replay onto drifted HEAD: sandbox repo (Gate 1.5 throwaway pattern,
       `scripts/verify.mjs:62-143`) → recorded `report.json` + non-empty `diff.patch`
       (capture method identical to `src/workspace/worktree.ts:38-39`) → target main
       advanced with an unrelated commit → integrate exits 0,
@@ -143,24 +143,24 @@ is small, token-free, and makes T-002's disposal safe rather than lossy.
       the canonical checkout is untouched (`git status --porcelain` empty, HEAD
       unchanged) — pinned by the **new Gate 1.5 integrate checks** added by this
       ticket. (Gate 1.5)
-- [ ] Conflict refusal: with same-lines drift, integrate exits non-zero naming the
+- [x] Conflict refusal: with same-lines drift, integrate exits non-zero naming the
       apply failure, and the integration worktree's `git status --porcelain` is empty
       (atomic — no partial state to clean) — pinned by the same Gate 1.5 checks.
       (Gate 1.5)
-- [ ] Evidence and policy refusals — candidate id not in the report,
+- [x] Evidence and policy refusals — candidate id not in the report,
       `passedAllGates === false`, `diff.patch` missing, `diffBytes === 0`, and a no-op
       apply (tree unchanged after apply) — each exit non-zero before or without
       producing a passing artifact; a missing or empty diff is NEVER a pass
       (AGENTS.md #7; decisions.md NO-OP rule) — pinned by the same Gate 1.5 checks.
       (Gate 1.5)
-- [ ] Gate-name contract: `--gate` names not exactly matching the candidate's recorded
+- [x] Gate-name contract: `--gate` names not exactly matching the candidate's recorded
       `gates[].name` set (extra, missing, or renamed) refuse non-zero before any
       worktree exists — pinned by the same Gate 1.5 checks. (Gate 1.5)
-- [ ] Prepares-only: after a successful replay the target has no new commits, no new
+- [x] Prepares-only: after a successful replay the target has no new commits, no new
       branches, and unchanged refs; the integration worktree shows as detached in
       `git worktree list --porcelain` — pinned by the same Gate 1.5 checks (spec
       §17.4). (Gate 1.5)
-- [ ] Disposal, both faces: after a successful integrate, plain `npm run clean -- --run
+- [x] Disposal, both faces: after a successful integrate, plain `npm run clean -- --run
       <id>` REFUSES the integration worktree and exits 1 — it holds the replayed diff as
       uncommitted changes (dirty check `src/clean.ts:193`, refusal `:199-203`, exit
       `:245`), so clean's dirty-protection is proven intact on this new worktree class;
@@ -169,12 +169,51 @@ is small, token-free, and makes T-002's disposal safe rather than lossy.
       `diff.patch`, and `report.json` survive (`--force` is the repo's own disposal
       precedent: `scripts/verify.mjs:202-208`, VERIFICATION.md:82-83) — both pinned by
       the same Gate 1.5 checks running clean over the integrate sandbox. (Gate 1.5)
-- [ ] Zero new dependencies: `package.json` gains only the `integrate` script — pinned
+- [x] Zero new dependencies: `package.json` gains only the `integrate` script — pinned
       by Gate 0 green with no `npm install`. (Gate 0)
-- [ ] VERIFICATION.md gains the Gate 1.5 integrate section; README (usage) and
+- [x] VERIFICATION.md gains the Gate 1.5 integrate section; README (usage) and
       AGENTS.md (run-it + layout) document `npm run integrate`; ticket status + index
       updated in the same change (docs/tickets/README.md:31) — pinned by change-set
       review (AGENTS.md #6, decisions.md 2026-10-10 process entry). (change-set review)
+
+## Landed
+
+2026-10-11, in one change-set, on top of the landed T-004 lock (its step 9 is
+implemented as specified: the whole post-refusal flow runs under
+acquireCheckoutLock, released in finally — and the gate proves no residual
+lock files on any path). No deviations from the ticket's What.
+
+- `src/integrate.ts` (new) — the full flow of steps 1-9: report read (target =
+  the run's own repo field), survivor + evidence refusals, exact gate-name
+  contract (both directions, with missing/extra named), detached worktree at
+  current HEAD (never WorktreeProvider.lease), `git apply --check` then
+  `git apply` list-form with the binary-patch refusal message, NO-OP guard on
+  post-apply `git status --porcelain`, sequential CommandGate re-run,
+  `<runDir>/integrate/<id>.json` verdict artifact, exit 0 iff applied +
+  treeChanged + all gates passed. One implementation note worth keeping:
+  process.exit() skips finally blocks, so the locked region returns codes and
+  the release-then-exit happens above the finally — the gate's residual-lock
+  assertion pins this on every path (it caught exactly this leak during
+  development: an exit-inside-try left the conflict path's lock behind and the
+  next scenario refused on it).
+- `package.json` — only the `integrate` script added; zero new dependencies.
+- `scripts/verify.mjs` — Gate 1.5 integrate checks: 30 assertions over the
+  throwaway sandbox (AC#1 clean replay onto drifted HEAD incl. artifact fields
+  and untouched canonical checkout; AC#2 conflict refusal with atomic empty
+  worktree; AC#3 all five refusals incl. the hand-crafted identical-hunk no-op
+  apply whose artifact records applied=true/treeChanged=false/passed=false;
+  AC#4 extra/missing/renamed gate names refusing before any worktree exists;
+  AC#5 prepares-only; AC#6 both disposal faces; sandbox fully disposed, no
+  locks left). Diffs are captured exactly like src/workspace/worktree.ts
+  (add -A --intent-to-add, diff HEAD).
+- Docs: VERIFICATION.md Gate 1.5 'Integration replay' section, README usage +
+  prepare-not-merge paragraph, AGENTS.md run-it + layout. Ticket + index in the
+  same change.
+
+Gates: Gate 0 green; Gate 1 green; `npm run verify` ALL GREEN (Gate 1.5
+cleanup + lock + integrate + Gate 1.6). Gate 2 NOT run, as the ticket states:
+no runner/adapter/gate/workspace/report-shape change is in this change-set.
+Gate 0.5 n/a (`src/parse.ts` untouched); Gate 3 n/a (zero model involvement).
 
 ## Verification
 
