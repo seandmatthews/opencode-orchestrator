@@ -19,6 +19,7 @@ npm run verify           # fast tier (typecheck + fixture)
 npm run verify:full      # full tier: real e2e run, 2 candidates, ~3-5 min, model tokens
 npm run skeleton -- --repo C:\swarm\demo-target --goal "..." --gate "build=node build.js"
 npm run clean -- --run <runId>   # dispose a run's worktrees + swarm/* branches (evidence kept)
+npm run integrate -- --run <runId> --candidate c01 --gate "build=node build.js"   # replay a survivor's diff at current HEAD
 node node_modules/tsx/dist/cli.mjs src/lock.ts acquire <repo>   # hold the checkout lock by hand (release to drop)
 ```
 
@@ -76,6 +77,7 @@ src/
   runner.ts             planner phase + candidate fan-out + report
   cli.ts                flag parsing, worker registry, run header/summary
   clean.ts              run artifact disposal: worktrees + swarm/* branches, evidence kept
+  integrate.ts          integration replay: survivor's diff.patch onto current HEAD, gates re-run
   lock.ts               cross-process checkout lock + its acquire/release CLI
   store/                durable run records: SQLite (runs/candidates/gate_results/events)
 scripts/
