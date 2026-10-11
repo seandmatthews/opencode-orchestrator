@@ -81,21 +81,22 @@ try {
 
 // A throwaway run dir with real worktrees + swarm/* branches, the way a run
 // leaves them. Omitting report.json pins the wt/-discovery fallback path.
-function makeCleanRun(runId, { withReport, ids = ['c01', 'c02'], dirtyIds = [] }) {
+function makeCleanRun(runId, { withReport, ids = ['c01', 'c02'], dirtyIds = [], repo = cleanRepo }) {
   const runDir = join(cleanRuns, runId)
   mkdirSync(join(runDir, 'wt'), { recursive: true })
+  const rgit = (...args) => run('git', ['-C', repo, ...args])
   const candidates = []
   for (const id of ids) {
     const wt = join(runDir, 'wt', id)
-    cgit('worktree', 'add', wt, '-b', `swarm/wt-${id}`, 'HEAD')
+    rgit('worktree', 'add', wt, '-b', `swarm/wt-${id}`, 'HEAD')
     if (dirtyIds.includes(id)) writeFileSync(join(wt, 'file.txt'), 'uncommitted change\n')
     candidates.push({ id, workspacePath: withReport ? wt : null })
   }
-  if (withReport) writeFileSync(join(runDir, 'report.json'), JSON.stringify({ repo: cleanRepo, candidates }, null, 2))
+  if (withReport) writeFileSync(join(runDir, 'report.json'), JSON.stringify({ repo, candidates }, null, 2))
   return runDir
 }
 
-const expectClean = (expectedCode, label, args) => {
+const runClean = (args) => {
   let code = 0
   let out = ''
   try {
@@ -104,8 +105,19 @@ const expectClean = (expectedCode, label, args) => {
     code = e.status ?? -1
     out = `${e.stdout ?? ''}${e.stderr ?? e.message}`
   }
+  return { code, out }
+}
+const expectClean = (expectedCode, label, args) => {
+  const { code, out } = runClean(args)
   if (code !== expectedCode) console.error(`--- clean output (${label}) ---\n${out}`)
   return code
+}
+const lockFilesIn = (dir) => {
+  try {
+    return readdirSync(dir).filter((f) => f.endsWith('.lock'))
+  } catch {
+    return []
+  }
 }
 const swarmBranches = () => cgit('branch', '--list', 'swarm/*').split('\n').map((l) => l.replace(/^[*+]\s*/, '').trim()).filter(Boolean).join(',')
 const worktreeCount = () => cgit('worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).length
@@ -141,6 +153,110 @@ ok(cgit('branch', '--list', 'swarm/wt-c03').trim() === '', '--all disposed the o
 ok(cgit('branch', '--list', 'swarm/wt-c05').trim() !== '', '--all kept the newest run (swarm/wt-c05 intact)')
 code = expectClean(0, 'final sweep', ['--run', '20991010120003', '--run-root', cleanRuns, '--force'])
 ok(code === 0 && worktreeCount() === 1 && swarmBranches() === '', 'sandbox fully disposed after the checks')
+ok(lockFilesIn(cleanRuns).length === 0, 'no residual lock files after the clean scenarios (every clean released its lock)')
+
+// ---------- Gate 1.5: cross-run checkout lock (T-004) ----------
+section('Gate 1.5 — checkout lock (fast tier)')
+const locksDir = join(cleanRuns, 'locks')
+const expectLockCli = (expectedCode, label, args) => {
+  let code = 0
+  let out = ''
+  try {
+    run(process.execPath, [tsxCli, join(root, 'src', 'lock.ts'), ...args])
+  } catch (e) {
+    code = e.status ?? -1
+    out = `${e.stdout ?? ''}${e.stderr ?? e.message}`
+  }
+  if (code !== expectedCode) console.error(`--- lock cli output (${label}) ---\n${out}`)
+  return { code, out }
+}
+const expectSkeleton = (expectedCode, label, args) => {
+  let code = 0
+  let out = ''
+  try {
+    run(process.execPath, [tsxCli, join(root, 'src', 'cli.ts'), ...args], { timeout: 120_000 })
+  } catch (e) {
+    code = e.status ?? -1
+    out = `${e.stdout ?? ''}${e.stderr ?? e.message}`
+  }
+  if (code !== expectedCode) console.error(`--- skeleton output (${label}, exit ${code}) ---\n${out}`)
+  return { code, out }
+}
+
+// AC#1 — a held lock makes clean refuse and remove nothing.
+makeCleanRun('20991010120200', { withReport: true, ids: ['cL1', 'cL2'] })
+expectLockCli(0, 'acquire', ['acquire', cleanRepo, '--run-root', cleanRuns])
+ok(lockFilesIn(locksDir).length === 1, 'lock file lives under <run-root>\\locks\\')
+ok(!readdirSync(cleanRepo).some((f) => f.endsWith('.lock')), 'no lock file ever inside the target repo')
+const blockedClean = runClean(['--run', '20991010120200', '--run-root', cleanRuns])
+ok(blockedClean.code === 1, `clean under a held lock refuses with exit 1 (got ${blockedClean.code})`)
+ok(blockedClean.out.includes('checkout lock held') && /pid \d+/.test(blockedClean.out) && /held for /.test(blockedClean.out), 'refusal names the holder pid and age')
+ok(blockedClean.out.includes('.lock'), 'refusal names the lock file path')
+ok(worktreeCount() === 3, 'locked clean removed nothing (main + 2 worktrees remain)')
+ok(swarmBranches() === 'swarm/wt-cL1,swarm/wt-cL2', 'locked clean removed no branches')
+ok(existsSync(join(cleanRuns, '20991010120200', 'report.json')), 'evidence intact under a held lock')
+expectLockCli(0, 'release', ['release', cleanRepo, '--run-root', cleanRuns])
+ok(lockFilesIn(locksDir).length === 0, 'lock CLI release leaves no lock file behind')
+
+// AC#2 — a held lock makes the run refuse BEFORE any worktree or artifacts dir.
+const runCheckRoot = join(cleanRoot, 'runs-runcheck')
+mkdirSync(runCheckRoot, { recursive: true })
+expectLockCli(0, 'acquire (run side)', ['acquire', cleanRepo, '--run-root', runCheckRoot])
+const refusedRun = expectSkeleton(1, 'locked run', ['--repo', cleanRepo.replace(/\//g, '\\'), '--goal', 'lock refusal check', '--run-root', runCheckRoot.replace(/\//g, '\\')])
+ok(refusedRun.code === 1, `run under a held lock refuses with exit 1 (got ${refusedRun.code})`)
+ok(refusedRun.out.includes('checkout lock held'), 'run refusal names the checkout lock')
+ok(readdirSync(runCheckRoot).filter((d) => /^\d{14}$/.test(d)).length === 0, 'no artifacts dir created under a held lock')
+ok(worktreeCount() === 3, 'no worktree created under a held lock')
+expectLockCli(0, 'release (run side)', ['release', cleanRepo, '--run-root', runCheckRoot])
+
+// AC#4 — release-on-error: a failure after acquisition leaves no lock file.
+const badBase = expectSkeleton(1, 'bad base', ['--repo', cleanRepo.replace(/\//g, '\\'), '--goal', 'release-on-error check', '--base', 'no-such-ref', '--run-root', runCheckRoot.replace(/\//g, '\\')])
+ok(badBase.code === 1, `bad --base run exits non-zero (got ${badBase.code})`)
+ok(lockFilesIn(join(runCheckRoot, 'locks')).length === 0, 'failed run released its lock')
+
+// AC#5 — --all locks per repo: one locked repo refuses, another repo still cleans.
+const cleanRepo2 = join(cleanRoot, 'repo2')
+mkdirSync(cleanRepo2, { recursive: true })
+const r2git = (...args) => run('git', ['-C', cleanRepo2, ...args])
+r2git('init', '-b', 'main')
+writeFileSync(join(cleanRepo2, 'file.txt'), 'baseline\n')
+r2git(...identity, 'add', '-A')
+r2git(...identity, 'commit', '-m', 'baseline')
+makeCleanRun('20991010120201', { withReport: true, ids: ['cM1'] })
+makeCleanRun('20991010120202', { withReport: true, ids: ['cM2'], repo: cleanRepo2 })
+makeCleanRun('20991010120203', { withReport: true, ids: ['cM3'] })
+const r2Branches = () => r2git('branch', '--list', 'swarm/*').split('\n').map((l) => l.replace(/^[*+]\s*/, '').trim()).filter(Boolean).join(',')
+expectLockCli(0, 'acquire (--all)', ['acquire', cleanRepo, '--run-root', cleanRuns])
+code = expectClean(1, '--all with one locked repo', ['--all', '--run-root', cleanRuns])
+ok(code === 1, `clean --all with one locked repo exits 1 (got ${code})`)
+ok(cgit('branch', '--list', 'swarm/wt-cM1').trim() !== '', 'locked repo: run dir refused, branch intact')
+ok(cgit('worktree', 'list', '--porcelain').includes('wt-cM1'), 'locked repo: worktree untouched')
+ok(r2Branches() === '', 'unlocked repo: run still cleaned under --all (swarm/wt-cM2 gone)')
+ok(cgit('worktree', 'list', '--porcelain').includes('wt-cM3'), 'newest run still kept by --all (its worktree remains)')
+ok(lockFilesIn(locksDir).length === 1, 'exactly the held lock remains (disposed runs released theirs)')
+expectLockCli(0, 'release (--all)', ['release', cleanRepo, '--run-root', cleanRuns])
+
+// AC#6 — stale-lock policy: refuse with pid+age+path, never auto-reap, --force-lock takes it.
+makeCleanRun('20991010120204', { withReport: true, ids: ['cS1'] })
+expectLockCli(0, 'acquire (stale)', ['acquire', cleanRepo, '--run-root', cleanRuns])
+const staleLockPath = join(locksDir, lockFilesIn(locksDir)[0])
+writeFileSync(staleLockPath, JSON.stringify({ pid: 4194303, startedAt: new Date(Date.now() - 7200_000).toISOString(), cmd: 'crashed-run' }, null, 2))
+const stale = runClean(['--run', '20991010120204', '--run-root', cleanRuns])
+ok(stale.code === 1, `stale lock refuses clean with exit 1 (got ${stale.code})`)
+ok(stale.out.includes('4194303') && /held for \d+m/.test(stale.out), 'refusal names the stale holder pid and its age')
+ok(stale.out.includes('.lock'), 'refusal names the lock file path')
+ok(lockFilesIn(locksDir).length === 1, 'nothing auto-reaped the stale lock')
+const forced = runClean(['--run', '20991010120204', '--run-root', cleanRuns, '--force-lock'])
+ok(forced.code === 0, `--force-lock takes the stale lock and clean proceeds (got ${forced.code})`)
+ok(lockFilesIn(locksDir).length === 0, 'lock released after the --force-lock clean')
+
+// tidy: dispose everything the checks above left behind.
+code = expectClean(0, 'lock-check sweep --all', ['--all', '--run-root', cleanRuns])
+ok(code === 0, `--all sweep exits 0 (got ${code})`)
+code = expectClean(0, 'lock-check sweep last', ['--run', '20991010120203', '--run-root', cleanRuns])
+ok(code === 0 && worktreeCount() === 1 && swarmBranches() === '', 'clean-repo sandbox fully disposed after lock checks')
+ok(r2Branches() === '' && r2git('worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).length === 1, 'repo2 sandbox fully disposed after lock checks')
+ok(lockFilesIn(cleanRuns).length === 0 && lockFilesIn(join(runCheckRoot, 'locks')).length === 0, 'no lock files anywhere after the lock checks')
 
 // ---------- Gate 1.6: store ingest (T-003) ----------
 section('Gate 1.6 — store ingest (fast tier)')
@@ -175,9 +291,11 @@ try {
   finish()
 }
 
-const runDirs = readdirSync(verifyRoot)
+// Run dirs are 14-digit timestamps; `locks/` (T-004) also lives under the run
+// root and is not a run dir.
+const runDirs = readdirSync(verifyRoot).filter((d) => /^\d{14}$/.test(d))
 if (runDirs.length !== 1) {
-  fail(`expected exactly one run dir under ${verifyRoot}, got: ${runDirs.join(', ')}`)
+  fail(`expected exactly one run dir under ${verifyRoot}, got: ${readdirSync(verifyRoot).join(', ')}`)
   finish()
 }
 const runDir = join(verifyRoot, runDirs[0])

@@ -1,6 +1,6 @@
 # T-004 — Cross-run checkout lock: runs and cleanup serialize per target repo
 
-**Status:** proposed
+**Status:** done 2026-10-11
 **Category:** ops
 **Value (1-5):** 3 · **Risk (1-5):** 2
 **Depends on:** —
@@ -111,35 +111,35 @@ session) finds no locking mechanism — only the "checkout lock deferred" note a
 
 ## Acceptance criteria
 
-- [ ] With a lock held on the sandbox repo (via `tsx src/lock.ts acquire`), `npm
+- [x] With a lock held on the sandbox repo (via `tsx src/lock.ts acquire`), `npm
       run clean -- --run <id>` refuses non-zero and removes nothing: `git
       worktree list` unchanged, `swarm/*` branches unchanged, evidence files
       intact, refusal naming the holder pid and lock age — pinned by the **new
       Gate 1.5 lock checks** (extension of the `scripts/verify.mjs:62-143`
       sandbox, added by this ticket). (Gate 1.5)
-- [ ] With a lock held on the sandbox repo, `tsx src/cli.ts` refuses non-zero
+- [x] With a lock held on the sandbox repo, `tsx src/cli.ts` refuses non-zero
       BEFORE any worktree or artifacts dir appears: `git worktree list` count
       unchanged and no 14-digit run dir under the sandbox run root — pinned by
       the same Gate 1.5 lock checks (token-free: the refusal precedes any model
       call). (Gate 1.5)
-- [ ] Acquire + release round-trip: every run and clean that proceeds releases
+- [x] Acquire + release round-trip: every run and clean that proceeds releases
       its lock — after success the lock file is gone; the existing Gate 1.5
       clean scenarios now also assert no residual lock file under
       `<run-root>\locks\`, with no existing assertion weakened — pinned by
       Gate 1.5. (Gate 1.5)
-- [ ] Release-on-error: a failure after acquisition (bad `--base`, failing at
+- [x] Release-on-error: a failure after acquisition (bad `--base`, failing at
       `src/cli.ts:149` — after the lock point) exits non-zero and leaves no lock
       file behind — pinned by the Gate 1.5 lock checks. (Gate 1.5)
-- [ ] `--all` locks per repo: a held lock on one run's target repo makes that
+- [x] `--all` locks per repo: a held lock on one run's target repo makes that
       run dir refuse while other run dirs still clean, and the final exit is
       non-zero — pinned by the Gate 1.5 lock checks with a two-run sandbox on
       two repos. (Gate 1.5)
-- [ ] Stale-lock policy: a pre-existing lock file (simulating a crashed holder)
+- [x] Stale-lock policy: a pre-existing lock file (simulating a crashed holder)
       refuses with pid + age + file path; nothing auto-reaps it; `--force-lock`
       takes it and the command proceeds — pinned by the Gate 1.5 lock checks
       plus the VERIFICATION.md policy statement (spec §15.2 philosophy,
       `:1071`). (Gate 1.5)
-- [ ] No behavior change when uncontended: exit codes, stdout verdicts, and
+- [x] No behavior change when uncontended: exit codes, stdout verdicts, and
       `report.json` of runs and cleans are unchanged — pinned by the full
       existing Gate 1.5 suite staying green, plus **one** `npm run verify:full`
       recorded in this ticket's Landed: `src/cli.ts` is the run entry point and
@@ -147,14 +147,61 @@ session) finds no locking mechanism — only the "checkout lock deferred" note a
       (`scripts/verify.mjs:206-208`), so one real run exercises both lock sides
       end-to-end (T-003's no-behavior-change pattern; Gate 2 once, not a
       permanent extension). (Gate 1.5 + Gate 2, once)
-- [ ] Zero new dependencies and correct placement: `fs.openSync(..., 'wx')`
+- [x] Zero new dependencies and correct placement: `fs.openSync(..., 'wx')`
       stdlib only, `package.json` untouched; lock files only ever under
       `<run-root>\locks\`, never inside the target repo — pinned by Gate 0
       typecheck green with no `npm install`, plus the Gate 1.5 lock checks
       asserting the lock file's path. (Gate 0 + Gate 1.5)
-- [ ] VERIFICATION.md gains the lock behavior (Gate 1.5 section extension +
+- [x] VERIFICATION.md gains the lock behavior (Gate 1.5 section extension +
       stale-lock policy) and README/AGENTS.md document `--force-lock` and the
       lock CLI, all in the same change-set (AGENTS.md #6). (change-set review)
+
+## Landed
+
+2026-10-11, in one change-set. No deviations from the ticket's What.
+
+- `src/lock.ts` — `acquireCheckoutLock` (`fs.openSync(path, 'wx')`, EEXIST →
+  `CheckoutLockRefused` naming holder pid, cmd, age, and lock file path with the
+  never-auto-reap message), `releaseCheckoutLock` (ENOENT-tolerant),
+  `lockPathFor` (sha256 of the clean.ts `norm` semantics — probed: `c:/swarm`
+  and `C:\SWARM` contend on one lock), and the acquire/release CLI (exit 0
+  acquired/released, 1 refused; entry-guarded via `import.meta.url` so imports
+  never trigger it).
+- `src/cli.ts` — pipeline body moved into `runPipeline(opts)`; `main` acquires
+  the lock after repo validation, releases in `finally` on every path (bad
+  `--base` included). New `--force-lock` flag. Refusal exits 1 before
+  planner tokens and before `mkdirSync(artifactsDir)`.
+- `src/clean.ts` — per-repo lock inside `cleanRunDir` (acquired after the repo
+  is resolved, covering `--run` and `--all`); refusal prints
+  `nothing was removed for <runDir>` plus the holder line and counts as
+  `refused` (non-zero exit). The untouched T-002 disposal loop moved verbatim
+  into `disposeTargets()`. New `--force-lock` flag.
+- `scripts/verify.mjs` — Gate 1.5 lock checks (held-lock clean refusal with
+  nothing removed; held-lock run refusal before artifacts; release round-trips;
+  release-on-error; `--all` across two sandbox repos; stale lock with pid 4194303
+  + 120m age refused, not reaped, taken by `--force-lock`) plus a residual-lock
+  assertion after the original clean scenarios. Two gate-script adjustments the
+  lock makes necessary: `expectClean` refactored onto a `runClean` that also
+  returns output (no assertion changed), and Gate 2's "exactly one run dir"
+  check now counts `/^\d{14}$/` names because `locks/` legitimately lives under
+  the run root.
+- Docs: VERIFICATION.md Gate 1.5 "Checkout lock" subsection (behavior + stale
+  policy), README usage, AGENTS.md run-it + layout. One disclosed ride-along in
+  the AGENTS.md layout block: the `store/` line T-003 should have added.
+- `package.json` untouched (zero new dependencies, no new script — the lock CLI
+  is invoked via tsx).
+
+Gates: Gate 0 green; Gate 1 green; full `npm run verify` fast tier ALL GREEN
+(original clean scenarios + new lock checks + Gate 1.6).
+
+Uncontended proof (Gate 2, once): `npm run verify:full` ALL GREEN — run
+20261011183359, 2 candidates both PASS build+test with non-empty diffs
+(2658/2505 bytes), planner 1 attempt, reviews 5+5 observations, canonical repo
+clean, clean disposal exit 0 — stdout and exit codes exactly the pre-lock shape,
+both lock sides (run entry, clean disposal) exercised and released silently.
+Honest note: the first verify:full attempt (run 20261011182944) had a green run
+but tripped the gate script's run-dir count (see adjustment above); after the
+one-line filter fix the full tier was re-run end-to-end green.
 
 ## Verification
 

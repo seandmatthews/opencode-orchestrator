@@ -58,6 +58,42 @@ disposed (per-item results), and disposed under `--force` (no report.json, so th
 `wt/`-discovery path is exercised too); `--all` disposes the older run and leaves
 the newest untouched.
 
+### Checkout lock (T-004)
+
+```bash
+node node_modules/tsx/dist/cli.mjs src/lock.ts acquire <repo> [--run-root <path>] [--run-id <id>] [--force-lock]
+node node_modules/tsx/dist/cli.mjs src/lock.ts release <repo> [--run-root <path>]
+```
+
+`src/lock.ts` is a zero-dependency cross-process checkout lock (`fs.openSync(wx)`)
+so runs and clean can never concurrently mutate one target repo's worktrees.
+Lock files live under `<run-root>\locks\<sha256(norm(repo))>.lock` — normalized
+repo paths (`c:/x` and `C:\X` contend on one lock), never inside the target repo,
+and `locks/` is structurally safe from `clean --all`'s `/^\d{14}$/` sweep.
+`npm run skeleton` takes the lock after repo validation and releases it in a
+`finally` on every path — a refusal happens before planner tokens are spent and
+before the artifacts dir exists. `npm run clean` takes it per target repo inside
+the per-run disposal (so `--all` locks each run's own repo in turn).
+
+**Stale-lock policy: never auto-reap, never guess liveness.** Any existing lock
+refuses with the holder pid, its age, and the lock file path; only the explicit
+`--force-lock` flag takes it from a suspected-stale holder. A hard-killed run
+therefore leaves a lock that blocks until a human overrides — by design (spec
+§15.2: no live process is silently reattached based on stale PID metadata).
+
+The fast tier pins: a held lock makes clean refuse non-zero removing nothing
+(worktrees, branches, and evidence intact; refusal names pid + age + path); a
+held lock makes a run refuse non-zero before any worktree or artifacts dir
+exists (token-free); every proceeding clean releases its lock (no residual
+`.lock` under `<run-root>\locks\`, asserted after the original clean scenarios
+too); a failure after acquisition (bad `--base`) still releases; `--all` locks
+per repo (a held lock on one run's repo refuses that run while another repo's
+run still cleans, final exit 1); the stale policy above, including that
+`--force-lock` proceeds and releases afterward. Uncontended behavior (exit
+codes, stdout, `report.json`) was proven unchanged once by a real
+`npm run verify:full` recorded in T-004's Landed section — not a permanent
+Gate 2 extension.
+
 ## Gate 1.6 — store ingest (seconds, fast tier)
 
 ```bash

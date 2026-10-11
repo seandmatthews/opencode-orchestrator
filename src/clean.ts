@@ -9,9 +9,12 @@
 // Every git subprocess is list-form, never through a shell (AGENTS.md #4) —
 // hand-rolled shell loops on exactly this path bit us twice
 // (VERIFICATION.md Known issues #4).
+// Since T-004 each run's disposal happens under the per-target-repo checkout
+// lock (src/lock.ts): a refused lock removes nothing and names the holder.
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, rmdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
+import { acquireCheckoutLock, CheckoutLockRefused, releaseCheckoutLock } from './lock.js'
 import { branchForLeaseId } from './workspace/worktree.js'
 
 const usage = `Dispose a run's git worktrees and swarm/* branches; keep all evidence.
@@ -25,6 +28,8 @@ Options:
   --all                Clean every run directory under the run root that is
                        not the newest (run directories are 14-digit timestamps)
   --force              Remove worktrees even when they hold uncommitted changes
+  --force-lock         Take the checkout lock even if another (suspected-stale)
+                       holder still owns it
   --run-root <path>    Where runs live (default: C:\\swarm)
   --help               Show this help
 
@@ -38,10 +43,11 @@ interface Options {
   run: string | null
   all: boolean
   force: boolean
+  forceLock: boolean
 }
 
 function parseArgs(argv: string[]): Options {
-  const opts: Options = { runRoot: 'C:\\swarm', run: null, all: false, force: false }
+  const opts: Options = { runRoot: 'C:\\swarm', run: null, all: false, force: false, forceLock: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
     const value = (): string => {
@@ -53,6 +59,7 @@ function parseArgs(argv: string[]): Options {
       case '--run': opts.run = value(); break
       case '--all': opts.all = true; break
       case '--force': opts.force = true; break
+      case '--force-lock': opts.forceLock = true; break
       case '--run-root': opts.runRoot = value(); break
       case '--help': case '-h': console.log(usage); process.exit(0)
       default: throw new Error(`unknown option: ${arg}\n\n${usage}`)
@@ -140,7 +147,7 @@ function removeBranch(repo: string, branch: string, res: RunResult): void {
   }
 }
 
-function cleanRunDir(runDir: string, force: boolean): RunResult {
+function cleanRunDir(runDir: string, force: boolean, forceLock: boolean, runRoot: string): RunResult {
   const res: RunResult = { removed: 0, refused: 0, failed: 0 }
   const report = readReport(runDir)
   const wtDir = join(runDir, 'wt')
@@ -171,6 +178,39 @@ function cleanRunDir(runDir: string, force: boolean): RunResult {
     return res
   }
 
+  // Disposal mutates the target repo's worktrees, so it happens under the
+  // cross-run checkout lock. A refusal removes nothing (evidence-never-deleted
+  // survives by construction) and names the holder.
+  let lockPath: string | null = null
+  try {
+    try {
+      lockPath = acquireCheckoutLock(runRoot, repo, { cmd: 'clean', runId: basename(runDir) }, forceLock)
+    } catch (e) {
+      if (e instanceof CheckoutLockRefused) {
+        console.error(`refused (checkout lock held) — nothing was removed for ${runDir}`)
+        console.error(e.message)
+        res.refused++
+        return res
+      }
+      throw e
+    }
+
+    disposeTargets(repo, targets, force, res)
+
+    try { rmdirSync(wtDir) } catch { /* still has contents — fine */ }
+    return res
+  } finally {
+    if (lockPath) releaseCheckoutLock(lockPath)
+  }
+}
+
+/** Per-worktree disposal loop — the T-002 semantics, unchanged. */
+function disposeTargets(
+  repo: string,
+  targets: { path: string; fallbackBranch: string | null }[],
+  force: boolean,
+  res: RunResult,
+): void {
   const registered = registeredWorktrees(repo)
   for (const t of targets) {
     const observed = registered.get(norm(t.path))
@@ -221,9 +261,6 @@ function cleanRunDir(runDir: string, force: boolean): RunResult {
     }
     if (branch) removeBranch(repo, branch, res)
   }
-
-  try { rmdirSync(wtDir) } catch { /* still has contents — fine */ }
-  return res
 }
 
 function main(): void {
@@ -240,7 +277,7 @@ function main(): void {
       process.exit(1)
     }
     console.log(`=== run ${opts.run} ===`)
-    const res = cleanRunDir(runDir, opts.force)
+    const res = cleanRunDir(runDir, opts.force, opts.forceLock, opts.runRoot)
     console.log(`\nclean: ${res.removed} removed, ${res.refused} refused, ${res.failed} failed`)
     process.exit(res.refused > 0 || res.failed > 0 ? 1 : 0)
   }
@@ -259,7 +296,7 @@ function main(): void {
   let blocked = false
   for (const id of runs.slice(0, -1)) {
     console.log(`\n=== run ${id} ===`)
-    const res = cleanRunDir(join(opts.runRoot, id), opts.force)
+    const res = cleanRunDir(join(opts.runRoot, id), opts.force, opts.forceLock, opts.runRoot)
     console.log(`clean: ${res.removed} removed, ${res.refused} refused, ${res.failed} failed`)
     if (res.refused > 0 || res.failed > 0) blocked = true
   }
