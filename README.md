@@ -21,16 +21,20 @@ SHA, then decide survival with machine gates. Models advise; gates decide.
 ## Two-tier models
 
 The skeleton exercises the project's core tiering: a planner-tier model turns the
-goal into N distinct briefs; worker-tier models implement one brief each.
+goal into N distinct briefs; worker-tier models implement one brief each; a
+reviewer-tier model produces advisory post-gate observations (findings, never
+verdicts — gates decide survival).
 
-| Tier | Default | Role |
+| Role | Default | Job |
 |---|---|---|
-| Planner | `zai-coding-plan/glm-5.3` | goal → N distinct, self-contained briefs (JSON array, one bounded repair attempt, falls back to the raw goal) |
+| Planner | `zai-coding-plan/glm-5.3` | goal → N distinct briefs (JSON array, one bounded repair, falls back to the raw goal) |
 | Worker | `zai-coding-plan/glm-5.3-flash` | implements its brief in an isolated worktree |
+| Reviewer | `zai-coding-plan/glm-5.3` | advisory observations per passing candidate (`review.json`) |
 
-Both are pure CLI configuration (`--planner-model`, `--model`, `--no-planner`);
-the engine never hard-codes a model. Planner raw output lands in
-`planner-raw.txt`, per-candidate briefs in `report.json`.
+All roles are pure CLI configuration (`--planner-model`, `--model`,
+`--reviewer-model`, `--no-planner`, `--no-review`); the engine never hard-codes a
+model. Planner raw output lands in `planner-raw.txt`, reviews in
+`<candidate>/review.json`, per-candidate briefs in `report.json`.
 
 ## Interfaces (src/types.ts)
 

@@ -22,6 +22,9 @@ Options:
   --planner-model <id>     Planner-tier model ID that turns the goal into N
                            distinct briefs (default: zai-coding-plan/glm-5.3)
   --no-planner             Skip the planner; all candidates get the raw goal
+  --reviewer-model <id>    Reviewer-tier model ID for advisory post-gate review
+                           of passing candidates (default: zai-coding-plan/glm-5.3)
+  --no-review              Skip the reviewer phase
   --worker <id>            Worker adapter (default: opencode)
   --candidates <n>         Number of candidates (default: 3)
   --concurrency <n>        Parallel lanes (default: same as candidates)
@@ -41,6 +44,7 @@ interface Options {
   goal: string
   model: string
   plannerModel: string | null
+  reviewerModel: string | null
   workerId: string
   candidates: number
   concurrency: number
@@ -58,6 +62,7 @@ function parseArgs(argv: string[]): Options {
     goal: '',
     model: 'zai-coding-plan/glm-5.3-flash',
     plannerModel: 'zai-coding-plan/glm-5.3',
+    reviewerModel: 'zai-coding-plan/glm-5.3',
     workerId: 'opencode',
     candidates: 3,
     concurrency: 0,
@@ -84,6 +89,8 @@ function parseArgs(argv: string[]): Options {
       case '--model': opts.model = value(); break
       case '--planner-model': opts.plannerModel = value(); break
       case '--no-planner': opts.plannerModel = null; break
+      case '--reviewer-model': opts.reviewerModel = value(); break
+      case '--no-review': opts.reviewerModel = null; break
       case '--worker': opts.workerId = value(); break
       case '--candidates': opts.candidates = Number(value()); break
       case '--concurrency': opts.concurrency = Number(value()); break
@@ -144,6 +151,7 @@ async function main(): Promise<void> {
   console.log(`run ${runId}: ${opts.candidates} candidates, concurrency ${opts.concurrency}`)
   console.log(`repo:     ${opts.repo} @ ${baseSha.slice(0, 12)}`)
   console.log(`planner:  ${opts.plannerModel ?? '(disabled — candidates get the raw goal)'}`)
+  console.log(`reviewer: ${opts.reviewerModel ?? '(disabled)'}`)
   console.log(`workers:  ${opts.model} (worker: ${opts.workerId})`)
   console.log(`goal:     ${opts.goal}`)
   console.log(`artifacts: ${artifactsDir}`)
@@ -156,6 +164,7 @@ async function main(): Promise<void> {
     goal: opts.goal,
     model: opts.model,
     plannerModel: opts.plannerModel,
+    reviewerModel: opts.reviewerModel,
     candidateIds: Array.from({ length: opts.candidates }, (_, i) => `c${String(i + 1).padStart(2, '0')}`),
     concurrency: opts.concurrency,
     timeoutMs: opts.timeoutMs,
@@ -173,9 +182,12 @@ async function main(): Promise<void> {
       ? c.gates.map((g) => `${g.name} ${g.passed ? 'PASS' : 'FAIL'}`).join(', ')
       : 'no gates'
     const verdict = c.error ? `ERROR (${c.error})` : !c.workerOk ? 'WORKER FAILED' : c.diffBytes === 0 ? 'NO-OP (no diff)' : c.passedAllGates ? 'PASS' : 'FAIL'
+    const reviewText = c.review
+      ? `  review:${c.review.ok ? `${c.review.observations.length} obs` : 'PARSE FAILED'}`
+      : ''
     console.log(
       `${c.id}  worker:${c.workerOk ? 'ok' : 'failed'} ${(c.workerDurationMs / 1000).toFixed(0)}s` +
-      `  diff:${(c.diffBytes / 1024).toFixed(1)}KiB  ${gateText}  => ${verdict}`,
+      `  diff:${(c.diffBytes / 1024).toFixed(1)}KiB  ${gateText} => ${verdict}${reviewText}`,
     )
   }
   console.log(`\nreport: ${join(artifactsDir, 'report.json')}`)

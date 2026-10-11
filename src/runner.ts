@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { CandidateReport, Gate, GateResult, PlannerReport, RunReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
+import { parseBriefs, parseReview } from './parse.js'
+import type { CandidateReport, Gate, GateResult, PlannerReport, ReviewReport, RunReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
 
 export interface SkeletonOptions {
   runId: string
@@ -12,6 +13,8 @@ export interface SkeletonOptions {
   model: string
   /** Planner-tier model ID, or null to skip planning (candidates get the raw goal). */
   plannerModel: string | null
+  /** Reviewer-tier model ID for advisory post-gate review, or null to skip. */
+  reviewerModel: string | null
   candidateIds: string[]
   concurrency: number
   timeoutMs: number
@@ -101,28 +104,32 @@ function plannerPrompt(goal: string, count: number): string {
   ].join('\n')
 }
 
-/** Extract a JSON string-array of exactly `count` briefs; fills short arrays by cycling. */
-export function parseBriefs(text: string, count: number): string[] | null {
-  const lastBracket = text.lastIndexOf(']')
-  if (lastBracket === -1) return null
-  for (let i = lastBracket; i >= 0; i--) {
-    if (text[i] === '[') {
-      try {
-        const parsed: unknown = JSON.parse(text.slice(i, lastBracket + 1))
-        if (!Array.isArray(parsed)) continue
-        const briefs = parsed
-          .filter((b): b is string => typeof b === 'string' && b.trim().length > 0)
-          .map((b) => b.trim())
-        if (briefs.length === 0) continue
-        const original = briefs.length
-        while (briefs.length < count) briefs.push(briefs[briefs.length % original]!)
-        return briefs.slice(0, count)
-      } catch {
-        // Try the next '[' to the left.
-      }
-    }
-  }
-  return null
+const MAX_DIFF_CHARS = 30_000
+
+function reviewerPrompt(brief: string, workspacePath: string, diff: string, gateLines: string[]): string {
+  const truncated = diff.length > MAX_DIFF_CHARS
+  return [
+    'You are the review tier of a multi-candidate implementation system.',
+    'A worker implemented a brief and all machine gates passed.',
+    'Produce advisory observations for a human reviewer. You never decide survival.',
+    '',
+    'Do not modify any files. Reading the repository below for context is encouraged.',
+    `  ${workspacePath}`,
+    '',
+    `BRIEF the worker was given:`,
+    brief,
+    '',
+    'MACHINE GATE RESULTS:',
+    ...gateLines,
+    '',
+    `CANDIDATE DIFF${truncated ? ` (truncated to ${MAX_DIFF_CHARS} chars)` : ''}:`,
+    diff.slice(0, MAX_DIFF_CHARS),
+    '',
+    'Output ONLY a JSON object, no markdown fences, no commentary:',
+    '{"observations": [{"finding": "<one concrete observation>", "severity": "info" | "concern" | "blocker-advisory", "evidence": "<what you looked at>"}]}',
+    'Give 2 to 6 observations. severities: info = worth knowing, concern = possible problem,',
+    'blocker-advisory = would block merge if a human agrees.',
+  ].join('\n')
 }
 
 async function runPlannerPhase(opts: SkeletonOptions): Promise<PlannerReport> {
@@ -168,6 +175,54 @@ async function runPlannerPhase(opts: SkeletonOptions): Promise<PlannerReport> {
   }
 }
 
+async function runReview(
+  opts: SkeletonOptions,
+  ctx: { id: string; dir: string; workspacePath: string; brief: string; diff: string; gateLines: string[] },
+): Promise<ReviewReport> {
+  const prompt = reviewerPrompt(ctx.brief, ctx.workspacePath, ctx.diff, ctx.gateLines)
+  const logPath = join(ctx.dir, 'reviewer.log')
+  const rawOutputPath = join(ctx.dir, 'review-raw.txt')
+  const started = Date.now()
+
+  // Read-only posture is prompt-reinforced only for now (VERIFICATION.md
+  // Known issues #6); the reviewer runs in the candidate worktree, so the
+  // canonical repo is never exposed either way.
+  const baseReq = { model: opts.reviewerModel!, cwd: ctx.workspacePath, logPath, timeoutMs: opts.timeoutMs }
+  let result = await opts.worker.execute({ ...baseReq, prompt })
+  let attempts = 1
+  let review = result.ok ? parseReview(result.responseTail) : null
+
+  if (!review && !result.timedOut) {
+    attempts = 2
+    console.log(`[${ctx.id}] review: output was not a valid observation object, running one bounded repair attempt`)
+    result = await opts.worker.execute({
+      ...baseReq,
+      prompt: [
+        prompt,
+        '',
+        'Your previous response was not a valid JSON observations object. Previous response:',
+        result.responseTail,
+        '',
+        'Output ONLY the JSON object: {"observations": [{"finding": "...", "severity": "info" | "concern" | "blocker-advisory", "evidence": "..."}]}. No other text.',
+      ].join('\n'),
+    })
+    review = result.ok ? parseReview(result.responseTail) : null
+  }
+
+  writeFileSync(rawOutputPath, result.responseTail)
+  const report: ReviewReport = {
+    ok: review !== null,
+    attempts,
+    model: opts.reviewerModel!,
+    observations: review?.observations ?? [],
+    rawOutputPath,
+  }
+  writeFileSync(join(ctx.dir, 'review.json'), JSON.stringify(report, null, 2))
+  const severities = report.observations.map((o) => o.severity).join(', ')
+  console.log(`[${ctx.id}] review: ${report.observations.length} observation(s) in ${((Date.now() - started) / 1000).toFixed(0)}s${report.observations.length > 0 ? ` (${severities})` : ''}${report.ok ? '' : ' — PARSE FAILED after repair'}`)
+  return report
+}
+
 async function runCandidate(id: string, lease: WorkspaceLease, brief: string, opts: SkeletonOptions): Promise<CandidateReport> {
   const dir = join(opts.artifactsDir, id)
   mkdirSync(dir, { recursive: true })
@@ -200,8 +255,9 @@ async function runCandidate(id: string, lease: WorkspaceLease, brief: string, op
     base.workerDurationMs = result.durationMs
     console.log(`[${id}] worker done in ${(result.durationMs / 1000).toFixed(0)}s ok=${result.ok} exit=${result.exitCode}`)
 
+    let diff = ''
     try {
-      const diff = opts.workspaces.diff(lease)
+      diff = opts.workspaces.diff(lease)
       const diffPath = join(dir, 'diff.patch')
       writeFileSync(diffPath, diff)
       base.diffPath = diffPath
@@ -217,6 +273,17 @@ async function runCandidate(id: string, lease: WorkspaceLease, brief: string, op
       console.log(`[${id}] gate ${r.name}: ${r.passed ? 'PASS' : 'FAIL'} (${(r.durationMs / 1000).toFixed(1)}s)`)
     }
     base.passedAllGates = base.gates.length > 0 && base.gates.every((g) => g.passed) && base.diffBytes > 0
+
+    if (opts.reviewerModel && base.passedAllGates) {
+      base.review = await runReview(opts, {
+        id,
+        dir,
+        workspacePath: lease.path,
+        brief,
+        diff,
+        gateLines: base.gates.map((g) => `- ${g.name}: ${g.passed ? 'PASS' : 'FAIL'}`),
+      })
+    }
   } catch (e) {
     base.error = errorMessage(e)
     console.log(`[${id}] candidate errored: ${base.error}`)

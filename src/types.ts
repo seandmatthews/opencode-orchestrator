@@ -82,6 +82,24 @@ export interface PlannerReport {
   rawOutputPath: string
 }
 
+export interface ReviewObservation {
+  finding: string
+  severity: 'info' | 'concern' | 'blocker-advisory'
+  evidence?: string
+}
+
+/**
+ * Advisory post-gate review (spec §9.2): findings, never verdicts.
+ * Survival stays with the gates; this informs the human.
+ */
+export interface ReviewReport {
+  ok: boolean
+  attempts: number
+  model: string
+  observations: ReviewObservation[]
+  rawOutputPath: string
+}
+
 export interface CandidateReport {
   id: string
   workerId: string
@@ -97,6 +115,8 @@ export interface CandidateReport {
   diffBytes: number
   gates: GateResult[]
   passedAllGates: boolean
+  /** Present only for candidates that passed all gates (when review is enabled). */
+  review?: ReviewReport
   error?: string
 }
 

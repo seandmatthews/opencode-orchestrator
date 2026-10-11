@@ -77,14 +77,18 @@ scripts/
 
 ## Two-tier model configuration
 
-| Tier | Default | Role |
+Three roles across two tiers; every role is CLI configuration, never engine code.
+
+| Role | Default model | Job |
 |---|---|---|
 | Planner | `zai-coding-plan/glm-5.3` | goal → N distinct, fully-specified briefs |
 | Worker | `zai-coding-plan/glm-5.3-flash` | implements one brief in an isolated worktree |
+| Reviewer | `zai-coding-plan/glm-5.3` | advisory post-gate review of passing candidates (findings, never verdicts) |
 
-Both tiers are CLI flags (`--planner-model`, `--model`, `--no-planner`). Always pass
-models explicitly: OpenCode's default (`glm-5.3-highspeed`) is not in the plan and
-fails after ~70s of retries.
+All passed explicitly (`--planner-model`, `--model`, `--reviewer-model`;
+`--no-planner` / `--no-review` to skip). Never trust harness defaults:
+OpenCode's default (`glm-5.3-highspeed`) is not in the plan and fails after
+~70s of retries.
 
 ## Tickets and commits
 

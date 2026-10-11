@@ -12,6 +12,16 @@ npm run typecheck
 
 Pass: exit 0. Required for every change, no exceptions.
 
+## Gate 0.5 — structured-output parser contract (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-parse.mjs
+```
+
+Pins the JSON extraction rules for planner briefs and reviewer observations
+(prose-tolerant scanning, cycling, rejection shapes) without spending model tokens.
+Required whenever `src/parse.ts` changes.
+
 ## Gate 1 — fixture baseline (seconds)
 
 ```bash
@@ -36,6 +46,9 @@ fresh fixture, then asserts on the artifacts:
 - every diff is non-empty (`diffBytes > 0` — the NO-OP rule, AGENTS.md #7),
 - every gate passed,
 - the planner produced briefs (`planner.ok`, no fallback),
+- every passing candidate was reviewed: `review.json` on disk, `review.ok`, observations
+  well-formed with severity in {info, concern, blocker-advisory} (T-001),
+- failing candidates were NOT reviewed — gates decide, review is advisory,
 - the canonical repo is clean afterward (`git status --short` empty, only `main` in
   `worktree list`, no `swarm/*` branches left),
 - no stray fixture files in this repo directory (the contamination check from the

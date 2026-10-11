@@ -50,6 +50,15 @@ try {
 }
 ok(git(fixture, 'status', '--porcelain').trim() === '', 'fixture working tree clean after generation')
 
+section('Gate 0.5 — structured-output parser contract')
+try {
+  run(process.execPath, [join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs'), join(root, 'scripts', 'check-parse.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'parser self-check exit 0')
+} catch (e) {
+  fail(`parser self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
@@ -88,6 +97,16 @@ for (const c of report.candidates) {
   ok(c.diffBytes > 0, `${c.id}: diff non-empty (${c.diffBytes} bytes)`)
   ok(c.gates.length >= 2 && c.gates.every((g) => g.passed), `${c.id}: all gates pass (${c.gates.map((g) => g.name).join('+')})`)
   ok(!c.error, `${c.id}: no candidate error`)
+
+  const reviewPath = join(runDir, c.id, 'review.json')
+  if (c.passedAllGates) {
+    ok(c.review?.ok === true, `${c.id}: review parsed (attempts=${c.review?.attempts})`)
+    ok(existsSync(reviewPath), `${c.id}: review artifact on disk`)
+    const severitiesOk = (c.review?.observations ?? []).every((o) => typeof o.finding === 'string' && ['info', 'concern', 'blocker-advisory'].includes(o.severity))
+    ok(severitiesOk && (c.review?.observations.length ?? 0) > 0, `${c.id}: observations well-formed (${c.review?.observations.length})`)
+  } else {
+    ok(!existsSync(reviewPath) && c.review === undefined, `${c.id}: not reviewed (gates decide; review is advisory)`)
+  }
 }
 
 // ---------- hygiene: canonical repo untouched, no contamination, disposal ----------
