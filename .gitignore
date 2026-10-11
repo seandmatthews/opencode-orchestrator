@@ -1,4 +1,5 @@
 node_modules/
 *.log
-.zcode/
+.zcode/*
+!.zcode/workflows/
 *.tsbuildinfo
