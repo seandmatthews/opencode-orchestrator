@@ -1,0 +1,24 @@
+{
+  "name": "opencode-orchestrator",
+  "version": "0.1.0",
+  "description": "Inference Refinery stage 0: deterministic fan-out of headless worker agents across isolated git worktrees with machine gates.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "demo": "node scripts/demo-target.mjs",
+    "skeleton": "tsx src/cli.ts",
+    "verify": "node scripts/verify.mjs fast",
+    "verify:full": "node scripts/verify.mjs full"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "opencode-ai": "^1.18.35"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

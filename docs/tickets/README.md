@@ -1,0 +1,41 @@
+# Tickets
+
+One file per ticket: `T-NNN-slug.md`. Sequential two-digit numbers, never reused.
+One ticket = one mergeable change-set. The durable record is the ticket file; there is
+no separate tracker.
+
+Format (matches the pigeon-simulator / dnd-campaign-generator convention):
+
+```markdown
+# T-NNN — Title
+
+**Status:** proposed | doing | done | blocked | superseded (T-YYY)
+**Category:** engine | adapters | verification | docs | ops
+**Value (1-5):** n · **Risk (1-5):** n
+**Depends on:** —
+
+## What
+## Why
+## Acceptance criteria
+- [ ] each criterion names the gate or check that pins it
+## Landed
+(added when done: what actually changed, deviations, measured gate numbers)
+## Verification
+(references into VERIFICATION.md gates)
+```
+
+Rules:
+
+- Acceptance criteria are test-nameable. Human-judgement items say so explicitly and
+  name the manual check.
+- Status lives in the ticket **and** in the index below, updated in the same change.
+- `done` tickets keep their file with a filled `## Landed` section. If a ticket is
+  abandoned or superseded, say so in its status — history stays.
+- Every feature change extends `VERIFICATION.md` in the same change-set.
+
+## Index
+
+| ID | Ticket | Priority | Status |
+|---|---|---|---|
+| T-001 | Reviewer tier: advisory post-gate review | high | proposed |
+| T-002 | Run artifact cleanup automation | high | proposed |
