@@ -9,7 +9,7 @@ moves a milestone.
 | 0 | Walking skeleton: planner→briefs→N worktree workers→gates→report | **done 2026-10-10** (verified: vague goal → 3 diverse briefs → 3 passing implementations) |
 | 0.5 | Reviewer tier: planner-model reads surviving diffs, produces advisory observations (gates still decide) | done 2026-10-11 — T-001 |
 | 0.5 | Run artifact cleanup automation (worktrees/branches; checkout lock deferred) | done 2026-10-10 — T-002 |
-| 1 | Durable local control plane: SQLite, job DAG, attempts, retries, approval gates, event log | spec Milestone 1 |
+| 1 | Durable local control plane: SQLite, job DAG, attempts, retries, approval gates, event log | first slice landed 2026-10-11 (SQLite state + event log — T-003); remaining: job DAG, attempts, retries, approvals, scheduler |
 | 2 | Context system: ContextPlan/ContextPacket, budgets, distillation, lineage | spec Milestone 2 — required before large fan-in |
 | 3 | Windows reliability: worktree leases/GC, process-tree kill hardening, crash recovery | spec Milestone 3 |
 | 4 | Probe layer: command/test/benchmark/screenshot probes, then Godot | spec Milestone 4 |
