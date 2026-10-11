@@ -19,11 +19,15 @@ npm run verify           # fast tier (typecheck + fixture)
 npm run verify:full      # full tier: real e2e run, 2 candidates, ~3-5 min, model tokens
 npm run skeleton -- --repo C:\swarm\demo-target --goal "..." --gate "build=node build.js"
 npm run clean -- --run <runId>   # dispose a run's worktrees + swarm/* branches (evidence kept)
+node node_modules/tsx/dist/cli.mjs src/lock.ts acquire <repo>   # hold the checkout lock by hand (release to drop)
 ```
 
 Runs write artifacts to `C:\swarm\<runId>\` (`report.json`, per-candidate `worker.log`
 and `diff.patch`, worktrees under `wt/` unless `--clean`). Post-run disposal goes
-through `npm run clean`, never hand-rolled shell loops.
+through `npm run clean`, never hand-rolled shell loops. Runs and clean serialize per
+target repo through the checkout lock (`src/lock.ts`); a refused lock names its
+holder, and only `--force-lock` takes one from a suspected-stale holder — nothing
+ever reaps a lock automatically.
 
 ## Ground rules (non-negotiable)
 
@@ -72,6 +76,8 @@ src/
   runner.ts             planner phase + candidate fan-out + report
   cli.ts                flag parsing, worker registry, run header/summary
   clean.ts              run artifact disposal: worktrees + swarm/* branches, evidence kept
+  lock.ts               cross-process checkout lock + its acquire/release CLI
+  store/                durable run records: SQLite (runs/candidates/gate_results/events)
 scripts/
   demo-target.mjs       generates the throwaway fixture repo (baseline passes build+test)
   diag-pwd.mjs          harness directory-resolution probe

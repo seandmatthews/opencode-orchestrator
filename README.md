@@ -78,6 +78,18 @@ Exit code is 0 whenever the run completes mechanically; `report.json` carries ve
 evidence (`report.json`, `diff.patch`, logs). A worktree holding uncommitted changes
 is refused unless `--force` — un-captured changes may be the only copy.
 
+Runs and clean serialize per target repo through a cross-process checkout lock
+(`src/lock.ts`, `fs.openSync(wx)`, zero dependencies): a second run or clean on the
+same repo refuses before doing anything, naming the holder pid, its age, and the
+lock file under `<run-root>\locks\`. Locks are never auto-reaped — a hard-killed run
+leaves one blocking until a human re-runs with `--force-lock`, or takes/releases it
+directly:
+
+```bash
+node node_modules/tsx/dist/cli.mjs src/lock.ts acquire "C:\swarm\demo-target"
+node node_modules/tsx/dist/cli.mjs src/lock.ts release "C:\swarm\demo-target"
+```
+
 ## Docs
 
 - [AGENTS.md](AGENTS.md) — how to work in this repo; read this first

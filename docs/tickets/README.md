@@ -40,5 +40,5 @@ Rules:
 | T-001 | Reviewer tier: advisory post-gate review | high | done 2026-10-11 |
 | T-002 | Run artifact cleanup automation | high | done 2026-10-10 |
 | T-003 | Durable run records: SQLite store + event log | high | done 2026-10-11 |
-| T-004 | Cross-run checkout lock: runs and cleanup serialize per target repo | medium | proposed |
+| T-004 | Cross-run checkout lock: runs and cleanup serialize per target repo | medium | done 2026-10-11 |
 | T-005 | Integration replay: re-verify a survivor's diff at current HEAD | medium | proposed |
