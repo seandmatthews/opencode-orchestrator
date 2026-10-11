@@ -65,6 +65,13 @@ npm run clean -- --all            # same, for every run except the newest
 Artifacts land in `C:\swarm\<runId>\`: `report.json`, per-candidate `worker.log` and
 `diff.patch`, and the candidate worktrees themselves (unless `--clean`).
 
+Every finished run is also persisted as durable records into a cross-run SQLite
+store (default `C:\swarm\refinery.db`, override with `--db <path>`): `runs`,
+`candidates`, `gate_results`, and an append-only `events` stream
+(`src/store/`, `node:sqlite`, zero dependencies). Persistence records verdicts
+and never influences them — a failed DB write prints one loud line and the run
+is otherwise unaffected.
+
 Exit code is 0 whenever the run completes mechanically; `report.json` carries verdicts.
 
 `npm run clean` disposes a run's git worktrees and `swarm/*` branches but never its

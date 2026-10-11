@@ -1,0 +1,152 @@
+{
+  "runId": "20261011022419",
+  "repo": "C:\\swarm\\demo-target",
+  "baseSha": "4eabbb245b7f876b04fd4828dd729c7c624ddbe3",
+  "goal": "Make the demo-target calculator more capable for flight-sim style math.",
+  "model": "zai-coding-plan/glm-5.3-flash",
+  "planner": {
+    "model": "zai-coding-plan/glm-5.3",
+    "ok": true,
+    "attempts": 1,
+    "durationMs": 70038,
+    "briefs": [
+      "CONTEXT: Repo 'demo-target' is a dependency-free CommonJS Node calculator. calc.js currently exports only add(a, b). Tests are plain node:assert checks in test.js (run with: node test.js). build.js is a smoke check (run with: node build.js). Keep add and its existing tests intact; add no dependencies.\n\nTASK: Extend calc.js with flat, pure, scalar functions for flight-sim unit conversion and performance math, each added to module.exports alongside add.\n\nFUNCTIONS (exact names and formulas):\n1. knotsToMps(knots) returns knots * 1852 / 3600\n2. mpsToKnots(mps) returns mps * 3600 / 1852\n3. feetToMeters(feet) returns feet * 0.3048\n4. metersToFeet(meters) returns meters / 0.3048\n5. isaTempCelsius(altitudeFt) returns 15 - 0.0019812 * altitudeFt (standard lapse rate; no tropopause handling needed)\n6. loadFactor(bankDeg) returns 1 / Math.cos(bankDeg * Math.PI / 180)\n7. turnRadiusMeters(speedMps, bankDeg) returns speedMps ** 2 / (9.80665 * Math.tan(bankDeg * Math.PI / 180))\n8. turnRateRadPerSec(speedMps, bankDeg) returns 9.80665 * Math.tan(bankDeg * Math.PI / 180) / speedMps\n\nTESTS: Append to test.js a helper near(actual, expected, tol, label) that does assert.ok(Math.abs(actual - expected) <= tol, label). Cases to add: knotsToMps(100) ~= 51.4444 (tol 1e-3); feetToMeters(1000) = 304.8 (tol 1e-9); isaTempCelsius(10000) ~= -4.812 (tol 0.01); loadFactor(0) = 1 (tol 1e-12); loadFactor(60) = 2 (tol 1e-9); turnRadiusMeters(100, 30) ~= 1766.2 (tol 1.0); turnRateRadPerSec(100, 30) ~= 0.05662 (tol 1e-4); mpsToKnots(knotsToMps(150)) ~= 150 (tol 1e-9).\n\nVERIFY: Run node test.js and node build.js; both must succeed. The diff should touch only calc.js and test.js.",
+      "CONTEXT: Repo 'demo-target' is a dependency-free CommonJS Node calculator. calc.js currently exports only add(a, b) via module.exports = { add } and must keep exporting add unchanged. Tests are plain node:assert checks in test.js (run with: node test.js). build.js is a smoke check (run with: node build.js). Add no dependencies.\n\nTASK: Add wind-triangle math built on a small 2D vector core, namespaced under a flight object. Create a NEW file flight.js (CommonJS) and change calc.js to: const flight = require('./flight.js'); module.exports = { add, flight }.\n\nCONVENTIONS: A 2D vector is an array [east, north]. Headings/courses are compass degrees (0 = north, 90 = east). Wind is specified by the direction it blows FROM.\n\nFUNCTIONS (exact names) exported from flight.js:\n1. vecAdd(a, b) returns [a[0] + b[0], a[1] + b[1]]\n2. vecSub(a, b) returns [a[0] - b[0], a[1] - b[1]]\n3. vecScale(v, k) returns [v[0] * k, v[1] * k]\n4. vecLength(v) returns Math.hypot(v[0], v[1])\n5. normalizeHeading(deg) returns ((deg % 360) + 360) % 360\n6. headingToVec(deg) returns [Math.sin(rad), Math.cos(rad)] with rad = normalizeHeading(deg) * Math.PI / 180\n7. windVector(windFromDeg, windKts) returns vecScale(headingToVec(windFromDeg + 180), windKts) (the direction the wind blows TOWARD)\n8. windCorrectionAngleDeg(tasKts, courseDeg, windFromDeg, windKts) returns Math.asin(crosswind / tasKts) in degrees, where crosswind = windKts * Math.sin((windFromDeg - courseDeg) * Math.PI / 180); positive means crab right, negative means crab left\n9. groundSpeedKts(tasKts, courseDeg, windFromDeg, windKts): wca = windCorrectionAngleDeg(...); groundVec = vecAdd(vecScale(headingToVec(courseDeg + wca), tasKts), windVector(windFromDeg, windKts)); return vecLength(groundVec)\n\nTESTS: Append to test.js a helper near(actual, expected, tol, label) using assert.ok(Math.abs(actual - expected) <= tol, label), plus assert.deepEqual for vectors. Destructure with const { flight } = require('./calc.js'). Cases: vecAdd([1,2],[3,4]) deep-equals [4,6]; vecScale([2,-1], 3) deep-equals [6,-3]; vecLength([3,4]) = 5 (tol 1e-12); headingToVec(90) ~= [1, 0] (tol 1e-9 each component); normalizeHeading(-30) = 330; normalizeHeading(370) = 10; windCorrectionAngleDeg(100, 90, 0, 20) ~= -11.5370 (tol 1e-3, crab left into a north wind while flying east); groundSpeedKts(100, 90, 0, 20) ~= 97.9796 (tol 1e-2, pure crosswind: sqrt(100*100 - 20*20)); groundSpeedKts(100, 90, 90, 20) = 80 (tol 1e-9, direct headwind); groundSpeedKts(100, 90, 270, 20) = 120 (tol 1e-9, direct tailwind).\n\nVERIFY: Run node test.js and node build.js; both must succeed. The diff touches calc.js (small rewrite of the exports line), new file flight.js, and test.js additions."
+    ],
+    "fallbackUsed": false,
+    "rawOutputPath": "C:\\swarm\\verify\\20261011022419\\planner-raw.txt"
+  },
+  "startedAt": "2026-10-11T02:24:20.001Z",
+  "finishedAt": "2026-10-11T02:27:15.554Z",
+  "candidates": [
+    {
+      "id": "c01",
+      "workerId": "opencode",
+      "model": "zai-coding-plan/glm-5.3-flash",
+      "brief": "CONTEXT: Repo 'demo-target' is a dependency-free CommonJS Node calculator. calc.js currently exports only add(a, b). Tests are plain node:assert checks in test.js (run with: node test.js). build.js is a smoke check (run with: node build.js). Keep add and its existing tests intact; add no dependencies.\n\nTASK: Extend calc.js with flat, pure, scalar functions for flight-sim unit conversion and performance math, each added to module.exports alongside add.\n\nFUNCTIONS (exact names and formulas):\n1. knotsToMps(knots) returns knots * 1852 / 3600\n2. mpsToKnots(mps) returns mps * 3600 / 1852\n3. feetToMeters(feet) returns feet * 0.3048\n4. metersToFeet(meters) returns meters / 0.3048\n5. isaTempCelsius(altitudeFt) returns 15 - 0.0019812 * altitudeFt (standard lapse rate; no tropopause handling needed)\n6. loadFactor(bankDeg) returns 1 / Math.cos(bankDeg * Math.PI / 180)\n7. turnRadiusMeters(speedMps, bankDeg) returns speedMps ** 2 / (9.80665 * Math.tan(bankDeg * Math.PI / 180))\n8. turnRateRadPerSec(speedMps, bankDeg) returns 9.80665 * Math.tan(bankDeg * Math.PI / 180) / speedMps\n\nTESTS: Append to test.js a helper near(actual, expected, tol, label) that does assert.ok(Math.abs(actual - expected) <= tol, label). Cases to add: knotsToMps(100) ~= 51.4444 (tol 1e-3); feetToMeters(1000) = 304.8 (tol 1e-9); isaTempCelsius(10000) ~= -4.812 (tol 0.01); loadFactor(0) = 1 (tol 1e-12); loadFactor(60) = 2 (tol 1e-9); turnRadiusMeters(100, 30) ~= 1766.2 (tol 1.0); turnRateRadPerSec(100, 30) ~= 0.05662 (tol 1e-4); mpsToKnots(knotsToMps(150)) ~= 150 (tol 1e-9).\n\nVERIFY: Run node test.js and node build.js; both must succeed. The diff should touch only calc.js and test.js.",
+      "workspacePath": "C:\\swarm\\verify\\20261011022419\\wt\\c01",
+      "workerOk": true,
+      "workerTimedOut": false,
+      "workerDurationMs": 33427,
+      "diffPath": "C:\\swarm\\verify\\20261011022419\\c01\\diff.patch",
+      "diffBytes": 2095,
+      "gates": [
+        {
+          "name": "build",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 272,
+          "outputTail": "build ok"
+        },
+        {
+          "name": "test",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 264,
+          "outputTail": "tests ok"
+        }
+      ],
+      "passedAllGates": true,
+      "review": {
+        "ok": true,
+        "attempts": 1,
+        "model": "zai-coding-plan/glm-5.3",
+        "observations": [
+          {
+            "finding": "All 8 new functions match the brief's exact names and formulas, and all are exported alongside the untouched add().",
+            "severity": "info",
+            "evidence": "calc.js lines 5-35 implement each formula verbatim (e.g. isaTempCelsius returns 15 - 0.0019812 * altitudeFt; turnRadiusMeters uses 9.80665 * tan(bankDeg * PI / 180)); module.exports lines 37-47 includes add plus all 8."
+          },
+          {
+            "finding": "Scope is respected: only calc.js and test.js are modified, and the original add tests remain intact.",
+            "severity": "info",
+            "evidence": "git status --porcelain shows only 'M calc.js' and 'M test.js'; test.js lines 13-15 preserve the three original assert.equal calls for add."
+          },
+          {
+            "finding": "Test additions match the brief exactly: near() helper implemented as specified and all 8 required cases present with the exact tolerances given.",
+            "severity": "info",
+            "evidence": "test.js lines 17-28; e.g. near(knotsToMps(100), 51.4444, 1e-3, ...), near(loadFactor(60), 2, 1e-9, ...), round-trip mpsToKnots(knotsToMps(150)) with tol 1e-9."
+          },
+          {
+            "finding": "metersToFeet is exported but has no direct or round-trip test coverage (the brief specified no case for it), so its correctness is unverified by the suite.",
+            "severity": "info",
+            "evidence": "test.js destructures metersToFeet (line 6) but no near() call exercises it; all other exports are tested."
+          },
+          {
+            "finding": "near() failure output includes only the label, omitting actual/expected/tolerance values, which will make future test failures harder to diagnose; this matches the brief's literal spec, so it is a spec limitation rather than a worker error.",
+            "severity": "info",
+            "evidence": "test.js line 17-19: assert.ok(Math.abs(actual - expected) <= tol, label) passes only label as the message."
+          },
+          {
+            "finding": "Functions are pure formulas with no guard for degenerate inputs (bankDeg=90 gives Infinity loadFactor, bankDeg=0 gives Infinity turnRadius via tan(0)=0, speedMps=0 gives NaN turn rate); acceptable per the brief's scalar-formula scope but worth knowing for callers.",
+            "severity": "info",
+            "evidence": "calc.js lines 25-35 rely directly on Math.cos/Math.tan/division with no domain checks; brief specifies exact formulas with no validation requirement."
+          }
+        ],
+        "rawOutputPath": "C:\\swarm\\verify\\20261011022419\\c01\\review-raw.txt"
+      }
+    },
+    {
+      "id": "c02",
+      "workerId": "opencode",
+      "model": "zai-coding-plan/glm-5.3-flash",
+      "brief": "CONTEXT: Repo 'demo-target' is a dependency-free CommonJS Node calculator. calc.js currently exports only add(a, b) via module.exports = { add } and must keep exporting add unchanged. Tests are plain node:assert checks in test.js (run with: node test.js). build.js is a smoke check (run with: node build.js). Add no dependencies.\n\nTASK: Add wind-triangle math built on a small 2D vector core, namespaced under a flight object. Create a NEW file flight.js (CommonJS) and change calc.js to: const flight = require('./flight.js'); module.exports = { add, flight }.\n\nCONVENTIONS: A 2D vector is an array [east, north]. Headings/courses are compass degrees (0 = north, 90 = east). Wind is specified by the direction it blows FROM.\n\nFUNCTIONS (exact names) exported from flight.js:\n1. vecAdd(a, b) returns [a[0] + b[0], a[1] + b[1]]\n2. vecSub(a, b) returns [a[0] - b[0], a[1] - b[1]]\n3. vecScale(v, k) returns [v[0] * k, v[1] * k]\n4. vecLength(v) returns Math.hypot(v[0], v[1])\n5. normalizeHeading(deg) returns ((deg % 360) + 360) % 360\n6. headingToVec(deg) returns [Math.sin(rad), Math.cos(rad)] with rad = normalizeHeading(deg) * Math.PI / 180\n7. windVector(windFromDeg, windKts) returns vecScale(headingToVec(windFromDeg + 180), windKts) (the direction the wind blows TOWARD)\n8. windCorrectionAngleDeg(tasKts, courseDeg, windFromDeg, windKts) returns Math.asin(crosswind / tasKts) in degrees, where crosswind = windKts * Math.sin((windFromDeg - courseDeg) * Math.PI / 180); positive means crab right, negative means crab left\n9. groundSpeedKts(tasKts, courseDeg, windFromDeg, windKts): wca = windCorrectionAngleDeg(...); groundVec = vecAdd(vecScale(headingToVec(courseDeg + wca), tasKts), windVector(windFromDeg, windKts)); return vecLength(groundVec)\n\nTESTS: Append to test.js a helper near(actual, expected, tol, label) using assert.ok(Math.abs(actual - expected) <= tol, label), plus assert.deepEqual for vectors. Destructure with const { flight } = require('./calc.js'). Cases: vecAdd([1,2],[3,4]) deep-equals [4,6]; vecScale([2,-1], 3) deep-equals [6,-3]; vecLength([3,4]) = 5 (tol 1e-12); headingToVec(90) ~= [1, 0] (tol 1e-9 each component); normalizeHeading(-30) = 330; normalizeHeading(370) = 10; windCorrectionAngleDeg(100, 90, 0, 20) ~= -11.5370 (tol 1e-3, crab left into a north wind while flying east); groundSpeedKts(100, 90, 0, 20) ~= 97.9796 (tol 1e-2, pure crosswind: sqrt(100*100 - 20*20)); groundSpeedKts(100, 90, 90, 20) = 80 (tol 1e-9, direct headwind); groundSpeedKts(100, 90, 270, 20) = 120 (tol 1e-9, direct tailwind).\n\nVERIFY: Run node test.js and node build.js; both must succeed. The diff touches calc.js (small rewrite of the exports line), new file flight.js, and test.js additions.",
+      "workspacePath": "C:\\swarm\\verify\\20261011022419\\wt\\c02",
+      "workerOk": true,
+      "workerTimedOut": false,
+      "workerDurationMs": 58901,
+      "diffPath": "C:\\swarm\\verify\\20261011022419\\c02\\diff.patch",
+      "diffBytes": 2936,
+      "gates": [
+        {
+          "name": "build",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 205,
+          "outputTail": "build ok"
+        },
+        {
+          "name": "test",
+          "passed": true,
+          "exitCode": 0,
+          "durationMs": 201,
+          "outputTail": "tests ok"
+        }
+      ],
+      "passedAllGates": true,
+      "review": {
+        "ok": true,
+        "attempts": 1,
+        "model": "zai-coding-plan/glm-5.3",
+        "observations": [
+          {
+            "finding": "flight.js transcribes all nine required functions verbatim from the brief, including the compass conventions ([sin, cos] for headingToVec, ((deg%360)+360)%360 normalization, windVector using windFromDeg+180).",
+            "severity": "info",
+            "evidence": "Read flight.js:1-51 and compared each function line-by-line against the FUNCTIONS section of the brief; all signatures, formulas, and exports match."
+          },
+          {
+            "finding": "Numeric expectations are analytically correct: wca(100,90,0,20)=asin(-0.2)≈-11.537deg (crab left into north wind flying east), pure-crosswind GS=√(100²−20²)≈97.9796, and headwind/tailwind cases resolve to exactly 80/120 via the vector composition.",
+            "severity": "info",
+            "evidence": "Hand-computed each test case using the implemented formulas in flight.js:30-39; consistent with test.js:21-24 expectations and tolerances."
+          },
+          {
+            "finding": "windCorrectionAngleDeg returns NaN when windKts exceeds tasKts (asin argument outside [-1,1]) and groundSpeedKts propagates it; also NaN/Infinity for tasKts=0. The brief specifies this exact formula, so no guard was required - latent edge case only.",
+            "severity": "info",
+            "evidence": "flight.js:31-32 computes Math.asin(crosswind / tasKts) with no domain check; brief's spec item 8 dictates this expression exactly."
+          },
+          {
+            "finding": "test.js requires ./calc.js on two separate lines (line 2 for add, line 3 for flight) instead of one combined destructure; this literally follows the brief's instruction ('Destructure with const { flight } = require') so it is compliant, just a minor style nit.",
+            "severity": "info",
+            "evidence": "test.js:2-3 shows two consecutive require destructure statements of the same module."
+          },
+          {
+            "finding": "Exported vecSub and windVector have no direct assertions; both are exercised indirectly through groundSpeedKts. The brief's test list omitted them, so coverage matches spec.",
+            "severity": "info",
+            "evidence": "test.js:13-24 contains no vecSub or windVector cases; flight.js:37 uses both inside groundSpeedKts, which is tested at three wind angles."
+          }
+        ],
+        "rawOutputPath": "C:\\swarm\\verify\\20261011022419\\c02\\review-raw.txt"
+      }
+    }
+  ]
+}

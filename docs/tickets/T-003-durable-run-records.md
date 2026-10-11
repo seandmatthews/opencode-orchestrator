@@ -1,6 +1,6 @@
 # T-003 — Durable run records: SQLite store + event log
 
-**Status:** proposed
+**Status:** done 2026-10-11
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 2
 **Depends on:** —
@@ -90,41 +90,89 @@ This slice uses only DatabaseSync open/exec/prepare semantics.
 
 ## Acceptance criteria
 
-- [ ] `ingest` persists the fixture report into `runs`/`candidates`/`gate_results`
+- [x] `ingest` persists the fixture report into `runs`/`candidates`/`gate_results`
       with row counts and field values exactly matching the report — pinned by a
       new fast-tier gate (new VERIFICATION.md section, modeled on Gate 1.5's
       throwaway-sandbox pattern, `scripts/verify.mjs:62-143`): fresh temp DB →
       ingest `scripts/fixtures/report-real.json` → assert exact row counts and
       field values. (New fast-tier gate: store ingest)
-- [ ] `events` is append-only: a second ingest of the same report appends a new
+- [x] `events` is append-only: a second ingest of the same report appends a new
       block of event rows and leaves every prior row (seq, type, at, payload)
       unchanged, while `runs`/`candidates`/`gate_results` are idempotent by
       natural key — pinned by the same gate, second ingest against the same temp
       DB. (New fast-tier gate: store ingest)
-- [ ] `PRAGMA integrity_check` returns `ok` on the written DB — pinned by the same
+- [x] `PRAGMA integrity_check` returns `ok` on the written DB — pinned by the same
       gate. (New fast-tier gate: store ingest)
-- [ ] Persistence is read-only over evidence: after ingest the source report
+- [x] Persistence is read-only over evidence: after ingest the source report
       fixture is byte-identical and no artifact file is moved, modified, or
       deleted — pinned by the same gate (T-002 rule: evidence is never deleted,
       `src/clean.ts:6-8`). (New fast-tier gate: store ingest)
-- [ ] A failed DB write is loud but non-fatal: with the DB path unopenable (e.g.
+- [x] A failed DB write is loud but non-fatal: with the DB path unopenable (e.g.
       an existing directory), the ingest path completes without throwing out of
       the run, exit code unchanged, one loud persistence-failure line printed —
       pinned by the same gate exercising the failure path. (New fast-tier gate:
       store ingest)
-- [ ] No behavior change to the pipeline: exit code, stdout verdicts, and
+- [x] No behavior change to the pipeline: exit code, stdout verdicts, and
       `report.json` content are unchanged with the hook in place — pinned by one
       `npm run verify:full` run recorded in this ticket's Landed section
       (`src/cli.ts` is the run entry point, so a real run is the honest
       no-behavior-change proof). Gate 2 is **not** permanently extended: the
       invariant is pinned by the fast-tier gate above, and spending model tokens
       on every verify for it buys nothing. (Gate 2, once)
-- [ ] Clean semantics untouched — `npm run verify` (which includes Gate 1.5) stays
+- [x] Clean semantics untouched — `npm run verify` (which includes Gate 1.5) stays
       ALL GREEN with the hook in place; the structural-safety argument (the DB is
       a bare file under the run root; clean sweeps only `/^\d{14}$/` directories,
       `src/clean.ts:249-252`) recorded in VERIFICATION.md. (Gate 1.5)
-- [ ] VERIFICATION.md gains the new gate section and the node:sqlite experimental
+- [x] VERIFICATION.md gains the new gate section and the node:sqlite experimental
       caveat in the same change-set (AGENTS.md #6). (Gate 0 + change-set review)
+
+## Landed
+
+2026-10-11, in one change-set. No deviations from the ticket's What.
+
+- `src/store/index.ts` — schema v1: exactly the four in-scope tables
+  (`runs`, `candidates`, `gate_results`, `events`) on `node:sqlite`
+  `DatabaseSync`, zero npm dependencies (`package.json` untouched). `ingest`
+  is the only DB writer; state tables upsert by natural key inside one
+  transaction, `events` appends only. Event `at` values derive from the
+  report's own stamps and durations (`startedAt` + `workerDurationMs`), so
+  re-ingest is deterministic; vocabulary is `RUN_CREATED` / `GATE_FAILED` /
+  `CANDIDATE_ELIMINATED` only. One judgment call the ticket left open: the
+  artifacts dir is not a `RunReport` field, so `runs.report_path` is recovered
+  from the report's own artifact paths (`planner-raw.txt`, `diff.patch`,
+  `review-raw.txt`); null when the report carries none.
+- `src/cli.ts` — one call site immediately after `runSkeleton` returns, wrapped
+  log-and-continue: a failed write prints one loud `PERSISTENCE FAILED` line and
+  changes nothing else. New `--db <path>` flag, default `C:\swarm\refinery.db`.
+- `scripts/fixtures/report-real.json` — verbatim byte-identical copy of
+  `C:\swarm\verify\20261011022419\report.json` (pinned by the gate's hash check).
+- `scripts/check-store.mjs` + Gate 1.6 in `scripts/verify.mjs` — 37 assertions:
+  exact rows/fields vs the fixture (including `planner_json`/`review_json`
+  round-trips and the literal report_path), event vocabulary + derived `at` on
+  an eliminated-candidate variant of the fixture, re-ingest idempotency +
+  append-only events, `integrity_check` ok, fixture byte-identical after
+  ingest, and both throwing failure paths (DB path is a directory; parent
+  directory missing).
+- VERIFICATION.md — Gate 1.6 section (with the clean-structural-safety argument)
+  and Known issues #7 (`node:sqlite` experimental warning; named fallback
+  `better-sqlite3` would need its own decisions.md entry).
+- README.md — durable-records paragraph (`--db`, default path, records-verdicts
+  posture).
+
+Gates: Gate 0 green; Gate 1 green; Gate 0.5 green; Gate 1.5 ALL GREEN (clean
+semantics untouched — the DB is a bare file and clean `--all` sweeps only
+`/^\d{14}$/` directories); Gate 1.6 ALL GREEN; `npm run verify` ALL GREEN.
+
+No-behavior-change proof (Gate 2, once): `npm run verify:full` ALL GREEN —
+run 20261011180320, 2 candidates, planner 2 briefs in 44s (1 attempt), both
+candidates PASS build+test with non-empty diffs (1659/2040 bytes), 6+5 advisory
+review observations, canonical repo clean afterward, clean command exit 0.
+Stdout verdicts and exit code are exactly the pre-T-003 shape (the hook is
+silent on success; the only new output anywhere is the benign `node:sqlite`
+ExperimentalWarning on stderr, documented as Known issues #7), and the run was
+recorded to `C:\swarm\refinery.db` through the real CLI path (1 run row with the
+correct `report_path`, 2 candidate rows, 4 gate_result rows, 1 `RUN_CREATED`
+event, `integrity_check` ok).
 
 ## Verification
 

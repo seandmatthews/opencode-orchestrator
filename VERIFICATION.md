@@ -58,6 +58,49 @@ disposed (per-item results), and disposed under `--force` (no report.json, so th
 `wt/`-discovery path is exercised too); `--all` disposes the older run and leaves
 the newest untouched.
 
+## Gate 1.6 — store ingest (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs
+```
+
+Pins the durable run records (T-003): `src/store/index.ts` ingests a finished
+`RunReport` into SQLite (`node:sqlite`, schema v1: `runs`, `candidates`,
+`gate_results`, `events`) — zero npm dependencies. One call site in `src/cli.ts`
+immediately after `runSkeleton` returns, behind `--db <path>` (default
+`C:\swarm\refinery.db`). Failure policy is log-and-continue: a failed DB write
+prints one loud `PERSISTENCE FAILED` line and never changes the run's exit code,
+stdout verdicts, or artifacts — persistence records verdicts, it never
+influences them.
+
+The gate ingests the vendored real report (`scripts/fixtures/report-real.json`,
+a verbatim copy of run 20261011022419) into a fresh temp DB and asserts:
+
+- exact row counts and field values across `runs`/`candidates`/`gate_results`,
+  including `planner_json`/`review_json` round-trips,
+- `events` semantics: an all-pass report emits exactly `RUN_CREATED` at the
+  report's own `startedAt`; a modified report with a failed gate and an
+  eliminated candidate emits `GATE_FAILED` + `CANDIDATE_ELIMINATED` with `at`
+  derived from `startedAt` + the candidate's worker duration (never
+  `Date.now()`, so re-ingest is deterministic),
+- re-ingest of the same report leaves `runs`/`candidates`/`gate_results`
+  idempotent by natural key while `events` appends and never rewrites prior rows,
+- `PRAGMA integrity_check` returns `ok`,
+- the source fixture is byte-identical after ingestion (persistence is
+  read-only over evidence — T-002 rule),
+- ingest into an unopenable DB path (existing directory, or missing parent
+  directory) throws — the loud, non-fatal failure the CLI catches.
+
+Structural safety from cleanup: the DB is a bare file under the run root
+(`C:\swarm\refinery.db`); clean `--all` sweeps only directories matching
+`/^\d{14}$/` (`src/clean.ts:249-252`), never a bare file, so the store is
+outside every cleanup path (Gate 1.5 stays green with the hook in place).
+
+Not pinned here and not permanently required: pipeline no-behavior-change
+(exit code, stdout verdicts, `report.json` content) was proven once by a real
+`npm run verify:full` run recorded in T-003's Landed section. Gate 2 is not
+extended for the store — spending model tokens on every verify buys nothing.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
@@ -120,6 +163,13 @@ get trusted with worktrees — see Known issues #1.
    write tools in the target repo cwd. Mechanism-level capability restriction lands
    with the worker permission model (spec §14). Until then, planner output and the
    repo state after Gate 2 are the tripwire.
+7. **`node:sqlite` is experimental on Node 22** — first use emits
+   `ExperimentalWarning: SQLite is an experimental feature and might change at any
+   time` on stderr (benign), and the API may churn across Node minors. Named
+   fallback: `better-sqlite3` — a native dependency that would need its own
+   docs/decisions.md entry against the 2026-10-10 "TypeScript on Node 22" decision.
+   `src/store/index.ts` uses only DatabaseSync open/exec/prepare semantics.
+   Gate 1's stderr therefore contains this warning; it is not a failure.
 
 ## Definition of done (per ticket)
 

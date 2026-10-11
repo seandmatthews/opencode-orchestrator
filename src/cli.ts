@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CommandGate } from './gate/command.js'
 import { runSkeleton } from './runner.js'
+import { ingest } from './store/index.js'
 import type { WorkerAdapter } from './types.js'
 import { WorktreeProvider } from './workspace/worktree.js'
 import { OpenCodeWorker } from './worker/opencode.js'
@@ -31,6 +32,8 @@ Options:
   --base <ref>             Base commit: branch or SHA (default: HEAD)
   --gate "name=command"    Machine gate; repeatable (e.g. --gate "build=node build.js")
   --run-root <path>        Where runs live (default: C:\\swarm)
+  --db <path>              SQLite DB for durable run records (default:
+                           C:\\swarm\\refinery.db)
   --timeout-min <n>        Per-worker wall-clock limit in minutes (default: 15)
   --clean                  Dispose candidate workspaces after evidence capture
   --opencode-bin <path>    Override the opencode executable path
@@ -50,6 +53,7 @@ interface Options {
   concurrency: number
   base: string
   runRoot: string
+  db: string
   timeoutMs: number
   clean: boolean
   gates: { name: string; command: string }[]
@@ -68,6 +72,7 @@ function parseArgs(argv: string[]): Options {
     concurrency: 0,
     base: 'HEAD',
     runRoot: 'C:\\swarm',
+    db: 'C:\\swarm\\refinery.db',
     timeoutMs: 15 * 60_000,
     clean: false,
     gates: [],
@@ -96,6 +101,7 @@ function parseArgs(argv: string[]): Options {
       case '--concurrency': opts.concurrency = Number(value()); break
       case '--base': opts.base = value(); break
       case '--run-root': opts.runRoot = value(); break
+      case '--db': opts.db = value(); break
       case '--timeout-min': opts.timeoutMs = Number(value()) * 60_000; break
       case '--clean': opts.clean = true; break
       case '--opencode-bin': opts.opencodeBin = value(); break
@@ -174,6 +180,14 @@ async function main(): Promise<void> {
     artifactsDir,
     cleanWorkspaces: opts.clean,
   })
+
+  // Persistence records verdicts, never influences them: a failed DB write is
+  // loud but must not change the run's exit code, stdout verdicts, or artifacts.
+  try {
+    ingest(report, opts.db)
+  } catch (e) {
+    console.error(`PERSISTENCE FAILED: run ${report.runId} was not recorded to ${opts.db}: ${e instanceof Error ? e.message : String(e)}`)
+  }
 
   console.log('')
   console.log('=== RUN SUMMARY ===')

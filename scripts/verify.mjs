@@ -142,6 +142,16 @@ ok(cgit('branch', '--list', 'swarm/wt-c05').trim() !== '', '--all kept the newes
 code = expectClean(0, 'final sweep', ['--run', '20991010120003', '--run-root', cleanRuns, '--force'])
 ok(code === 0 && worktreeCount() === 1 && swarmBranches() === '', 'sandbox fully disposed after the checks')
 
+// ---------- Gate 1.6: store ingest (T-003) ----------
+section('Gate 1.6 — store ingest (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-store.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'store ingest self-check exit 0')
+} catch (e) {
+  fail(`store ingest self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
