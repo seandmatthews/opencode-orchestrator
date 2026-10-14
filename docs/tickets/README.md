@@ -47,3 +47,4 @@ Rules:
 | T-008 | Approval gates: durable records, `approvals` decide CLI, pending queue | high | proposed |
 | T-009 | Deterministic scheduler core: minimal job spec, DAG-driven execution | high | proposed |
 | T-010 | Startup reconciliation: abandoned attempts, process-tree sweep, retry disposition | high | proposed |
+| T-011 | In-run process-tree termination hardening (spec §15.3) | high | proposed |
