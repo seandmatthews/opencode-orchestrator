@@ -42,3 +42,4 @@ Rules:
 | T-003 | Durable run records: SQLite store + event log | high | done 2026-10-11 |
 | T-004 | Cross-run checkout lock: runs and cleanup serialize per target repo | medium | done 2026-10-11 |
 | T-005 | Integration replay: re-verify a survivor's diff at current HEAD | medium | done 2026-10-11 |
+| T-006 | Job DAG: phase/job tables, DAG validation, `dag` dump CLI | high | proposed |
