@@ -44,3 +44,4 @@ Rules:
 | T-005 | Integration replay: re-verify a survivor's diff at current HEAD | medium | done 2026-10-11 |
 | T-006 | Job DAG: phase/job tables, DAG validation, `dag` dump CLI | high | proposed |
 | T-007 | Attempt records + bounded same-config retry | high | proposed |
+| T-008 | Approval gates: durable records, `approvals` decide CLI, pending queue | high | proposed |
