@@ -48,3 +48,4 @@ Rules:
 | T-009 | Deterministic scheduler core: minimal job spec, DAG-driven execution | high | proposed |
 | T-010 | Startup reconciliation: abandoned attempts, process-tree sweep, retry disposition | high | proposed |
 | T-011 | In-run process-tree termination hardening (spec §15.3) | high | proposed |
+| T-012 | Context system core: ContextPlan/ContextPacket, budgets, selectors, fingerprints, `context inspect` CLI | high | proposed |
