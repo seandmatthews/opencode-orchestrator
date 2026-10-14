@@ -45,3 +45,4 @@ Rules:
 | T-006 | Job DAG: phase/job tables, DAG validation, `dag` dump CLI | high | proposed |
 | T-007 | Attempt records + bounded same-config retry | high | proposed |
 | T-008 | Approval gates: durable records, `approvals` decide CLI, pending queue | high | proposed |
+| T-009 | Deterministic scheduler core: minimal job spec, DAG-driven execution | high | proposed |
