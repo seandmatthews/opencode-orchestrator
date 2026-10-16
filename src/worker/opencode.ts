@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { appendFileSync } from 'node:fs'
 import type { Readable } from 'node:stream'
 import type { WorkerAdapter, WorkerExecutionRequest, WorkerResult } from '../types.js'
-import { killTree } from '../kill-tree.js'
+import { runChildWithTimeout } from './run-with-timeout.js'
 
 /**
  * Worker adapter for OpenCode in headless mode (`opencode run`).
@@ -12,13 +12,19 @@ import { killTree } from '../kill-tree.js'
  * always passed explicitly; harness default-model resolution is never
  * relied upon, because defaults can silently point at models the active
  * credentials do not include.
+ *
+ * T-011: everything harness-agnostic about the timed run — log draining,
+ * the verified process-tree kill at expiry, the exit wait — lives in
+ * `runChildWithTimeout` (src/worker/run-with-timeout.ts, pinned token-free
+ * by Gate 1.12 S4). This file keeps only the harness specifics: bin path,
+ * `run -m <model>` args, and the PWD/OLDPWD pinning.
  */
 export class OpenCodeWorker implements WorkerAdapter {
   readonly id = 'opencode'
 
   constructor(private readonly binPath: string) {}
 
-  execute(req: WorkerExecutionRequest): Promise<WorkerResult> {
+  async execute(req: WorkerExecutionRequest): Promise<WorkerResult> {
     const started = Date.now()
     const args = ['run', '-m', req.model, req.prompt]
     appendLog(req.logPath, `$ opencode run -m ${req.model} <prompt: ${req.prompt.length} chars>\n`)
@@ -38,35 +44,29 @@ export class OpenCodeWorker implements WorkerAdapter {
     // after a crash while execute() never resolves.
     if (child.pid !== undefined) req.onSpawn?.(child.pid)
 
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      if (child.pid) killTree(child.pid)
-    }, req.timeoutMs)
-
-    const drained = Promise.all([
-      collect(child.stdout, req.logPath),
-      collect(child.stderr, req.logPath),
-    ])
-
-    const exitCode = new Promise<number | null>((resolve) => {
-      child.on('exit', (code) => resolve(code))
-      child.on('error', () => resolve(null))
+    // A second collector (no log writes — the helper owns the log) builds
+    // the response tail from the same streams.
+    let responseText = ''
+    const tail = Promise.all([
+      collectText(child.stdout),
+      collectText(child.stderr),
+    ]).then(([out, err]) => {
+      responseText = out + err
     })
 
-    return Promise.all([drained, exitCode]).then(([[stdout, stderr], code]) => {
-      clearTimeout(timer)
-      appendLog(req.logPath, `\n$ exit code: ${code}${timedOut ? ' (timed out, tree killed)' : ''}\n`)
-      return {
-        ok: !timedOut && code === 0,
-        exitCode: code,
-        timedOut,
-        durationMs: Date.now() - started,
-        logPath: req.logPath,
-        responseTail: stripAnsi(stdout + stderr).slice(-RESPONSE_TAIL_CHARS),
-        pid: child.pid ?? null,
-      }
-    })
+    const run = await runChildWithTimeout(child, { timeoutMs: req.timeoutMs, logPath: req.logPath })
+    await tail
+
+    return {
+      ok: !run.timedOut && run.exitCode === 0,
+      exitCode: run.exitCode,
+      timedOut: run.timedOut,
+      durationMs: Date.now() - started,
+      logPath: req.logPath,
+      responseTail: stripAnsi(responseText).slice(-RESPONSE_TAIL_CHARS),
+      pid: child.pid ?? null,
+      ...(run.cleanupFailures.length > 0 ? { cleanupFailures: run.cleanupFailures } : {}),
+    }
   }
 }
 
@@ -76,16 +76,17 @@ function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
 }
 
-function collect(stream: Readable | null, logPath: string): Promise<string> {
+/** Response-tail collector only — no log writes (run-with-timeout owns the
+ *  log); both collectors on a stream receive every chunk. */
+function collectText(stream: Readable | null): Promise<string> {
   if (!stream) return Promise.resolve('')
   return new Promise((resolve) => {
-    const chunks: Buffer[] = []
+    let text = ''
     stream.on('data', (chunk: Buffer) => {
-      chunks.push(chunk)
-      appendFileSync(logPath, chunk)
+      text += chunk.toString('utf8')
     })
-    stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-    stream.on('error', () => resolve(Buffer.concat(chunks).toString('utf8')))
+    stream.on('end', () => resolve(text))
+    stream.on('error', () => resolve(text))
   })
 }
 

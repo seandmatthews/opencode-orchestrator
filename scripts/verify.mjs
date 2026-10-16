@@ -495,6 +495,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.12: process-tree termination hardening (T-011) ----------
+section('Gate 1.12 — process-tree termination hardening (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-kill-tree.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'kill-tree self-check exit 0')
+} catch (e) {
+  fail(`kill-tree self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

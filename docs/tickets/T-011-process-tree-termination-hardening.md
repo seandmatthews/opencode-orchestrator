@@ -1,6 +1,6 @@
 # T-011 — In-run process-tree termination hardening (spec §15.3)
 
-**Status:** proposed
+**Status:** done 2026-10-16
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 2
 **Depends on:** —
@@ -170,49 +170,158 @@ where descendants survive.
 
 ## Acceptance criteria
 
-- [ ] `killTreeVerified(pid)` kills a live Windows process tree with list-form
+- [x] `killTreeVerified(pid)` kills a live Windows process tree with list-form
       `taskkill /pid <pid> /T /F` and verifies the outcome: the root and every
       descendant captured in the pre-kill snapshot are dead afterwards
       (`process.kill(pid, 0)`), returning `{rootWasLive: true, verified: true,
       survivors: []}` for a planted 3-level node tree — pinned by **Gate 1.12**
       (S1, S5).
-- [ ] Failed or impossible kills are reported, never swallowed: a kill attempt on an
+- [x] Failed or impossible kills are reported, never swallowed: a kill attempt on an
       already-gone pid returns `{rootWasLive: false, verified: false}` as a result
       (today's silent catch at `src/kill-tree.ts:12-14` is removed), and any
       post-kill survivor appears in `survivors` — pinned by **Gate 1.12** (S3).
-- [ ] A timed-out gate kills its whole tree: tiny-timeout `CommandGate` against a
+- [x] A timed-out gate kills its whole tree: tiny-timeout `CommandGate` against a
       grandparent→grandchild node command leaves both spawned pids dead (asserted
       via `process.kill(pid, 0)` from pids the check itself spawned and tracked),
       with unchanged FAIL semantics (`passed: false`, `exitCode: null`,
       `durationMs ≥ timeoutMs`, `outputTail` preserved) and empty cleanup failures —
       pinned by **Gate 1.12** (S1). Red bar: the scout's live probe recorded in Why
       (exec's built-in timeout left grandparent AND grandchild alive).
-- [ ] A normally-completing gate is unchanged: same GateResult shape as today, no
+- [x] A normally-completing gate is unchanged: same GateResult shape as today, no
       `cleanupFailures` key on any non-timeout path, `windowsHide`/cwd/encoding/
       maxBuffer untouched — pinned by **Gate 1.12** (S2) and **Gate 0**.
-- [ ] The worker timeout path is verified, not asserted: the extracted
+- [x] The worker timeout path is verified, not asserted: the extracted
       harness-agnostic `runChildWithTimeout` fires `killTreeVerified` at expiry,
       appends `tree killed, verified …` or loud `CLEANUP FAIL: …` lines to the log,
       and returns `cleanupFailures`; `OpenCodeWorker` keeps only bin/args/PWD-OLDPWD
       specifics — pinned by **Gate 1.12** (S4: node tree, `timedOut: true`, pids
       dead, log lines asserted — no opencode binary, no model tokens).
-- [ ] Cleanup failures are evidence in the report, nothing more: the three optional
+- [x] Cleanup failures are evidence in the report, nothing more: the three optional
       `cleanupFailures` fields exist, `src/runner.ts` aggregates them onto the
       candidate, the store schema and ingest are untouched, and no cleanup failure
       changes `passed`, `passedAllGates`, `workerOk`, or any verdict line
       (decisions.md:19-21) — pinned by **Gate 0**, **Gate 1.6 staying green**, and
       change-set review.
-- [ ] VERIFICATION.md carries the Gate 1.12 section (S1–S5, the dead-root
+- [x] VERIFICATION.md carries the Gate 1.12 section (S1–S5, the dead-root
       non-reliance note, the POSIX limitation under Known issues) and the ticket
       status + index row move in the same change-set — pinned by change-set review
       (AGENTS.md #6; tickets README rules).
-- [ ] `npm run verify` is ALL GREEN including the new Gate 1.12 before landing
+- [x] `npm run verify` is ALL GREEN including the new Gate 1.12 before landing
       (token-free fast tier).
 - [ ] **Gate 2 once at landing** — gates, an adapter file, and report shape are all
-      on VERIFICATION.md:200-201's trigger list — and **Gate 3 once at landing**
-      (adapter file touched; VERIFICATION.md:203-213), both recorded in `## Landed`,
-      neither a permanent extension. T-010 owes a Gate 3 run for the same adapter
-      file; adjacent landings may share the landed record.
+      on the trigger list — and **Gate 3 once at landing** (adapter file touched),
+      both recorded in `## Landed`, neither a permanent extension. Gate 3 ran in the
+      lane (see Landed); Gate 2 is owned by the driving pipeline at landing — left
+      open until its record lands (the T-010 pattern).
+
+## Landed
+
+2026-10-16, in one change-set on `ticket/T-011-process-tree-termination-hardening`
+(lane base `0160806`, T-010 already landed — so the coordination note resolved
+the expected way: the opencode timeout region this ticket rewrote was T-010's
+`onSpawn`/`pid` region, kept verbatim inside the rewritten `execute`).
+
+- `src/kill-tree.ts` — rewritten around the verified kill: `KillTreeResult`
+  and `killTreeVerified(pid)` (alive check first — an already-gone root is
+  the reported result `{rootWasLive: false, verified: false}`, the pre-T-011
+  silent catch at `:12-14` is gone; non-win32 best-effort root SIGKILL with
+  `verified: false`; Windows: pre-kill snapshot → verbatim list-form
+  `taskkill /pid <pid> /T /F` → `process.kill(pid, 0)` sweep over the root
+  plus every snapshot pid, survivors reported). `snapshotTree` — the
+  fixed-constant CIM query spawned list-form
+  (`powershell.exe -NoProfile -NonInteractive -Command <constant>`, zero
+  interpolation), pid→ppid map + BFS down ppid edges — is exported so Gate
+  1.12 S5 can pin the pre-kill enumeration. `killSuccessLine` /
+  `killFailureLines` own the log-line vocabulary; a failed snapshot never
+  skips the kill (it proceeds `verified: false`). The narrow
+  snapshot-to-kill race and the pid-reuse false-survivor possibility are
+  documented at the definitions; Job Objects stay "Later"
+  (spec §15.3:1084, decisions.md 2026-10-10).
+- `src/worker/run-with-timeout.ts` (new) — the harness-agnostic timed-run
+  core `runChildWithTimeout(child, {timeoutMs, logPath})` →
+  `{timedOut, exitCode, cleanupFailures}`: drains stdout/stderr into the log
+  (the adapter's old collector), waits for exit, and at expiry fires
+  `killTreeVerified(child.pid)`, appending `tree killed, verified: N
+  processes reaped` on a clean verify and the loud `CLEANUP FAIL: …` lines
+  otherwise — replacing the unverified `(timed out, tree killed)` assertion
+  with evidence. Knows nothing about any harness (S4 drives it with a plain
+  node tree).
+- `src/worker/opencode.ts` — keeps only the harness specifics: bin path,
+  `run -m <model>` args, and the PWD/OLDPWD pinning (`:32` untouched, ground
+  rule 5). A second no-log collector rebuilds the response tail; the helper
+  owns the log.
+- `src/gate/command.ts` — gates get tree-kill at all: exec's built-in
+  `timeout` option is dropped (the red bar: it killed only the shell child —
+  grandparent AND grandchild stayed alive), the class owns a
+  `setTimeout(timeoutMs)` that fires `killTreeVerified(child.pid)` while the
+  shell child lives (the ChildProcess's own exit knowledge closes the
+  natural-completion race), double-resolve is guarded, and timeout FAIL
+  semantics are byte-identical (`passed: false`, `exitCode: null`,
+  `durationMs ≥ timeoutMs`, `outputTail` as collected).
+- `src/types.ts` — `GateResult`, `WorkerResult`, and `CandidateReport` each
+  gain optional `cleanupFailures?: string[]`; the
+  `WorkerExecutionRequest.timeoutMs` seam doc (`:17-18`) now states the
+  verified semantics. Absent on every non-timeout path — happy-path reports
+  unchanged.
+- `src/runner.ts` — aggregates worker-side failures (every attempt) plus
+  gate-side failures (prefixed `gate <name>: `) onto
+  `CandidateReport.cleanupFailures`, the candidate's one place answering
+  "did anything survive". Evidence only: no retry, ladder, or verdict input
+  changed (decisions.md: gates decide survival). The store is untouched —
+  `gate_results` ingest keeps its explicit column selects
+  (src/store/index.ts:954), so the new fields simply do not persist.
+- `scripts/check-kill-tree.mjs` (new) + the Gate 1.12 hook in
+  `scripts/verify.mjs` after Gate 1.11, before the fast-tier finish —
+  30 assertions across S1–S5 (S1 timed-out-gate tree kill with unchanged
+  FAIL shape; S2 happy-path pin, passing and failing gates, plus the
+  source-level pin that `windowsHide`/`cwd`/`encoding`/`maxBuffer` stay and
+  the built-in `timeout` is gone; S3 removed-catch regression pin; S4
+  `runChildWithTimeout` on a node tree, log lines asserted, no opencode;
+  S5 snapshot depth + the planted 3-level verified kill). Plants real node
+  trees, asserts on the real process table, sweeps its own spawns at the end
+  (AGENTS.md #10 mechanized for itself).
+- VERIFICATION.md — the Gate 1.12 section plus Known issues #8 (dead-root
+  non-reliance) and #9 (POSIX verification limitation), in the same
+  change-set. Ticket status + index row in the same change-set.
+
+Deviations, stated rather than smoothed:
+
+- The ticket's premise "the silent exported `killTree` has exactly one
+  importer today (`src/worker/opencode.ts:5`)" was true when written but
+  T-010 landed first: `src/recover.ts:33,530` now also imports `killTree`
+  inside the recovery kill/verify machinery this ticket explicitly does NOT
+  claim. Resolution: `killTree` stays exported as a one-line fire-and-forget
+  wrapper over `killTreeVerified` — recover.ts is byte-identical (the carve
+  holds; its own before/after liveness checks are unchanged) while the
+  silent catch is gone from the file and the outcome is reported, never
+  swallowed.
+- `KillTreeResult` carries one field beyond the pinned shape: `reaped`
+  (snapshot pids verified dead) — it is the `N` in the ticket's own
+  `tree killed, verified: N processes reaped` log line, which the pinned
+  three fields cannot produce.
+- One extra `CLEANUP FAIL` line shape beyond the ticket's two named ones:
+  `CLEANUP FAIL: pid N tree kill could not be verified (descendant
+  verification unavailable)` for verified:false-with-no-survivors (the POSIX
+  fallback, or a failed CIM snapshot). Leaving that case log-silent would
+  recreate the exact failure mode this ticket removes.
+- `snapshotTree` is exported (S5 must observe the pre-kill enumeration to
+  pin the planted grandchild pid inside it), and S1 pins "no cleanup
+  failures" as the key being absent — same convention as S2's happy-path
+  key-absence pin.
+
+Measured gates (Node v22.23.1, lane): Gate 0 `tsc --noEmit` → exit 0;
+`node scripts/verify.mjs fast` → `verify (fast) complete: ALL GREEN`, exit 0,
+including Gate 1.5 (cleanup), Gate 1.6 (store ingest, green with the new
+optional fields), and the new Gate 1.12 —
+`node node_modules/tsx/dist/cli.mjs scripts/check-kill-tree.mjs` →
+`check-kill-tree (Gate 1.12): ALL GREEN (30 assertions)`, exit 0, run twice
+standalone (stability) plus once in-tier. Gate 3 (adapter file touched), run
+in the lane: `node scripts/diag-pwd.mjs C:\swarm\demo-target` → opencode
+reports the spawned-in directory; with the same dir as the PWD override it
+reports the override target — pass on both forms. Gate 2 not run here —
+owned by the driving pipeline at landing (gates + adapter file + report
+shape are all on the trigger list); the checkbox above stays open until its
+record lands (the T-010 pattern).
 
 ## Verification
 
@@ -225,8 +334,9 @@ finish at `scripts/verify.mjs:448` — the T-003/T-005/T-006/T-007/T-008/T-009/T
 slice-owns-its-gate precedent; no existing gate can pin this: Gate 1.5 pins
 clean/lock/integrate, Gate 1.6 pins store ingest, Gate 2 spends model tokens and
 cannot deterministically force a timeout, Gate 3 is directory-resolution only) runs
-via `npm run verify` — not yet run for this ticket; no code exists. **Gate 2 once**
-and **Gate 3 once**, at landing, recorded in Landed.
+via `npm run verify` — run in the lane, see Landed. **Gate 3** ran in the lane,
+recorded in Landed. **Gate 2 once**, at landing, owned by the driving pipeline
+(recorded in Landed when it lands).
 
 ## References
 

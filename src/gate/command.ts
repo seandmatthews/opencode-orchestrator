@@ -1,11 +1,20 @@
 import { exec } from 'node:child_process'
 import type { Gate, GateResult } from '../types.js'
+import { killFailureLines, killTreeVerified } from '../kill-tree.js'
 
 const TAIL_BYTES = 4000
 
 /**
  * A gate is a shell command evaluated in the candidate workspace:
  * exit 0 passes, anything else fails. No model judgment involved.
+ *
+ * T-011: this class owns its timeout and its process-tree kill. exec's
+ * built-in `timeout` option is deliberately NOT used — it kills only the
+ * direct shell child and orphans the whole subtree (the recorded red bar:
+ * grandparent AND grandchild alive after an exec timeout). At expiry a
+ * verified tree kill fires while the shell child lives
+ * (`killTreeVerified(child.pid)`); kill outcomes that are not proven good
+ * land on `GateResult.cleanupFailures` — evidence, never a verdict.
  */
 export class CommandGate implements Gate {
   readonly name: string
@@ -21,21 +30,48 @@ export class CommandGate implements Gate {
   run(cwd: string): Promise<GateResult> {
     const started = Date.now()
     return new Promise((resolve) => {
-      exec(
+      let settled = false
+      let timedOut = false
+      let cleanupFailures: string[] = []
+      // No `timeout` option here (see class doc); windowsHide/cwd/encoding/
+      // maxBuffer are byte-identical to the pre-T-011 spawn options.
+      const child = exec(
         this.command,
-        { cwd, timeout: this.timeoutMs, windowsHide: true, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
+        { cwd, windowsHide: true, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
         (err, stdout, stderr) => {
+          if (settled) return
+          settled = true
+          if (timer !== undefined) clearTimeout(timer)
           const output = `${stdout}\n${stderr}`.trim()
-          const exitCode = err === null ? 0 : typeof err.code === 'number' ? err.code : null
+          // Timeout FAIL semantics stay exactly the pre-T-011 exec-timeout
+          // shape: passed false, exitCode null (a killed shell carries no
+          // meaningful numeric code), durationMs >= timeoutMs, outputTail as
+          // collected.
+          const exitCode = timedOut
+            ? null
+            : err === null ? 0 : typeof err.code === 'number' ? err.code : null
           resolve({
             name: this.name,
-            passed: !err,
+            passed: !timedOut && !err,
             exitCode,
             durationMs: Date.now() - started,
             outputTail: output.slice(-TAIL_BYTES),
+            ...(cleanupFailures.length > 0 ? { cleanupFailures } : {}),
           })
         },
       )
+      const timer = setTimeout(() => {
+        timedOut = true
+        // The ChildProcess knows its own exit before the exec callback
+        // delivers it — never taskkill a shell that exited naturally at the
+        // boundary (a just-exited or reused pid is not ours to kill).
+        if (child.exitCode !== null || child.signalCode !== null) return
+        if (child.pid === undefined) {
+          cleanupFailures = ['CLEANUP FAIL: no root pid to kill for this gate']
+          return
+        }
+        cleanupFailures = killFailureLines(child.pid, killTreeVerified(child.pid))
+      }, this.timeoutMs)
     })
   }
 }
