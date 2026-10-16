@@ -516,7 +516,9 @@ root pid (`{type:'pid', jobId, attempt, pid, at}` — engine-supplied
 spawn), and one `completion` line per adapter-resolved attempt
 (`{type:'completion', jobId, attempt, ok, timedOut, exitCode, diffBytes,
 endedAt}` — a thrown attempt gets none, so recovery conservatively treats it
-as recorded-running and can still kill its recorded pid). Best-effort
+as recorded-running and can still kill its recorded pid; `diffBytes` is null
+when the capture failed, so absent evidence is never readable as the
+machine-answered zero-byte NO-OP verdict). Best-effort
 appends that can never break a run (the adapter's appendLog posture); part
 of the run's evidence set, never deleted, structurally ignored by `clean`.
 `WorkerResult.pid` carries the same pid for the completion record. The store
@@ -552,7 +554,9 @@ against the real process table, never a mock. It asserts:
   `--force-lock` — exit 1 naming the holder pid and lock path, and nothing
   written (no recovery.json, no DB file, the orphan still alive);
 - **the kill, verified**: with `--force-lock`, recover proceeds, releases
-  the lock on every path (no residual `.lock` files), and the recorded
+  the lock on every path (no residual `.lock` files — including a
+  `recovery.json` write failure, which is recorded and exits non-zero after
+  the release), and the recorded
   orphan is identity-verified live (creation time inside the dispatch
   evidence window — Windows reuses pids; §15.2:1071 applies symmetrically to
   killing) and then actually dead;
@@ -576,7 +580,9 @@ against the real process table, never a mock. It asserts:
   dispatch.jsonl are byte-identical afterwards — no disposal happened (Gate
   1.5 pins clean's own semantics);
 - **retry disposition from dispatch records only**: completion `ok` +
-  `diffBytes 0` ⇒ terminal `no-op` (a machine verdict is never re-rolled);
+  `diffBytes` exactly 0 ⇒ terminal `no-op` (a machine verdict is never
+  re-rolled); `ok` + `diffBytes` null (a failed capture) is NOT a verdict
+  and falls through to retryable;
   attempts used ≥ the dispatch header's maxAttempts ⇒ terminal
   `bound-exhausted`; everything else (never completed, `!ok`, timedOut, or
   completed with a diff but no durably recorded verdict) ⇒ `retryable` while

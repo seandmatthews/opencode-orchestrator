@@ -28,7 +28,7 @@
 // anything: it belongs to the dead orchestrator and is useless for tree-kill
 // by construction — only per-attempt pids recorded in dispatch.jsonl are.
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { killTree } from './kill-tree.js'
 import { acquireCheckoutLock, CheckoutLockRefused, releaseCheckoutLock } from './lock.js'
@@ -92,6 +92,17 @@ function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
+/** True only when a real FILE sits at the path (a directory squatting on the
+ *  artifact path is not a reconciliation record — the write below then fails
+ *  loudly, and the lock still releases). */
+function isFile(p: string): boolean {
+  try {
+    return statSync(p).isFile()
+  } catch {
+    return false
+  }
+}
+
 // ---------- dispatch.jsonl evidence (written in-run by src/runner.ts, T-010) ----------
 
 interface RunHeader {
@@ -130,7 +141,7 @@ interface CompletionRecord {
   ok?: boolean
   timedOut?: boolean
   exitCode?: number | null
-  diffBytes?: number
+  diffBytes?: number | null
   endedAt?: string
 }
 
@@ -329,13 +340,15 @@ interface JobDisposition {
 
 /**
  * One disposition per job, from dispatch records only (spec §15.2 step 4):
- * a completion with ok + diffBytes 0 is a NO-OP machine verdict — terminal,
- * never re-rolled (decisions.md; AGENTS.md #7); the bound spent is terminal
- * bound-exhausted; everything else (never completed, !ok, timedOut, or
- * completed with a diff but no durably recorded verdict — report.json was
- * never written) is retryable while the bound allows, because no machine
- * verdict was ever produced. A gates-failed leg cannot occur in-run: gates
- * never dispatched a worker.
+ * a completion with ok + diffBytes EXACTLY 0 is a NO-OP machine verdict —
+ * terminal, never re-rolled (decisions.md; AGENTS.md #7). A null diffBytes
+ * (the runner's encoding for a FAILED diff capture) is not a machine
+ * verdict and never counts as a no-op — absent evidence is not an answer.
+ * The bound spent is terminal bound-exhausted; everything else (never
+ * completed, !ok, timedOut, or completed with a diff but no durably recorded
+ * verdict — report.json was never written) is retryable while the bound
+ * allows, because no machine verdict was ever produced. A gates-failed leg
+ * cannot occur in-run: gates never dispatched a worker.
  */
 function dispositionFor(jobId: string, ev: RunEvidence, maxAttempts: number): JobDisposition {
   const dispatches = ev.dispatches.filter((d) => d.jobId === jobId)
@@ -343,7 +356,7 @@ function dispositionFor(jobId: string, ev: RunEvidence, maxAttempts: number): Jo
     .map((d) => ev.completions.get(attemptKey(d.jobId, d.attempt)))
     .filter((c): c is CompletionRecord => c !== undefined)
   const attemptsUsed = dispatches.length
-  if (completions.some((c) => c.ok === true && (c.diffBytes ?? 0) === 0)) {
+  if (completions.some((c) => c.ok === true && c.diffBytes === 0)) {
     return { jobId, attemptsUsed, maxAttempts, disposition: 'terminal', reason: 'no-op' }
   }
   if (attemptsUsed >= maxAttempts) {
@@ -386,10 +399,10 @@ function main(): void {
     console.error(`run ${opts.run} completed (report.json present) — its records come from ingest; there is nothing to reconcile`)
     process.exit(1)
   }
-  // Refusal 2 — an already-reconciled run: recovery.json exists ⇒ no
-  // duplicate abandonment events; re-reading a reconciliation is cat.
+  // Refusal 2 — an already-reconciled run: a reconciliation REPORT exists ⇒
+  // no duplicate abandonment events; re-reading a reconciliation is cat.
   const recoveryPath = join(runDir, 'recovery.json')
-  if (existsSync(recoveryPath)) {
+  if (isFile(recoveryPath)) {
     console.error(`run ${opts.run} was already reconciled — ${recoveryPath} exists; re-reading a reconciliation is cat, not a second pass`)
     process.exit(1)
   }
@@ -478,6 +491,7 @@ function main(): void {
     // Abandonment marks (spec §15.2 step 1) — durable, one transaction.
     let marked = 0
     let dbFailed = false
+    let writeFailed = false
     if (abandonedInputs.length > 0) {
       try {
         recordAbandonedAttempts(opts.run, abandonedInputs, opts.db)
@@ -558,13 +572,15 @@ function main(): void {
     try {
       writeFileSync(recoveryPath, JSON.stringify(report, null, 2))
     } catch (e) {
+      // Recorded, not fatal here: the lock MUST be released on this path
+      // (the finally below), so the exit happens after it, not inside.
       console.error(`failed (write ${recoveryPath}): ${errorMessage(e)}`)
-      process.exit(1)
+      writeFailed = true
     }
 
     console.log(`\nrecover: ${marked} abandoned, ${kills.length} killed, ${cleanupFailures.length} cleanup failure(s), ${workspaces.length} workspace(s) inspected`)
     console.log(`report: ${recoveryPath}`)
-    exitCode = cleanupFailures.length > 0 || dbFailed ? 1 : 0
+    exitCode = cleanupFailures.length > 0 || dbFailed || writeFailed ? 1 : 0
   } finally {
     if (lockPath) releaseCheckoutLock(lockPath)
   }

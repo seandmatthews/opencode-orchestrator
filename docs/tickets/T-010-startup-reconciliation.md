@@ -413,6 +413,40 @@ probe. Gate 2 not run here — owned by the driving pipeline at landing (the
 unchecked criterion above). No stray processes left behind (the gate tears
 its orphans down in a `finally`, AGENTS.md #10).
 
+Review round 1 (2026-10-16), fixed in a follow-up commit on the same lane:
+
+- **Write-failure path leaked the checkout lock** (reviewer-verified:
+  `process.exit(1)` inside the recovery.json catch skipped the release
+  `finally`, leaving a lock naming the now-dead recover — the exact
+  never-auto-reap debris this ticket reconciles). Fixed: the failure is
+  recorded in a `writeFailed` flag, folded into the exit code, and the exit
+  happens after the `finally` releases the lock. Reaching that path also
+  required one refusal refinement: the already-reconciled check now requires
+  a real FILE at the recovery.json path (a directory squatting there is not
+  a reconciliation record; `existsSync` used to mask it as "already
+  reconciled" and the write failure was unreachable — the write then fails
+  loudly and the lock still releases). Newly pinned by Gate 1.11
+  R8: a directory squatting on the `recovery.json` path (EISDIR after the
+  lock is held and every other step has run) → exit non-zero naming the
+  failed path, **no residual `.lock`**, nothing fabricated.
+- **A failed diff capture was encoded as `diffBytes: 0`**, indistinguishable
+  from a genuine zero-byte diff, letting worker-ok + capture-failure +
+  crash-before-report reconcile as an irreversible terminal `no-op` from
+  absent evidence (reviewer's design note, adopted). The completion line now
+  records `diffBytes: null` on a failed capture (src/runner.ts), and
+  recovery's no-op guard is strict `diffBytes === 0` (src/recover.ts) — a
+  failed capture falls through to retryable, because absent evidence is not
+  a machine answer. Pinned on both sides: Gate 1.11 R1b (a diff-throwing
+  fixture provider produces a completion line with `diffBytes: null`, and
+  the run's own ladder still records no diff ⇒ never a pass) and Gate 1.11
+  R5 (`ok` + `diffBytes: null` reconciles `retryable`, not terminal no-op).
+
+Re-measured after the fixes (same lane, Node v22.23.1): Gate 0 → exit 0;
+`node node_modules/tsx/dist/cli.mjs scripts/check-recovery.mjs` → 56 ok
+across nine scenarios (R1b and R8 added), `check-recovery: ALL GREEN`,
+exit 0; `node scripts/verify.mjs fast` → `verify (fast) complete: ALL
+GREEN`, exit 0. Gate 2 still owned by the driving pipeline at landing.
+
 ## Verification
 
 Gate 0 (`npm run typecheck`) always — green before this change, verified

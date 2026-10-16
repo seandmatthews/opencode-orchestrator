@@ -21,6 +21,8 @@ import type { Attempt, CandidateReport, FailureRecord, Gate, GateResult, Planner
  *   {type:'dispatch', jobId, attempt, leaseId, branch, worktreePath, startedAt}
  *   {type:'pid', jobId, attempt, pid, at}
  *   {type:'completion', jobId, attempt, ok, timedOut, exitCode, diffBytes, endedAt}
+ *     (diffBytes is null when the diff capture failed — a failed capture is
+ *      never readable as the machine-answered zero-byte NO-OP verdict)
  */
 function appendDispatchEvidence(artifactsDir: string, line: object): void {
   try {
@@ -475,7 +477,9 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
       // T-010: the attempt's completion line — written only when the adapter
       // RESOLVED (a thrown attempt gets none, so recovery conservatively
       // treats it as recorded-running and can still kill its recorded pid).
-      // diffBytes is the captured diff's size (0 when capture failed).
+      // diffBytes is the captured diff's size; a FAILED capture is recorded
+      // as null, never as 0 — a zero-byte diff is a machine verdict (the
+      // NO-OP rule), and absent evidence must not be readable as one.
       appendDispatchEvidence(opts.artifactsDir, {
         type: 'completion',
         jobId: id,
@@ -483,7 +487,7 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
         ok: result.ok,
         timedOut: result.timedOut,
         exitCode: result.exitCode,
-        diffBytes: diffCaptured ? Buffer.byteLength(diff) : 0,
+        diffBytes: diffCaptured ? Buffer.byteLength(diff) : null,
         endedAt: attempt.endedAt,
       })
 

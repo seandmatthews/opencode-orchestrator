@@ -24,7 +24,7 @@
 // reruns (dispatch.jsonl byte-identical, no new worktrees, recovery.json the
 // only new artifact), and every refusal exiting non-zero writing nothing.
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
@@ -335,6 +335,45 @@ async function main() {
       && lines.some((l) => l.includes('[c01] gate always-pass: PASS')))
   }
 
+  // ---------- R1b: a FAILED diff capture is encoded as null, never as 0 ----------
+  {
+    const { repo, baseSha } = makeRepo('capture-failure')
+    const artifactsDir = join(sandbox, 'capture-failure', 'run')
+    const inner = new WorktreeProvider(repo, artifactsDir)
+    const workspaces = {
+      lease: (id, ref) => inner.lease(id, ref),
+      diff: () => {
+        throw new Error('diff capture failed (fixture)')
+      },
+      dispose: (lease) => inner.dispose(lease),
+    }
+    const worker = shortWorker()
+    const report = await runSkeleton({
+      runId: '20991010120001',
+      repo,
+      baseSha,
+      goal: 'write the marker file',
+      model: 'fake/model',
+      plannerModel: null,
+      reviewerModel: null,
+      candidateIds: ['c01'],
+      concurrency: 1,
+      timeoutMs: 10_000,
+      maxAttempts: 1,
+      gates: [passGate],
+      worker,
+      workspaces,
+      artifactsDir,
+      cleanWorkspaces: false,
+    })
+    const ev = parseLines(read(join(artifactsDir, 'dispatch.jsonl')))
+    const completion = ev.find((l) => l.type === 'completion' && l.jobId === 'c01')
+    t('R1b: a failed diff capture is recorded as diffBytes null — never as the machine-answered 0',
+      completion?.ok === true && completion?.diffBytes === null)
+    t('R1b: the run itself is unchanged — no captured diff is never a pass (today\u2019s ladder)',
+      report.candidates[0]?.diffBytes === 0 && report.candidates[0]?.passedAllGates === false)
+  }
+
   // ---------- R2: the kill-mid-run scenario (maxAttempts 1) ----------
   const R2 = await crashMidRun('kill-run-att1', 1)
   {
@@ -542,6 +581,17 @@ async function main() {
       JSON.stringify(rec4.jobs) === JSON.stringify([
         { jobId: 'j1', attemptsUsed: 2, maxAttempts: 2, disposition: 'terminal', reason: 'bound-exhausted' },
       ]))
+
+    const nullDiff = mk('disp-nulldiff', 4, [
+      { type: 'dispatch', jobId: 'j1', attempt: 1, leaseId: 'wt/j1', branch: 'swarm/wt-j1', startedAt: '2026-10-16T00:00:00.000Z' },
+      { type: 'completion', jobId: 'j1', attempt: 1, ok: true, timedOut: false, exitCode: 0, diffBytes: null, endedAt: '2026-10-16T00:00:01.000Z' },
+    ])
+    runRecover(null, ['--run', nullDiff.runId, '--run-root', nullDiff.runRoot, '--db', join(sandbox, 'disp-nulldiff', 'recovery.db')])
+    const rec5 = JSON.parse(read(join(nullDiff.runDir, 'recovery.json')))
+    t('R5: ok + diffBytes null (failed capture) is NOT a no-op verdict — retryable, absent evidence is not an answer',
+      JSON.stringify(rec5.jobs) === JSON.stringify([
+        { jobId: 'j1', attemptsUsed: 1, maxAttempts: 4, disposition: 'retryable', reason: null },
+      ]))
   }
 
   // ---------- R6: refusals exit non-zero and write nothing ----------
@@ -582,6 +632,28 @@ async function main() {
       && git('branch', '--list', 'swarm/wt-c01').trim() !== '')
     t('R7: nothing to mark — no DB was created',
       !existsSync(db))
+  }
+
+  // ---------- R8: a recovery.json write failure still releases the lock ----------
+  {
+    const { runRoot, runId, runDir } = makeSyntheticRun('write-failure', {
+      maxAttempts: 3,
+      lines: (runDir) => [
+        { type: 'dispatch', jobId: 'j1', attempt: 1, leaseId: 'wt/j1', branch: 'swarm/wt-j1', worktreePath: join(runDir, 'wt', 'j1'), startedAt: '2026-10-16T00:00:00.000Z' },
+        { type: 'completion', jobId: 'j1', attempt: 1, ok: true, timedOut: false, exitCode: 0, diffBytes: 0, endedAt: '2026-10-16T00:00:01.000Z' },
+      ],
+    })
+    // A directory squatting on the artifact path makes writeFileSync fail
+    // (EISDIR) after the lock is held and every other step has run.
+    mkdirSync(join(runDir, 'recovery.json'))
+    const db = join(sandbox, 'write-failure', 'recovery.db')
+    const rec = runRecover('write failure', ['--run', runId, '--run-root', runRoot, '--db', db, '--force-lock'])
+    t('R8: a recovery.json write failure exits non-zero, naming the failed path',
+      rec.code === 1 && rec.out.includes('failed (write') && rec.out.includes('recovery.json'))
+    t('R8: the checkout lock is released even when the report write failed — no residual .lock',
+      readdirSync(join(runRoot, 'locks')).filter((f) => f.endsWith('.lock')).length === 0)
+    t('R8: nothing to mark (no-op completion) and nothing fabricated — no DB, blocker path still a directory',
+      !existsSync(db) && statSync(join(runDir, 'recovery.json')).isDirectory())
   }
 
   rmSync(sandbox, { recursive: true, force: true })
