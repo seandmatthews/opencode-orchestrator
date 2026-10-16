@@ -1,9 +1,9 @@
 # T-008 — Approval gates: durable records, `approvals` decide CLI, and the pending queue
 
-**Status:** proposed
+**Status:** done 2026-10-16
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 2
-**Depends on:** T-006 (proposed — must land first; transitively T-003)
+**Depends on:** T-006 (done 2026-10-16; transitively T-003)
 
 ## What
 
@@ -184,13 +184,13 @@ either the rule or the feature silently.
 
 ## Acceptance criteria
 
-- [ ] Plain ingest is approval-blind: ingesting the fixture
+- [x] Plain ingest is approval-blind: ingesting the fixture
       (`scripts/fixtures/report-real.json`) produces zero `approval_gates`
       rows and no approval events — approval state is written only by explicit
       operator action through the CLI — pinned by the **new Gate 1.9**
       (`scripts/check-approvals.mjs` + new VERIFICATION.md section + hook in
       `scripts/verify.mjs`).
-- [ ] `request` records the queue: against a fixture-ingested temp DB,
+- [x] `request` records the queue: against a fixture-ingested temp DB,
       `approvals request --run <runId>` creates exactly one
       `approval_gates` row per surviving candidate — keyed
       `(run_id, phase_id, job_id)` with `phase_id` from T-006's derived phase
@@ -198,43 +198,43 @@ either the rule or the feature silently.
       `requested_at` wall-clock, `requested_by` recorded — and appends exactly
       one `APPROVAL_REQUESTED` event per row; `--job` narrows to one — pinned
       by **Gate 1.9**.
-- [ ] Approve transitions per §21: `decide --decision approved` flips the row
+- [x] Approve transitions per §21: `decide --decision approved` flips the row
       to `approved` with `decided_at`/`decided_by` recorded and appends
       exactly one `APPROVAL_GRANTED` event — pinned by **Gate 1.9**.
-- [ ] Reject transitions per §21 and appends the documented extension:
+- [x] Reject transitions per §21 and appends the documented extension:
       `decide --decision rejected` flips the row to `rejected` and appends
       exactly one `APPROVAL_REJECTED` event — pinned by **Gate 1.9**.
-- [ ] Rejection corrupts nothing: after a reject, `runs`, `candidates`, and
+- [x] Rejection corrupts nothing: after a reject, `runs`, `candidates`, and
       `gate_results` rows are value-identical to before, every prior event row
       (seq, type, at, payload) is unchanged (append-only stream), and
       `PRAGMA integrity_check` returns `ok` — pinned by **Gate 1.9**
       (full-table comparisons before/after).
-- [ ] The record survives process death: request, decide, and list run as
+- [x] The record survives process death: request, decide, and list run as
       separate CLI process invocations (the gate spawns each subcommand as its
       own process), and each sees the state the previous one persisted —
       proving state lives in the DB, not in any process — pinned by **Gate
       1.9**. (This is the exercisable form of "survives orchestrator restart"
       today; the paused-execution form is carved, per What.)
-- [ ] The queue view: `approvals list` exits 0 and prints pending
+- [x] The queue view: `approvals list` exits 0 and prints pending
       (`waiting_for_approval`) rows; decided rows drop out of the default
       queue; `--json` emits the same structure as JSON — pinned by **Gate
       1.9**.
-- [ ] Refusals exit non-zero and write nothing: missing DB file (and no empty
+- [x] Refusals exit non-zero and write nothing: missing DB file (and no empty
       DB created as a side effect — asserted absent afterward), unknown
       runId, decide on an unknown or non-survivor job (an approval must not
       resurrect an eliminated candidate), double-decide (refusal names the
       row's current state), unknown `--decision` value, missing flags —
       pinned by **Gate 1.9**.
-- [ ] Read-only views never write: after `approvals list`, the DB file is
+- [x] Read-only views never write: after `approvals list`, the DB file is
       byte-identical (hash before/after; readOnly open) — pinned by **Gate
       1.9**.
-- [ ] The wall-clock deviation is documented, not discovered: approval rows
+- [x] The wall-clock deviation is documented, not discovered: approval rows
       and events carry wall-clock stamps while every report-derived stamp
       stays deterministic; the scoped rule is stated in the
       `src/store/index.ts` header comment and VERIFICATION.md's Gate 1.9
       section in the same change-set — pinned by **Gate 1.9** (stamps parse as
       ISO-8601 and are not report-derived) plus change-set review.
-- [ ] No behavior change to the pipeline: `src/runner.ts`, adapters, gate
+- [x] No behavior change to the pipeline: `src/runner.ts`, adapters, gate
       code, workspace handling, the `RunReport` shape, and `src/cli.ts`'s run
       path are untouched, and `npm run verify` stays ALL GREEN — pinned by
       **`npm run verify`**. Gate 1.6 is green before this change (verified
@@ -242,9 +242,107 @@ either the rule or the feature silently.
       → "check-store: ALL GREEN", exit 0, only the documented node:sqlite
       ExperimentalWarning on stderr — Known issues #7) and must stay green
       after.
-- [ ] VERIFICATION.md carries the new Gate 1.9 section, and the ticket status
+- [x] VERIFICATION.md carries the new Gate 1.9 section, and the ticket status
       + index row move in the same change-set (AGENTS.md #6; tickets README
       rules) — pinned by change-set review.
+
+## Landed
+
+2026-10-16, in one change-set on `ticket/T-008-approval-gates`. The schema
+landed at v4 exactly as planned (T-006 → v2 and T-007 → v3 landed first).
+
+- `src/store/index.ts` — `SCHEMA_VERSION` 3 → 4; `approval_gates` appended to
+  `SCHEMA_SQL` with `CREATE TABLE IF NOT EXISTS` (PK `(run_id, phase_id,
+  job_id)`, exactly the ticket's nine columns), so an existing v1–v3
+  `refinery.db` gains it on its next use. New exported vocabulary:
+  `ApprovalState = 'waiting_for_approval' | 'approved' | 'rejected'` — the
+  three states with a producer; `'cancelled'`/`APPROVAL_CANCELLED` are not
+  pre-defined (no producer until an abort/cancel slice, the T-007
+  `'abandoned'` precedent) — and `ApprovalDecision = 'approved' |
+  'rejected'`. Two exported writers, the only writers of approval state,
+  each refusing before any write and committing row(s) + event(s) inside one
+  transaction: `requestApproval` (survivors from `candidates.passed_all_gates`
+  keyed on T-006's derived phase/job rows; `--job` narrows to one and refuses
+  an unknown or eliminated candidate; jobs already carrying an approval row
+  are skipped, never rewritten — additive-only) and `decideApproval` (upserts
+  state/`decided_at`/`decided_by` — `note` replaced only when provided — and
+  appends exactly one event; a double-decide refusal names the current state;
+  unknown/non-survivor/no-request jobs refuse). Events:
+  `APPROVAL_REQUESTED`/`APPROVAL_GRANTED` (§28:1861-1862) plus
+  `APPROVAL_REJECTED` — the documented vocabulary extension; payloads name
+  phaseId/jobId/requestedBy|decidedBy. `listPendingApprovals` is read-only
+  (`readOnly` open) over `waiting_for_approval`. The store header comment
+  states the wall-clock scoping: approval rows/events are wall-clock stamped
+  (`requested_at`/`decided_at`; `userInfo().username` the by-default),
+  `ingest` is untouched and stays a pure function of the report.
+- `src/approvals.ts` (new) — the standalone CLI (`tsx src/approvals.ts`, the
+  clean/integrate/dag pattern): `request`, `list` (`--run` filter, `--json`),
+  `decide`. Refusals print `refused: …` to stderr, exit 1, nothing on
+  stdout, and precede any open/write: missing DB file (`existsSync` before
+  the open — no empty `refinery.db` as a side effect), missing flags,
+  unknown subcommand, unknown `--decision`; the store's refusals surface
+  through the same path. `--db` defaults to the same `C:\swarm\refinery.db`
+  literal as `src/cli.ts`.
+- `package.json` — the one new script `"approvals": "tsx src/approvals.ts"`.
+  Zero new dependencies (`node:sqlite` only).
+- `scripts/check-approvals.mjs` (new) + Gate 1.9 hook in `scripts/verify.mjs`
+  after Gate 1.8, before the fast-tier finish — 82 assertions driving ingest
+  and the CLI as separate subprocess invocations against temp DBs seeded
+  from the fixture and its elim-variant (c02 eliminated, so survivor
+  refusals have a real target), pinning every acceptance criterion:
+  approval-blind ingest, request rows/events per survivor with `--job`
+  narrowing, approve/reject transitions with their events, full-table
+  rejection-corruption comparison + `PRAGMA integrity_check`, the queue view
+  (text and `--json`; decided rows drop out), read-only list (sha256
+  byte-identical; a write against a `readOnly` handle throws), the full
+  refusal list (each re-checked to have written nothing), wall-clock stamps
+  vs deterministic report stamps, and cross-process persistence.
+- `scripts/check-store.mjs` — the pinned `SCHEMA_VERSION is 3` assertion
+  moved to 4 in this change-set (the T-006/T-007 version-bump precedent); no
+  other change — ingest stays approval-blind and every other Gate 1.6
+  assertion passes unchanged.
+- VERIFICATION.md — Gate 1.6 section updated to schema v4 (with the note
+  that ingest never writes `approval_gates`; Gate 1.9 owns it); new Gate 1.9
+  section including the wall-clock scoping. Ticket status + index row in the
+  same change-set.
+
+Deviations, stated rather than smoothed:
+
+- `list --run <unknown>` prints the empty queue (exit 0) instead of
+  refusing: `--run` is an optional filter there, and there is nothing to
+  refuse; the ticket's unknown-runId refusal is pinned on `request` and
+  `decide`, the subcommands that write. VERIFICATION.md's Gate 1.9 section
+  states the scoping.
+- `request` skips (never re-requests) a job already carrying an approval row
+  in any state — the ticket lists no double-request refusal, and
+  additive-only writes forbid rewriting an existing record; skipping keeps
+  `request` re-runnable. Documented in the store doc comment and the CLI
+  usage text.
+- A zero-survivor `request` exits 0 with "nothing to request" and writes
+  nothing — an accurate no-op, not an invented refusal (the ticket's refusal
+  list does not name it).
+- Red-before/green-after inside this slice's own gate: the first gate run
+  caught a real hole — `request --job <eliminated>` exited 0 because the
+  survivor filter applied only to the un-narrowed path — and the
+  pre-write validation was fixed before landing; the pinning assertion is
+  the non-survivor request refusal (exit non-zero, resurrect rule named,
+  nothing written).
+
+Measured gates (this lane, Node v22.23.1): Gate 0 `tsc --noEmit` exit 0;
+extended Gate 1.6 → 67 ok + `check-store: ALL GREEN`, exit 0, only the
+documented node:sqlite ExperimentalWarning (Known issues #7); new Gate 1.9 →
+82 ok + `check-approvals: ALL GREEN`, exit 0, same benign warning only;
+`node scripts/verify.mjs fast` (Gates 0 / 1 / 0.5 / 1.5 clean+lock+integrate
+/ 1.6 / 1.7 / 1.8 / 1.9) → `verify (fast) complete: ALL GREEN`, exit 0. A
+manual smoke of the CLI against a fixture-ingested temp DB printed the
+request confirmation, the two-row queue, the approve confirmation, and the
+post-decide `--json` queue (c01 dropped). Gate 2 not run, per the ticket's
+Verification section: the change-set touches none of VERIFICATION.md's Gate
+2 triggers — `src/runner.ts`, adapters, gate code, workspace handling, the
+report shape, and `src/cli.ts`'s run path are untouched (the diff is
+`src/store/index.ts`, `src/approvals.ts`, `package.json`, `scripts/`,
+`VERIFICATION.md`, ticket docs); any successor wiring approval state into
+run/integrate owns a Gate 2 run.
 
 ## Verification
 

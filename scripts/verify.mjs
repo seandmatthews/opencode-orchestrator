@@ -465,6 +465,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.9: approval gates (T-008) ----------
+section('Gate 1.9 — approval gates (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-approvals.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'approvals self-check exit 0')
+} catch (e) {
+  fail(`approvals self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

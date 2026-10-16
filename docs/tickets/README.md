@@ -44,7 +44,7 @@ Rules:
 | T-005 | Integration replay: re-verify a survivor's diff at current HEAD | medium | done 2026-10-11 |
 | T-006 | Job DAG: phase/job tables, DAG validation, `dag` dump CLI | high | done 2026-10-16 |
 | T-007 | Attempt records + bounded same-config retry | high | done 2026-10-16 |
-| T-008 | Approval gates: durable records, `approvals` decide CLI, pending queue | high | proposed |
+| T-008 | Approval gates: durable records, `approvals` decide CLI, pending queue | high | done 2026-10-16 |
 | T-009 | Deterministic scheduler core: minimal job spec, DAG-driven execution | high | proposed |
 | T-010 | Startup reconciliation: abandoned attempts, process-tree sweep, retry disposition | high | proposed |
 | T-011 | In-run process-tree termination hardening (spec §15.3) | high | proposed |
