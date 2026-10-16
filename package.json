@@ -12,6 +12,7 @@
     "dag": "tsx src/dag.ts",
     "approvals": "tsx src/approvals.ts",
     "recover": "tsx src/recover.ts",
+    "context": "tsx src/context-inspect.ts",
     "verify": "node scripts/verify.mjs fast",
     "verify:full": "node scripts/verify.mjs full"
   },

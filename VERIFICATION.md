@@ -685,6 +685,106 @@ The check sweeps everything it planted best-effort at the end (AGENTS.md #10
 mechanized for its own spawns) and its throwaway sandbox under `C:\swarm\`
 is removed afterward.
 
+## Gate 1.13 — context system core (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-context.mjs
+```
+
+Pins T-012 (the first Milestone-2 slice, spec §34:2035-2047 minus shard
+distillation and source lineage): the pure context module (`src/context.ts`
+— no I/O, no model knowledge, zero npm dependencies, `node:crypto` sha256
+only) and the read-only inspector CLI (`npm run context -- --plan <path>
+--packet <path> [--json] [--run-root <path>]`, `src/context-inspect.ts` —
+the clean/integrate/dag standalone pattern). **Zero behavior change to the
+pipeline**: nothing in `src/runner.ts`, the `RunReport`, the adapters, or
+the gate code produces or consumes a packet after this slice, so context
+selection can never influence promotion or elimination (decisions.md:
+gates decide survival) — honored by construction. No existing gate can pin
+any context criterion — the fast tier never runs the pipeline and Gate 2
+spends model tokens and cannot assert on synthetic packets (the
+T-007/T-009 argument) — so this gate drives the pure functions directly
+and the CLI as a list-form subprocess over **hand-built plan + artifact
+fixtures** (the Gate 0.5 `check-parse.mjs` pattern: no artifact store
+exists to produce inputs, §34:2028 is the unclaimed Milestone-1 build
+item). It asserts:
+
+- **ContextPlan parsing** (`parseContextPlan`, refusals as `ContextRefusal`
+  naming the offense, before anything is built): a valid plan parses;
+  unknown plan fields, a present `distillation` block (refused, never
+  silently ignored, until the §7.3-7.5 slice defines builder semantics),
+  `maxInputTokens ≤ 0`, a selector outside the §7.6:593-605 vocabulary, a
+  query naming no known selector field, and bad enum values
+  (`gateStatus`/`layer`/`orderBy`/`limit`/`sourceReferencePolicy`) are each
+  refused; parse normalization is key-order independent (same planHash).
+- **Determinism**: two builds from identical plan + artifact inputs give
+  byte-identical packet JSON and the same fingerprint; input array order
+  never matters (base canon is id-ascending).
+- **Layer 1** is always present and never trimmed (§7.2:516-518): a plan
+  whose mandatory layer alone exceeds `maxInputTokens` is refused as
+  unsatisfiable; exactly filling the cap is satisfiable, with everything
+  else excluded-by-budget.
+- **Budget + manifest**: Layer 2 primary rules apply in plan order with the
+  documented ordering (`timestamp-desc` newest-first with id-ascending
+  tie-break; default id-ascending; `limit` after ordering); Layer 3
+  distilled pass-through; Layer 4 supporting fills the budget remainder —
+  an inclusion that would overflow the cap is skipped (the scan continues,
+  so a later smaller candidate may still fit) and lands `excluded-by-budget`;
+  plan `exclusions` remove before any selection (a poison artifact matching
+  a primary rule never enters a layer, recorded `excluded-by-plan`); every
+  input artifact appears in the manifest exactly once with reason
+  `excluded-by-plan`/`excluded-by-budget` — nothing silent (§7.2:544).
+- **Selectors**: each deterministic §7.6:593-605 kind (type, candidate,
+  phase, producer role, machine gate status, lineage membership, timestamp,
+  explicit ID, tag) returns exactly the matching artifacts on hand-built
+  sets; conjunctions require every named field; absent attributes never
+  match; timestamps compare lexicographically (pinned on
+  `2026-9-16` vs `2026-10-01`, which sort opposite to their chronological
+  order — no Date parsing, no wall clock). There is no semantic selector
+  and no hook for one.
+- **Layer 3**: a sourceRefs carrier is Layer-3 class even when a rule names
+  its type (never visible to L2/L4 selection), passes its §7.4:567-576
+  source refs through onto the packet entry, and is excluded-by-budget when
+  it cannot fit.
+- **Fingerprint (§7.7 narrowed)**: sha256 over the canonical JSON of
+  `{ model, planHash, selected }` (selected ids/hashes in packet order) —
+  identical inputs → identical hash; changing one selected artifact's
+  contentHash, the selection set, the model string, or any plan field
+  (planHash — even with identical inclusions) yields a different hash; a
+  different `jobId` yields the identical hash (jobId is recorded, never
+  fingerprinted); the four producerless components
+  (`promptVersion`/`roleVersion`/`reasoningConfiguration`/
+  `projectManifestVersion`) are recorded null.
+- **Inspector happy path**: exit 0 rendering the §26.4:1748-1756 fields —
+  token budget (cap + per-layer ledger + total), per-layer included
+  artifacts, excluded artifacts with reasons, L3 source chains, context
+  fingerprint with `no-producer` components, the job id; `--json` emits the
+  same structure as JSON; relative `--plan`/`--packet` paths resolve
+  against `--run-root` (default `C:\swarm`, decisions.md run root).
+- **Inspector refusals** exit non-zero and print no body: missing
+  `--plan`/`--packet`, missing files, unparseable JSON, plan parse refusals
+  surfaced through the CLI, a packet whose recorded ledger is inconsistent
+  with recomputation (per-layer or total, or recorded cap ≠ plan's
+  `maxInputTokens`), a recorded total over cap, a fingerprint whose
+  components diverge from the packet's included entries, a plan-hash
+  mismatch on recompute, a fingerprint-hash mismatch on recompute, and
+  shape violations (non-array layer; a Layer-3 entry without `sourceRefs`).
+- **The inspector never writes**: plan and packet files are byte-identical
+  (sha256 before/after) across successful and refused inspects.
+
+Not pinned here and carved by the ticket: packet→prompt composition
+(anything consuming a packet in the pipeline owns its own Gate 2 run and
+must reconcile the fingerprint with T-007's `input_context_hash`), the
+`context_plans`/`context_packets` store tables (§27:1826-1827 — needs
+T-006's landed store plus a pipeline producer), distillation workflows
+(§7.3-7.5), the artifact store itself, the full §7.7 fingerprint (the four
+producerless components stay null), and the §26.4 UI (the CLI is the
+token-free precursor, as the dag dump is §26.2's). Gate 2 is not required
+and not run: the slice touches none of Gate 2's triggers — it adds
+`src/context.ts`, `src/context-inspect.ts`, and `scripts/check-context.mjs`
+plus one package.json script, and changes no pipeline file. Gate 3 n/a
+(no adapter; the model enters only as the fingerprint's CLI/config string).
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
