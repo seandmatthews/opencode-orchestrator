@@ -205,6 +205,42 @@ export interface CandidateReport {
   error?: string
 }
 
+// ---------- Schedule (T-009, spec §22:1329 — deterministic, persisted transitions) ----------
+
+/**
+ * Phase status under the `all` completion policy (§6.3). 'blocked' = the
+ * phase's jobs were never dispatched because an upstream phase failed —
+ * recorded as not-dispatched, never fabricated as terminal.
+ */
+export type PhaseStatus = 'completed' | 'failed' | 'blocked'
+
+export interface SchedulePhase {
+  id: string
+  /** Declared phase-level dependencies, as written in the spec. */
+  dependencies: string[]
+  /** The one completion policy this slice implements. */
+  completion: 'all'
+  status: PhaseStatus
+}
+
+export interface ScheduleJob {
+  id: string
+  phaseId: string
+  /** The expanded edges the ready function enforced (job deps + phase-dep
+   *  expansion) — what a post-hoc determinism check compares. */
+  dependencies: string[]
+  /** 0-based position in the run's dispatch order; null = never dispatched. */
+  dispatchIndex: number | null
+}
+
+/** The recorded dispatch order that makes a schedule checkable post-hoc
+ *  (§22:1329). Carried only by --jobs runs; default-mode reports leave it
+ *  undefined, so existing consumers see no change. */
+export interface RunSchedule {
+  phases: SchedulePhase[]
+  jobs: ScheduleJob[]
+}
+
 export interface RunReport {
   runId: string
   repo: string
@@ -215,4 +251,6 @@ export interface RunReport {
   startedAt: string
   finishedAt: string
   candidates: CandidateReport[]
+  /** Present only in --jobs mode (T-009): the recorded schedule. */
+  schedule?: RunSchedule
 }

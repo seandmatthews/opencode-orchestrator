@@ -1,10 +1,13 @@
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CommandGate } from './gate/command.js'
 import { acquireCheckoutLock, releaseCheckoutLock } from './lock.js'
 import { runSkeleton } from './runner.js'
+import type { ResolvedJob } from './runner.js'
+import { parseJobsSpec } from './scheduler.js'
+import type { JobsSpec } from './scheduler.js'
 import { ingest } from './store/index.js'
 import type { WorkerAdapter } from './types.js'
 import { WorktreeProvider } from './workspace/worktree.js'
@@ -15,10 +18,21 @@ worktrees of one repo at one base SHA, then decide survival with machine gates.
 
 Usage:
   npm run skeleton -- --repo <path> --goal "<text>" [options]
+  npm run skeleton -- --repo <path> --jobs <spec.json> [options]
 
 Options:
   --repo <path>            Target git repository (required)
-  --goal "<text>"          What the candidates should implement (required)
+  --goal "<text>"          What the candidates should implement (required
+                           without --jobs)
+  --jobs <path>            Run a validated job spec (JSON: phases + jobs,
+                           see src/scheduler.ts) instead of planner briefs:
+                           deterministic DAG-driven dispatch under
+                           --concurrency, one candidate per job, per-job
+                           model/worker/timeoutMs/gates defaulting to the
+                           run-level flags. --goal is not required;
+                           --candidates and the planner are ignored.
+                           Spec refusals exit 1 before the checkout lock,
+                           repo validation, or any artifacts dir exists.
   --model <id>             Worker-tier model ID passed for every candidate
                            (default: zai-coding-plan/glm-5.3-flash)
   --planner-model <id>     Planner-tier model ID that turns the goal into N
@@ -54,6 +68,8 @@ run completes mechanically; the report carries the verdicts.`
 interface Options {
   repo: string
   goal: string
+  /** Path to a --jobs spec file; empty string = default (planner) mode. */
+  jobs: string
   model: string
   plannerModel: string | null
   reviewerModel: string | null
@@ -75,6 +91,7 @@ function parseArgs(argv: string[]): Options {
   const opts: Options = {
     repo: '',
     goal: '',
+    jobs: '',
     model: 'zai-coding-plan/glm-5.3-flash',
     plannerModel: 'zai-coding-plan/glm-5.3',
     reviewerModel: 'zai-coding-plan/glm-5.3',
@@ -104,6 +121,7 @@ function parseArgs(argv: string[]): Options {
     switch (arg) {
       case '--repo': opts.repo = value(); break
       case '--goal': opts.goal = value(); break
+      case '--jobs': opts.jobs = value(); break
       case '--model': opts.model = value(); break
       case '--planner-model': opts.plannerModel = value(); break
       case '--no-planner': opts.plannerModel = null; break
@@ -139,9 +157,52 @@ function parseArgs(argv: string[]): Options {
     }
   }
 
-  if (!opts.repo || !opts.goal) throw new Error(`--repo and --goal are required\n\n${usage}`)
-  if (!opts.concurrency) opts.concurrency = opts.candidates
+  if (!opts.repo) throw new Error(`--repo is required\n\n${usage}`)
+  if (!opts.goal && !opts.jobs) throw new Error(`--goal (or --jobs) is required\n\n${usage}`)
   return opts
+}
+
+/** Read + decode + validate the --jobs spec. Called from main() BEFORE repo
+ *  validation and the checkout lock (the T-007 --max-attempts parse-refusal
+ *  pattern): a bad spec must cost zero side effects — no artifacts dir, no
+ *  lock, no repo access. */
+function loadJobsSpec(path: string): JobsSpec {
+  let raw: string
+  try {
+    raw = readFileSync(path, 'utf8')
+  } catch {
+    throw new Error(`--jobs file not found: ${path}`)
+  }
+  let decoded: unknown
+  try {
+    decoded = JSON.parse(raw)
+  } catch (e) {
+    throw new Error(`--jobs ${path} is not valid JSON: ${e instanceof Error ? e.message : String(e)}`)
+  }
+  return parseJobsSpec(decoded)
+}
+
+/** Bind the parsed spec to run-level defaults and adapter/gate objects. */
+function resolveJobs(jobsSpec: JobsSpec, opts: Options): ResolvedJob[] {
+  const workers = new Map<string, WorkerAdapter>()
+  const workerFor = (id: string): WorkerAdapter => {
+    let w = workers.get(id)
+    if (!w) {
+      w = createWorker(id, opts)
+      workers.set(id, w)
+    }
+    return w
+  }
+  return jobsSpec.jobs.map((j) => ({
+    id: j.id,
+    phaseId: j.phase,
+    dependencies: j.dependencies,
+    brief: j.brief,
+    model: j.model ?? opts.model,
+    worker: workerFor(j.worker ?? opts.workerId),
+    timeoutMs: j.timeoutMs ?? opts.timeoutMs,
+    gates: (j.gates ?? opts.gates).map((g) => new CommandGate(g.name, g.command)),
+  }))
 }
 
 function createWorker(workerId: string, opts: Options): WorkerAdapter {
@@ -159,6 +220,14 @@ function createWorker(workerId: string, opts: Options): WorkerAdapter {
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2))
 
+  // T-009: the --jobs spec is read and validated BEFORE repo validation, the
+  // checkout lock, or any artifacts dir exists — a refusal must write
+  // nothing (the T-007 --max-attempts parse-refusal pattern).
+  const jobsSpec = opts.jobs ? loadJobsSpec(opts.jobs) : null
+  // Concurrency default (generalized: the job count in --jobs mode, the
+  // candidate count in default mode).
+  if (!opts.concurrency) opts.concurrency = jobsSpec ? jobsSpec.jobs.length : opts.candidates
+
   opts.repo = opts.repo
   try {
     execFileSync('git', ['rev-parse', 'HEAD'], { cwd: opts.repo, stdio: 'ignore', windowsHide: true })
@@ -171,13 +240,13 @@ async function main(): Promise<void> {
   // artifacts dir exists.
   const lockPath = acquireCheckoutLock(opts.runRoot, opts.repo, { cmd: 'run' }, opts.forceLock)
   try {
-    await runPipeline(opts)
+    await runPipeline(opts, jobsSpec)
   } finally {
     releaseCheckoutLock(lockPath)
   }
 }
 
-async function runPipeline(opts: Options): Promise<void> {
+async function runPipeline(opts: Options, jobsSpec: JobsSpec | null): Promise<void> {
   if (opts.gates.length === 0) {
     console.warn('warning: no --gate given; every candidate passes vacuously')
   }
@@ -188,12 +257,12 @@ async function runPipeline(opts: Options): Promise<void> {
 
   const baseSha = execFileSync('git', ['rev-parse', opts.base], { cwd: opts.repo, encoding: 'utf8', windowsHide: true }).trim()
 
-  console.log(`run ${runId}: ${opts.candidates} candidates, concurrency ${opts.concurrency}`)
+  console.log(`run ${runId}: ${jobsSpec ? `${jobsSpec.jobs.length} jobs from ${opts.jobs}` : `${opts.candidates} candidates`}, concurrency ${opts.concurrency}`)
   console.log(`repo:     ${opts.repo} @ ${baseSha.slice(0, 12)}`)
-  console.log(`planner:  ${opts.plannerModel ?? '(disabled — candidates get the raw goal)'}`)
+  console.log(`planner:  ${jobsSpec ? '(skipped — briefs come from the jobs spec)' : opts.plannerModel ?? '(disabled — candidates get the raw goal)'}`)
   console.log(`reviewer: ${opts.reviewerModel ?? '(disabled)'}`)
   console.log(`workers:  ${opts.model} (worker: ${opts.workerId})`)
-  console.log(`goal:     ${opts.goal}`)
+  console.log(`goal:     ${opts.goal || (jobsSpec ? '(none — briefs come from the jobs spec)' : '')}`)
   console.log(`artifacts: ${artifactsDir}`)
   console.log('')
 
@@ -203,9 +272,9 @@ async function runPipeline(opts: Options): Promise<void> {
     baseSha,
     goal: opts.goal,
     model: opts.model,
-    plannerModel: opts.plannerModel,
+    plannerModel: jobsSpec ? null : opts.plannerModel,
     reviewerModel: opts.reviewerModel,
-    candidateIds: Array.from({ length: opts.candidates }, (_, i) => `c${String(i + 1).padStart(2, '0')}`),
+    candidateIds: jobsSpec ? [] : Array.from({ length: opts.candidates }, (_, i) => `c${String(i + 1).padStart(2, '0')}`),
     concurrency: opts.concurrency,
     timeoutMs: opts.timeoutMs,
     maxAttempts: opts.maxAttempts,
@@ -214,6 +283,7 @@ async function runPipeline(opts: Options): Promise<void> {
     workspaces: new WorktreeProvider(opts.repo, join(artifactsDir)),
     artifactsDir,
     cleanWorkspaces: opts.clean,
+    scheduled: jobsSpec ? { phases: jobsSpec.phases, jobs: resolveJobs(jobsSpec, opts) } : undefined,
   })
 
   // Persistence records verdicts, never influences them: a failed DB write is
@@ -238,6 +308,11 @@ async function runPipeline(opts: Options): Promise<void> {
       `${c.id}  worker:${c.workerOk ? 'ok' : 'failed'} ${(c.workerDurationMs / 1000).toFixed(0)}s` +
       `  diff:${(c.diffBytes / 1024).toFixed(1)}KiB  ${gateText} => ${verdict}${reviewText}`,
     )
+  }
+  if (report.schedule) {
+    const phases = report.schedule.phases.map((p) => `${p.id}=${p.status}`).join(', ')
+    const notDispatched = report.schedule.jobs.filter((j) => j.dispatchIndex === null).map((j) => j.id)
+    console.log(`schedule: ${phases}${notDispatched.length > 0 ? `; not dispatched: ${notDispatched.join(', ')}` : ''}`)
   }
   console.log(`\nreport: ${join(artifactsDir, 'report.json')}`)
 }

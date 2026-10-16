@@ -2,7 +2,34 @@ import { createHash } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseBriefs, parseReview } from './parse.js'
+import { buildSchedule, readyJobs } from './scheduler.js'
+import type { PhaseSpec } from './scheduler.js'
+import { DERIVED_PHASE_ID } from './store/index.js'
 import type { Attempt, CandidateReport, FailureRecord, Gate, GateResult, PlannerReport, ReviewReport, RunReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
+
+/** One fully-resolved executable job (T-009 --jobs mode): the spec's
+ *  scheduling fields with the run-level flags applied as defaults
+ *  (model/worker/timeoutMs/gates) and the adapter/gate objects bound. The
+ *  engine stays harness-agnostic: adapters and gates arrive behind the
+ *  WorkerAdapter/Gate seams (src/types.ts), model IDs only as strings. */
+export interface ResolvedJob {
+  id: string
+  phaseId: string
+  /** Expanded edges (job deps + phase-dep expansion) the ready function enforces. */
+  dependencies: string[]
+  brief: string
+  model: string
+  worker: WorkerAdapter
+  timeoutMs: number
+  gates: Gate[]
+}
+
+/** The validated spec a --jobs run drives: the declared phases (for the
+ *  recorded schedule) plus the resolved jobs. */
+export interface ScheduledRunSpec {
+  phases: PhaseSpec[]
+  jobs: ResolvedJob[]
+}
 
 export interface SkeletonOptions {
   runId: string
@@ -34,6 +61,15 @@ export interface SkeletonOptions {
   artifactsDir: string
   /** Dispose workspaces after evidence capture instead of leaving them for inspection. */
   cleanWorkspaces: boolean
+  /**
+   * T-009 --jobs mode: the validated job spec's phases and fully resolved
+   * jobs. Present ⇒ DAG-driven: no planner (briefs come from the jobs),
+   * dispatch follows the deterministic ready function, and the run report
+   * carries the schedule block. Absent ⇒ default mode: the degenerate
+   * one-phase spec is synthesized from candidateIds + briefs and driven
+   * through the same loop, with NO schedule block — today's behavior.
+   */
+  scheduled?: ScheduledRunSpec
 }
 
 export function builderPrompt(goal: string, workspacePath: string): string {
@@ -56,36 +92,64 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
   const startedAt = new Date().toISOString()
   mkdirSync(join(opts.artifactsDir, 'wt'), { recursive: true })
 
-  // Planning tier: one smart-model job turns the goal into N distinct briefs.
-  // Failure here degrades gracefully — candidates fall back to the raw goal.
+  // Planning tier (default mode only): one smart-model job turns the goal
+  // into N distinct briefs. Failure here degrades gracefully — candidates
+  // fall back to the raw goal. --jobs mode skips it entirely: briefs come
+  // from the spec and the goal is not required.
   let briefs: string[] = opts.candidateIds.map(() => opts.goal)
   let planner: PlannerReport | undefined
-  if (opts.plannerModel) {
+  if (!opts.scheduled && opts.plannerModel) {
     planner = await runPlannerPhase(opts)
     if (planner.ok) briefs = planner.briefs
     console.log(`planner: ${planner.ok ? `${briefs.length} briefs` : 'no valid output, using raw goal'} in ${(planner.durationMs / 1000).toFixed(0)}s (${planner.attempts} attempt${planner.attempts > 1 ? 's' : ''})`)
     console.log('')
   }
 
-  // Lease every candidate's FIRST attempt up front so all workers start from
-  // the same base. Retry attempts (T-007) lease their own fresh worktree
-  // lazily inside the candidate's lane, at the same baseSha.
-  const leases = new Map<string, WorkspaceLease>()
-  for (const id of opts.candidateIds) {
-    leases.set(id, opts.workspaces.lease(`wt/${id}`, opts.baseSha))
-  }
+  // The job list the scheduler drives (T-009). --jobs mode: the resolved
+  // specs. Default mode: the degenerate one-phase spec — one dependency-free
+  // job per candidate, exactly T-006's derived DAG — so both modes run the
+  // same loop; only the schedule recording differs.
+  const jobs: ResolvedJob[] = opts.scheduled?.jobs ?? opts.candidateIds.map((id, i) => ({
+    id,
+    phaseId: DERIVED_PHASE_ID,
+    dependencies: [],
+    brief: briefs[i]!,
+    model: opts.model,
+    worker: opts.worker,
+    timeoutMs: opts.timeoutMs,
+    gates: opts.gates,
+  }))
 
-  let next = 0
-  const reports: CandidateReport[] = new Array(opts.candidateIds.length)
-  const lane = async (): Promise<void> => {
-    for (;;) {
-      const i = next++
-      if (i >= opts.candidateIds.length) return
-      const id = opts.candidateIds[i]!
-      reports[i] = await runCandidate(id, leases.get(id)!, briefs[i]!, opts)
+  // Scheduler loop (T-009): repeatedly take the deterministic ready list and
+  // dispatch up to the concurrency cap. dispatchIndex is a job's position in
+  // the run's dispatch order; terminal states feed the next ready call. A
+  // job whose dependencies can never reach terminal success (an upstream
+  // failure) is simply never dispatched — recorded, not fabricated.
+  const nodes = jobs.map((j) => ({ id: j.id, phaseId: j.phaseId, dependencies: j.dependencies }))
+  const byId = new Map(jobs.map((j) => [j.id, j]))
+  const terminal = new Map<string, 'succeeded' | 'failed'>()
+  const running = new Set<string>()
+  const inFlight = new Set<Promise<void>>()
+  const dispatchIndexOf = new Map<string, number>()
+  const reports = new Map<string, CandidateReport>()
+  let dispatched = 0
+  for (;;) {
+    for (const id of readyJobs(nodes, terminal, running, opts.concurrency)) {
+      const job = byId.get(id)!
+      dispatchIndexOf.set(id, dispatched++)
+      running.add(id)
+      const p = runJob(job, opts).then((rep) => {
+        reports.set(id, rep)
+        terminal.set(id, rep.passedAllGates ? 'succeeded' : 'failed')
+      }).finally(() => {
+        running.delete(id)
+        inFlight.delete(p)
+      })
+      inFlight.add(p)
     }
+    if (inFlight.size === 0) break
+    await Promise.race([...inFlight])
   }
-  await Promise.all(Array.from({ length: opts.concurrency }, lane))
 
   const report: RunReport = {
     runId: opts.runId,
@@ -96,7 +160,14 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
     planner,
     startedAt,
     finishedAt: new Date().toISOString(),
-    candidates: reports,
+    // Report order follows the spec order (candidateIds order in default
+    // mode) — today's summary/ingest order. Only dispatched jobs appear: a
+    // never-dispatched job is recorded as not-dispatched in the schedule
+    // block, never fabricated as a candidate.
+    candidates: jobs.map((j) => reports.get(j.id)).filter((r): r is CandidateReport => r !== undefined),
+  }
+  if (opts.scheduled) {
+    report.schedule = buildSchedule(opts.scheduled.phases, nodes, terminal, dispatchIndexOf)
   }
   writeFileSync(join(opts.artifactsDir, 'report.json'), JSON.stringify(report, null, 2))
   return report
@@ -251,15 +322,24 @@ function inputContextHash(brief: string, model: string, workspacePath: string): 
   return createHash('sha256').update(`${brief}\n${model}\n${promptWithoutWorkspace}`).digest('hex')
 }
 
-async function runCandidate(id: string, firstLease: WorkspaceLease, brief: string, opts: SkeletonOptions): Promise<CandidateReport> {
+/** Execute one job (T-009): the T-007 attempt loop verbatim, with the job's
+ *  resolved config in place of the run-level fields. The first attempt's
+ *  worktree is leased LAZILY here — when the scheduler dispatches the job —
+ *  at the run's baseSha, never up front; retry attempts lease their own
+ *  fresh worktree (wt/<jobId>-a<n>) at the same baseSha. A mechanical
+ *  failure (throw or !workerOk) requeues as a fresh attempt while the
+ *  maxAttempts bound allows; a succeeded-but-no-op or gates-failed leg is a
+ *  verdict and is never re-rolled (decisions.md: gates decide survival). */
+async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<CandidateReport> {
+  const id = job.id
   const dir = join(opts.artifactsDir, id)
   mkdirSync(dir, { recursive: true })
   const base: CandidateReport = {
     id,
-    workerId: opts.worker.id,
-    model: opts.model,
-    brief,
-    workspacePath: firstLease.path,
+    workerId: job.worker.id,
+    model: job.model,
+    brief: job.brief,
+    workspacePath: null,
     workerOk: false,
     workerTimedOut: false,
     workerDurationMs: 0,
@@ -270,21 +350,15 @@ async function runCandidate(id: string, firstLease: WorkspaceLease, brief: strin
     attempts: [],
   }
 
-  // Bounded same-config retry (T-007): a mechanical failure re-runs as a
-  // fresh attempt in a fresh worktree at the same baseSha — a fresh attempt
-  // adopts nothing from the prior attempt's worktree, branch, or process
-  // state (spec §15.1). Retries stay inside the candidate's lane, so
-  // lane/concurrency semantics are untouched.
-  let lease = firstLease
+  let lease: WorkspaceLease | null = null
   for (let n = 1; ; n++) {
-    if (n >= 2) {
-      // Attempt-scoped lease id: two leases on `wt/<id>` would both derive
-      // `swarm/wt-<id>` (the T-004 branch-collision hazard), and attempt 2
-      // would overwrite attempt 1's worker.log. Attempts ≥ 2 get their own
-      // evidence directory too.
-      lease = opts.workspaces.lease(`wt/${id}-a${n}`, opts.baseSha)
-      base.workspacePath = lease.path
-    }
+    // Attempt-scoped lease id (T-007): two leases on `wt/<id>` would both
+    // derive `swarm/wt-<id>` (the T-004 branch-collision hazard), and
+    // attempt 2 would overwrite attempt 1's worker.log. Job ids are unique
+    // per spec and charset-restricted (src/scheduler.ts), so the branches
+    // cannot collide mid-run. Attempts ≥ 2 get their own evidence directory.
+    lease = opts.workspaces.lease(n === 1 ? `wt/${id}` : `wt/${id}-a${n}`, opts.baseSha)
+    base.workspacePath = lease.path
     const evidenceDir = n === 1 ? dir : join(dir, `attempt-${n}`)
     mkdirSync(evidenceDir, { recursive: true })
     const logPath = join(evidenceDir, 'worker.log')
@@ -296,20 +370,20 @@ async function runCandidate(id: string, firstLease: WorkspaceLease, brief: strin
       number: n,
       state: 'running',
       startedAt: new Date().toISOString(),
-      inputContextHash: inputContextHash(brief, opts.model, lease.path),
+      inputContextHash: inputContextHash(job.brief, job.model, lease.path),
       promptVersion: null,
       outputArtifacts: [logPath],
     }
     base.attempts.push(attempt)
 
     try {
-      console.log(`[${id}] attempt ${n}: worker start (${opts.worker.id}, model=${opts.model})`)
-      const result = await opts.worker.execute({
-        prompt: builderPrompt(brief, lease.path),
-        model: opts.model,
+      console.log(`[${id}] attempt ${n}: worker start (${job.worker.id}, model=${job.model})`)
+      const result = await job.worker.execute({
+        prompt: builderPrompt(job.brief, lease.path),
+        model: job.model,
         cwd: lease.path,
         logPath,
-        timeoutMs: opts.timeoutMs,
+        timeoutMs: job.timeoutMs,
       })
       attempt.endedAt = new Date().toISOString()
       console.log(`[${id}] attempt ${n}: worker done in ${(result.durationMs / 1000).toFixed(0)}s ok=${result.ok} exit=${result.exitCode}`)
@@ -321,7 +395,7 @@ async function runCandidate(id: string, firstLease: WorkspaceLease, brief: strin
       // gates decide survival).
       const failure: FailureRecord | null = result.ok ? null : {
         reason: 'worker-failed',
-        message: result.timedOut ? `worker timed out after ${opts.timeoutMs}ms` : `worker exited with code ${result.exitCode}`,
+        message: result.timedOut ? `worker timed out after ${job.timeoutMs}ms` : `worker exited with code ${result.exitCode}`,
         timedOut: result.timedOut,
         exitCode: result.exitCode,
       }
@@ -356,10 +430,10 @@ async function runCandidate(id: string, firstLease: WorkspaceLease, brief: strin
       }
 
       // Final attempt (worker succeeded, or the bound was reached): the
-      // candidate's top-level fields are this attempt's values — the exact
-      // flow and verdict ladder the runner had before T-007, so the run
-      // summary, the store's per-candidate writes, and clean/integrate
-      // discovery are unchanged.
+      // job's top-level fields are this attempt's values — the exact flow
+      // and verdict ladder the runner had before T-009, so the run summary,
+      // the store's per-candidate writes, and clean/integrate discovery are
+      // unchanged.
       attempt.state = result.ok ? 'succeeded' : 'failed'
       if (failure) attempt.failure = failure
       base.workerOk = result.ok
@@ -370,7 +444,7 @@ async function runCandidate(id: string, firstLease: WorkspaceLease, brief: strin
         base.diffBytes = Buffer.byteLength(diff)
       }
 
-      for (const gate of opts.gates) {
+      for (const gate of job.gates) {
         const r: GateResult = await gate.run(lease.path)
         base.gates.push(r)
         console.log(`[${id}] gate ${r.name}: ${r.passed ? 'PASS' : 'FAIL'} (${(r.durationMs / 1000).toFixed(1)}s)`)
@@ -382,7 +456,7 @@ async function runCandidate(id: string, firstLease: WorkspaceLease, brief: strin
           id,
           dir,
           workspacePath: lease.path,
-          brief,
+          brief: job.brief,
           diff,
           gateLines: base.gates.map((g) => `- ${g.name}: ${g.passed ? 'PASS' : 'FAIL'}`),
         })
@@ -405,14 +479,14 @@ async function runCandidate(id: string, firstLease: WorkspaceLease, brief: strin
         continue
       }
       base.error = attempt.failure.message
-      console.log(`[${id}] candidate errored: ${base.error}`)
+      console.log(`[${id}] job errored: ${base.error}`)
       break
     }
   }
 
   if (opts.cleanWorkspaces) {
     try {
-      opts.workspaces.dispose(lease)
+      opts.workspaces.dispose(lease!)
       base.workspacePath = null
     } catch (e) {
       console.log(`[${id}] workspace dispose failed: ${errorMessage(e)}`)

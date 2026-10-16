@@ -10,7 +10,11 @@
 // hand-built-input pattern — no pipeline, no model tokens). T-007 extends it
 // with the attempts table: a hand-built retried-candidate variant of the
 // fixture (the elim-variant pattern) pins row shape/values, ATTEMPT_STARTED
-// derivation, and re-ingest idempotency with append-only events.
+// derivation, and re-ingest idempotency with append-only events. T-009
+// extends it with a schedule-carrying DAG variant: the REAL multi-phase
+// structure in phases/jobs/job_dependencies, the derived schedule events
+// (JOB_READY / JOB_SUCCEEDED / JOB_FAILED / PHASE_COMPLETED) at
+// report-carried stamps, and re-ingest idempotency.
 import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -219,6 +223,95 @@ try {
       ['RUN_CREATED', 'ATTEMPT_STARTED', 'ATTEMPT_STARTED']))
   t('retried re-ingest: integrity_check ok', retriedDb2.prepare('PRAGMA integrity_check').get()['integrity_check'] === 'ok')
   retriedDb2.close()
+
+  // ---------- T-009: a schedule-carrying report — the real multi-phase DAG ----------
+  // Hand-built DAG variant of the fixture (the elim-variant pattern): two
+  // real phases, foundation -> app with the expanded edge c02 -> c01; c02
+  // fails its gates, so phase `app` is 'failed' and PHASE_COMPLETED derives
+  // for `foundation` only. Pins the phases/jobs/job_dependencies rows, the
+  // derived schedule events with report-carried stamps (never Date.now()),
+  // and re-ingest idempotency with append-only events.
+  const dag = structuredClone(report)
+  dag.schedule = {
+    phases: [
+      { id: 'foundation', dependencies: [], completion: 'all', status: 'completed' },
+      { id: 'app', dependencies: ['foundation'], completion: 'all', status: 'failed' },
+    ],
+    jobs: [
+      { id: 'c01', phaseId: 'foundation', dependencies: [], dispatchIndex: 0 },
+      { id: 'c02', phaseId: 'app', dependencies: ['c01'], dispatchIndex: 1 },
+    ],
+  }
+  const dagVictim = dag.candidates[1]
+  dagVictim.gates[0].passed = false
+  dagVictim.gates[0].exitCode = 1
+  dagVictim.passedAllGates = false
+  const dagDbPath = join(sandbox, 'scheduled.db')
+  ingest(dag, dagDbPath)
+  const dagDb = new DatabaseSync(dagDbPath)
+  const dagPhases = dagDb.prepare('SELECT * FROM phases WHERE run_id = ? ORDER BY phase_id').all(dag.runId)
+  t('scheduled variant: two phase rows with the real ids',
+    dagPhases.length === 2 && dagPhases[0]?.phase_id === 'app' && dagPhases[1]?.phase_id === 'foundation')
+  t('scheduled variant: phase dependencies copied and completion policy recorded (its first producer)',
+    eq(JSON.parse(dagPhases[0]?.dependencies_json), ['foundation']) && dagPhases[0]?.completion === 'all'
+    && eq(JSON.parse(dagPhases[1]?.dependencies_json), []) && dagPhases[1]?.completion === 'all')
+  t('scheduled variant: phase policy columns without producers stay null',
+    dagPhases.every((p) => p.early_stop_json == null && p.approval_gate_json == null))
+  for (const c of dag.candidates) {
+    const job = dagDb.prepare('SELECT * FROM jobs WHERE run_id = ? AND job_id = ?').get(dag.runId, c.id)
+    const expectedPhase = c.id === 'c01' ? 'foundation' : 'app'
+    const expectedDeps = c.id === 'c01' ? [] : ['c01']
+    t(`scheduled variant: ${c.id} job row carries its real phase and edges`,
+      job?.phase_id === expectedPhase && eq(JSON.parse(job?.dependencies_json), expectedDeps)
+      && job?.worker_id === c.workerId && job?.model === c.model && job?.brief === c.brief)
+  }
+  const dagEdges = dagDb.prepare('SELECT job_id, depends_on_job_id FROM job_dependencies WHERE run_id = ? ORDER BY job_id').all(dag.runId)
+  t('scheduled variant: exactly one real dependency edge (c02 -> c01)',
+    dagEdges.length === 1 && dagEdges[0]?.job_id === 'c02' && dagEdges[0]?.depends_on_job_id === 'c01')
+
+  const dagEvents = dagDb.prepare('SELECT seq, type, at, payload FROM events ORDER BY seq').all()
+  t('scheduled variant: per-candidate block first, then the schedule block, in schedule order',
+    eq(dagEvents.map((e) => e.type), [
+      'RUN_CREATED', 'GATE_FAILED', 'CANDIDATE_ELIMINATED',
+      'JOB_READY', 'JOB_SUCCEEDED', 'JOB_READY', 'JOB_FAILED', 'PHASE_COMPLETED',
+    ]))
+  const startedAt = dag.startedAt
+  const c01At = new Date(Date.parse(startedAt) + dag.candidates[0].workerDurationMs).toISOString()
+  const c02At = new Date(Date.parse(startedAt) + dagVictim.workerDurationMs).toISOString()
+  const [readyC01, okC01, readyC02, failC02, phaseDone] = dagEvents.slice(3)
+  t('scheduled variant: JOB_READY at the max of the dependencies\' finish stamps (startedAt for dependency-free)',
+    readyC01?.at === startedAt && readyC02?.at === c01At)
+  t('scheduled variant: JOB_SUCCEEDED/JOB_FAILED at each job\'s own finish stamp (startedAt + worker duration)',
+    okC01?.at === c01At && failC02?.at === c02At)
+  t('scheduled variant: PHASE_COMPLETED only for the completed phase, at its max job finish stamp',
+    phaseDone?.type === 'PHASE_COMPLETED' && phaseDone?.at === c01At)
+  t('scheduled variant: schedule event payloads name job and phase',
+    eq(JSON.parse(readyC01?.payload), { jobId: 'c01', phaseId: 'foundation' })
+    && eq(JSON.parse(okC01?.payload), { jobId: 'c01', phaseId: 'foundation' })
+    && eq(JSON.parse(readyC02?.payload), { jobId: 'c02', phaseId: 'app' })
+    && eq(JSON.parse(failC02?.payload), { jobId: 'c02', phaseId: 'app' })
+    && eq(JSON.parse(phaseDone?.payload), { phaseId: 'foundation' }))
+  const dagPhasesBefore = dagPhases
+  const dagJobsBefore = dagDb.prepare('SELECT * FROM jobs WHERE run_id = ? ORDER BY job_id').all(dag.runId)
+  const dagEdgesBefore = dagEdges
+  const dagEventsBefore = dagEvents
+  dagDb.close()
+
+  // re-ingest of the scheduled variant: DAG rows idempotent, events append-only
+  ingest(dag, dagDbPath)
+  const dagDb2 = new DatabaseSync(dagDbPath)
+  t('scheduled re-ingest: phases/jobs/job_dependencies idempotent',
+    eq(dagDb2.prepare('SELECT * FROM phases WHERE run_id = ? ORDER BY phase_id').all(dag.runId), dagPhasesBefore)
+    && eq(dagDb2.prepare('SELECT * FROM jobs WHERE run_id = ? ORDER BY job_id').all(dag.runId), dagJobsBefore)
+    && eq(dagDb2.prepare('SELECT job_id, depends_on_job_id FROM job_dependencies WHERE run_id = ? ORDER BY job_id').all(dag.runId), dagEdgesBefore))
+  const dagEventsAfter = dagDb2.prepare('SELECT seq, type, at, payload FROM events ORDER BY seq').all()
+  t('scheduled re-ingest: events appended (a fresh deterministic block), prior rows untouched',
+    dagEventsAfter.length === dagEventsBefore.length * 2
+    && eq(dagEventsAfter.slice(0, dagEventsBefore.length), dagEventsBefore)
+    && eq(dagEventsAfter.slice(dagEventsBefore.length).map((e) => [e.type, e.at, e.payload]),
+      dagEventsBefore.map((e) => [e.type, e.at, e.payload])))
+  t('scheduled re-ingest: integrity_check ok', dagDb2.prepare('PRAGMA integrity_check').get()['integrity_check'] === 'ok')
+  dagDb2.close()
 
   // ---------- T-006: pure validators on hand-built inputs (Gate 0.5 pattern) ----------
   // The derived DAG is acyclic by construction; the interesting validator

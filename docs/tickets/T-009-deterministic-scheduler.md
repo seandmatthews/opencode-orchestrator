@@ -1,9 +1,9 @@
 # T-009 — Deterministic scheduler core: minimal job spec, DAG-driven execution, all-completion
 
-**Status:** proposed
+**Status:** done 2026-10-16
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 4
-**Depends on:** T-006 + T-007 (both proposed — must land first; transitively T-003). **T-008 is NOT a dependency of this carve** — see the first Does-NOT-claim: nothing here consumes approval state, so the approval-honoring part of the idea is a successor ticket, not this one.
+**Depends on:** T-006 + T-007 (both done 2026-10-16; transitively T-003). **T-008 is NOT a dependency of this carve** — see the first Does-NOT-claim: nothing here consumes approval state, so the approval-honoring part of the idea is a successor ticket, not this one.
 
 ## What
 
@@ -202,48 +202,48 @@ honestly (hence Value 4, not 5).
 
 ## Acceptance criteria
 
-- [ ] The exported ready-queue function is pure and correct on synthetic DAGs:
+- [x] The exported ready-queue function is pure and correct on synthetic DAGs:
       chain, diamond, independent, and mixed specs return dependency-safe ready
       lists under a given cap, tie-broken by ascending job id; a job is never
       returned before all its dependencies are terminal-success — pinned by the
       **new Gate 1.10** (`scripts/check-scheduler.mjs` + new VERIFICATION.md
       section + hook in `scripts/verify.mjs` after Gate 1.9; direct function
       assertions, no pipeline, no repo, no model tokens).
-- [ ] Determinism end-to-end: two scheduler runs over the same `--jobs` spec
+- [x] Determinism end-to-end: two scheduler runs over the same `--jobs` spec
       with the same fake-worker outcomes produce **identical recorded dispatch
       sequences** (per-job `dispatchIndex` equal across the two reports) —
       pinned by **Gate 1.10** (run twice, compare).
-- [ ] The concurrency cap is never exceeded: the fake adapter counts in-flight
+- [x] The concurrency cap is never exceeded: the fake adapter counts in-flight
       executions and the observed maximum is ≤ the cap, on a spec with more
       ready jobs than slots — pinned by **Gate 1.10**.
-- [ ] Dependent jobs dispatch only after their dependencies reach terminal
+- [x] Dependent jobs dispatch only after their dependencies reach terminal
       success (including across phases via expanded phase edges) — pinned by
       **Gate 1.10** (fake adapter records the dispatch order).
-- [ ] T-007's retry rule verbatim: a mechanical-leg failure (`error`/
+- [x] T-007's retry rule verbatim: a mechanical-leg failure (`error`/
       `!workerOk`) requeues the job as a fresh attempt in a `wt/<jobId>-a<n>`
       lease up to `maxAttempts`; a succeeded-but-no-op or gates-failed leg is
       never re-rolled and fails the job per the verdict ladder — pinned by
       **Gate 1.10** (fail-once, always-fail, no-op-then-pass, and
       gates-fail-then-pass fake workers; no branch/worktree collisions observed).
-- [ ] Phase completion `all`: a phase completes only when every job reaches
+- [x] Phase completion `all`: a phase completes only when every job reaches
       terminal success; a failed job fails its phase and dependent phases' jobs
       are never dispatched (recorded as not-dispatched, not fabricated as
       terminal); independent phases still run to completion — pinned by
       **Gate 1.10**.
-- [ ] Default mode is today's behavior: without `--jobs`, candidate ids in
+- [x] Default mode is today's behavior: without `--jobs`, candidate ids in
       order, today's lease ids/branches and evidence paths, one dispatch per
       candidate, **no `schedule` block in `report.json`**, exit code and stdout
       verdict lines unchanged — pinned by **Gate 1.10** (default-mode assertions
       with the fake adapter) and by **`npm run verify`** staying ALL GREEN
       (clean/lock/integrate semantics untouched).
-- [ ] Spec refusals exit 1 and write nothing, before the checkout lock, repo
+- [x] Spec refusals exit 1 and write nothing, before the checkout lock, repo
       validation, or any artifacts dir: missing/unparseable file, empty job set,
       duplicate job id, job id outside the allowed charset, unknown field
       (including `approvalGate`/`earlyStop`/policy fields), non-`all`
       `completion`, unknown dependency, and a cycle whose refusal names the
       cycle (proving T-006's validators are exercised) — pinned by **Gate
       1.10** (subprocess refusal assertions, the T-007 CLI-refusal pattern).
-- [ ] Store: ingest of a schedule-carrying report derives `phases`/
+- [x] Store: ingest of a schedule-carrying report derives `phases`/
       `jobs`/`job_dependencies` rows with the real multi-phase structure and
       real dependency edges, plus exactly one derived `JOB_READY` per job with
       `at` computed from report-carried stamps (never `Date.now()`) and the
@@ -251,32 +251,198 @@ honestly (hence Value 4, not 5).
       pinned by the **extended Gate 1.6** (hand-built DAG variant of
       `scripts/fixtures/report-real.json`, the elim-variant pattern in
       `scripts/check-store.mjs`).
-- [ ] Derived schedule events stay deterministic and append-only: re-ingest
+- [x] Derived schedule events stay deterministic and append-only: re-ingest
       leaves `phases`/`jobs`/`job_dependencies` idempotent while prior `events`
       rows are untouched and `PRAGMA integrity_check` returns `ok` — pinned by
       the **extended Gate 1.6**.
-- [ ] VERIFICATION.md carries the new Gate 1.10 section and the extended Gate
+- [x] VERIFICATION.md carries the new Gate 1.10 section and the extended Gate
       1.6 description, and the ticket status + index row move in the same
       change-set (AGENTS.md #6; tickets README rules) — pinned by change-set
       review.
-- [ ] One real-pipeline `npm run verify:full` at landing, recorded in this
+- [x] One real-pipeline `npm run verify:full` at landing, recorded in this
       ticket's Landed section — `src/runner.ts` and the report-shape change are
       both on VERIFICATION.md:200-201's trigger list (the T-003:166-175 /
       T-007 precedent). Gate 2 is not permanently extended.
 
+## Landed
+
+2026-10-16, in one change-set on `ticket/T-009-deterministic-scheduler`
+(Node v22.23.1). T-006/T-007/T-008 were all landed first, so the
+reservation chain this ticket named is satisfied: the slice is the first
+consumer of T-006's validators and derived tables and of T-007's retry
+rule, and the first producer of non-trivial DAG data.
+
+- `src/scheduler.ts` (new) — the pure scheduling core, no I/O, no model
+  knowledge: minimal `--jobs` spec types (`PhaseSpec`/`JobSpec`/`JobsSpec`,
+  the §6.3/§6.4 subset with producers only) and `parseJobsSpec` — strict
+  decode-validate-expand that REFUSES unknown fields (top level, phase
+  level, job level, including `approvalGate`/`earlyStop` and every §6.4
+  policy field), non-`all` `completion`, the empty job set, duplicate ids,
+  ids outside `[a-z0-9][a-z0-9-]*`, unknown phase/dependency references,
+  job-less phases, and cycles — job-level or surfacing through expanded
+  phase edges — via T-006's exported `unknownDependencyRefusal` +
+  `cycleRefusal`, whose refusal names the cycle. Phase dependencies expand
+  to job edges so the ready function sees one job DAG.
+  `readyJobs(jobs, terminal, running, cap)` is the exported determinism
+  contract: topological ready set (dependencies terminal-SUCCESS only; a
+  terminal-failed dependency blocks its dependents for good), tie-break by
+  ascending job id, bounded by cap minus in-flight. `buildSchedule` records
+  phase statuses (`completed`/`failed`/`blocked`) and per-job
+  `dispatchIndex` (null = never dispatched).
+- `src/types.ts` — additive `RunReport.schedule?`
+  (`RunSchedule`/`SchedulePhase`/`ScheduleJob`/`PhaseStatus`); undefined in
+  default mode, so existing consumers see no change.
+- `src/runner.ts` — the flat fan-out (up-front leasing + the shared `next`
+  counter) is deleted, not kept alongside. `runSkeleton` now drives ONE
+  loop for both modes over `readyJobs`: dispatch up to the cap, each job's
+  `dispatchIndex` assigned at dispatch, terminal state
+  (`passedAllGates ? succeeded : failed`) feeding the next ready call;
+  `await Promise.race` between waves; the loop ends when nothing is in
+  flight and nothing is ready — a job whose dependencies can never succeed
+  is simply never dispatched. `runCandidate` became `runJob(job:
+  ResolvedJob, opts)`: the T-007 attempt loop verbatim (mechanical-leg
+  failures retry in `wt/<jobId>-a<n>` up to `maxAttempts`; no-op and
+  gates-failed verdicts are never re-rolled) with the job's resolved
+  model/worker/timeoutMs/gates in place of the run-level fields. Leasing is
+  lazy — the first worktree is leased at dispatch, never up front. Default
+  mode synthesizes the degenerate one-phase spec (T-006's derived DAG,
+  phase id `main` reused from the store's `DERIVED_PHASE_ID`) and records
+  NO schedule block; `--jobs` mode skips the planner, takes briefs from the
+  spec, and appends `report.schedule`.
+- `src/cli.ts` — `--jobs <path>` (documented in `--help`); the spec is
+  loaded and validated in `main()` BEFORE repo validation and the checkout
+  lock (the `--max-attempts` parse-refusal pattern), so a refusal writes
+  nothing — no artifacts dir, no `locks/`, no repo access. `--goal` is no
+  longer required in `--jobs` mode (report `goal` is `''` when absent);
+  concurrency defaults to the job count in `--jobs` mode, candidate count
+  otherwise. `resolveJobs` binds per-job overrides to the run-level flags
+  and the adapter/gate factories (`createWorker` cached per worker id,
+  `CommandGate` per gate spec). Header lines say what `--jobs` mode does
+  (planner skipped, briefs from the spec); the summary adds one
+  `schedule:` line (phase statuses + not-dispatched ids) — new-mode stdout
+  only, default-mode stdout byte-identical.
+- `src/store/index.ts` — ingest consumes the schedule block when present:
+  `phases` rows carry the real ids, declared dependencies, and the
+  `completion` policy (its first producer); `jobs` rows carry the real
+  phase and expanded edges, with worker/model/brief joined from the
+  candidate reports (empty strings for a never-dispatched job — nothing
+  executed, nothing fabricated); `job_dependencies` re-derives the real
+  edges; the derived DAG (either path) is validated with T-006's validators
+  before any DB side effect. New derived events, appended after the
+  per-candidate block in schedule order, all stamps pure functions of the
+  report (never `Date.now()`): `JOB_READY` (§28:1852) per DISPATCHED job,
+  `at` = max of its dependencies' finish stamps (`startedAt` for
+  dependency-free jobs; a finish stamp is the last attempt's `endedAt`,
+  else the startedAt+duration ladder rule), `JOB_SUCCEEDED`/`JOB_FAILED`
+  (the three documented §28 vocabulary extensions, chosen per the
+  T-008:54-60 precedent — §28 names no job-terminal or phase events) per
+  dispatched job, and `PHASE_COMPLETED` per all-jobs-terminal-success
+  phase. Schema stays v4 (no new tables/columns); SCHEMA_VERSION unchanged.
+- `scripts/check-scheduler.mjs` (new) — Gate 1.10, hooked into
+  `scripts/verify.mjs` after Gate 1.9 and before the fast-tier finish: 76
+  assertions, zero model tokens — the ready function on chain/diamond/
+  independent/mixed DAGs (dependency safety, ascending tie-break, cap
+  bound, purity), parser expansion/defaults/refusals, determinism
+  end-to-end (identical schedule blocks across two runs, cap-1 two-phase
+  DAG and wide-cap chain), the concurrency cap (observed max 2 of cap 2 on
+  five jobs, each executed exactly once), cross-phase dependency ordering
+  (fake-adapter call order vs recorded dispatchIndex/edges), the T-007
+  retry rule verbatim in `--jobs` mode (fail-once, bound-eliminates,
+  no-op-never, gates-fail-never, throw-retried; `wt/<jobId>-a<n>` leases at
+  the same baseSha, no branch/worktree collisions), phase `all` completion
+  with failure blocking (dependent phase `blocked`, its job
+  not-dispatched/no candidate/no branch; independent phase completed),
+  default mode unchanged (ids in order, today's paths/branches/stdout
+  lines, one dispatch per candidate, NO `schedule` key in memory or on
+  disk), and 15 CLI refusal cases through the real `src/cli.ts` with a
+  non-git `--repo` (the jobs refusal winning proves it precedes repo
+  validation; the run root stays empty — no artifacts dir, no `locks/`).
+- `scripts/check-store.mjs` — extended Gate 1.6 with a hand-built
+  schedule-carrying DAG variant of the vendored fixture (elim-variant
+  pattern; 14 new assertions, 67 → 81 ok): the real two-phase structure in
+  `phases`/`jobs`/`job_dependencies`, the derived schedule events at
+  report-carried stamps, re-ingest idempotent with append-only events,
+  `PRAGMA integrity_check` ok.
+- VERIFICATION.md — Gate 1.6 section updated (schedule bullet + the flat
+  derivation restated as the schedule-less fallback); new Gate 1.10
+  section. Zero new npm dependencies.
+
+Deviations, stated rather than smoothed:
+
+- **A never-dispatched job has no `CandidateReport`.** The ticket's "--jobs
+  mode: each job maps 1:1 onto a CandidateReport" holds for dispatched
+  jobs; a job blocked by an upstream failure is recorded solely in the
+  schedule block (`dispatchIndex: null`, phase `blocked`) and appears in no
+  candidate-derived surface (summary, store candidate rows, clean,
+  integrate). Fabricating a failed-looking report for a job that never
+  executed would fake a verdict in the store's elimination ladder — the
+  ticket's own "recorded as not-dispatched, not fabricated as terminal"
+  wins over the literal 1:1 reading.
+- **`schedule.jobs[].dependencies` carries the EXPANDED edges** (job deps
+  plus phase-dep expansion), not the raw spec text: that is the one job DAG
+  the ready function enforced, which is what makes the schedule checkable
+  post-hoc; the store's `job_dependencies` rows therefore hold expanded
+  edges too. Phase entries keep the declared dependencies.
+- **Phase status is not persisted in the store** — the `phases` table has
+  no status column and the schema stays v4; status lives in `report.json`
+  and drives which phases earn a `PHASE_COMPLETED` event (only completed
+  ones; no `PHASE_FAILED` is defined — §28 names no such event and the
+  three-extension list is exhaustive).
+- **`JOB_READY` derives for dispatched jobs only** — a never-ready job
+  never became ready, and emitting the event would fabricate history. The
+  Gate 1.6 fixture's jobs are all dispatched, so "exactly one JOB_READY per
+  job" holds there as pinned.
+- **The reviewer tier still runs in `--jobs` mode** (advisory post-gate
+  review of passing jobs, `--no-review` honored) — the ticket skips the
+  planner explicitly and is silent on the reviewer; review is a run-level
+  tier exactly like the gates, so the default flags apply unchanged.
+- **Extra strictness beyond the ticket's refusal list**: unknown phase
+  reference, job-less phase, phase-id charset + duplicate phase id (same
+  pattern as job ids), gate entries required to carry non-empty
+  `name`/`command` strings. All in the ticket's stated spirit — a typo can
+  never silently narrow a run.
+
+Measured gates (this lane, Node v22.23.1): Gate 0 `tsc --noEmit` exit 0;
+new Gate 1.10 → 76 ok + `check-scheduler: ALL GREEN`, exit 0; extended Gate
+1.6 → 81 ok + `check-store: ALL GREEN`, exit 0 (67 before this slice, the
+T-008 baseline; the 14 new assertions are the scheduled variant);
+`node scripts/verify.mjs fast` (Gates 0 / 1 / 0.5 / 1.5 clean+lock+integrate
+/ 1.6 / 1.7 / 1.8 / 1.9 / 1.10) → `verify (fast) complete: ALL GREEN`,
+exit 0. Token-free CLI smoke of the `--jobs` happy-path wiring (not a gate):
+a two-phase spec with a job-level `worker: no-such-adapter` parsed,
+defaulted concurrency to the job count, printed the jobs-mode header
+(planner skipped), and refused with exit 1 at adapter creation — proving
+load → validate → resolve reaches the seam; no worktree was leased and the
+fixture repo stayed clean.
+
+**Gate 2 (real-pipeline `npm run verify:full`): owed at landing, not run in
+this lane** — the acceptance criterion requires it (this change-set touches
+`src/runner.ts` and the report shape, both on the trigger list), and it
+spends real model tokens, so it is run by the landing pipeline rather than
+this implementation lane; record the result here when it runs. Default-mode
+pipeline equivalence is pinned by construction meanwhile: the report fields
+and summary code are untouched, and Gate 1.10's default-mode assertions plus
+the whole fast tier (clean/lock/integrate against the real CLI) stayed
+green.
+
 ## Verification
 
 Gate 0 (`npm run typecheck`) always — green before this change, verified
-2026-10-14: `npm run typecheck` → exit 0. Gate 1 (`npm run demo`) sanity,
+2026-10-14: `npm run typecheck` → exit 0; green after, in this lane (exit 0).
+Gate 1 (`npm run demo`) sanity,
 token-free. Gate 0.5 n/a (`src/parse.ts` untouched — the `--jobs` parser is new
 code in `src/scheduler.ts`, not the harness-output parser). Gate 1.6 green
 before this change, verified 2026-10-14:
 `node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs` → "check-store: ALL
 GREEN", exit 0, only the documented node:sqlite ExperimentalWarning on stderr
-(Known issues #7) — and it must stay green after. The **new Gate 1.10** and the
-**extended Gate 1.6** run via `npm run verify` (not yet run for this ticket — no
-code exists). **Gate 2 once**, at landing, recorded in Landed — required here
-(trigger list: `src/runner.ts` + report shape), not a permanent extension. Gate
+(Known issues #7) — and it stayed green after (81 ok, the 14 new
+scheduled-variant assertions included). The **new Gate 1.10** and the
+**extended Gate 1.6** ran via `npm run verify` in this lane — `verify (fast)
+complete: ALL GREEN`, exit 0 (measured numbers in Landed). **Gate 2 once**,
+at landing, recorded in Landed — required here
+(trigger list: `src/runner.ts` + report shape), not a permanent extension;
+not run in this lane (model tokens) — owed to the landing pipeline, stated
+in Landed. Gate
 3 n/a (no adapter change; jobs execute behind the untouched `WorkerAdapter`
 seam, PWD pinning untouched).
 

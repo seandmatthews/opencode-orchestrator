@@ -475,6 +475,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.10: deterministic scheduler (T-009) ----------
+section('Gate 1.10 — deterministic scheduler (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-scheduler.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'scheduler self-check exit 0')
+} catch (e) {
+  fail(`scheduler self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

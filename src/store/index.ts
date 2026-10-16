@@ -23,7 +23,7 @@
 import { userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { Attempt, CandidateReport, RunReport } from '../types.js'
+import type { Attempt, CandidateReport, RunReport, RunSchedule } from '../types.js'
 
 export const SCHEMA_VERSION = 4
 
@@ -155,8 +155,15 @@ CREATE TABLE IF NOT EXISTS approval_gates (
 // (§28:1861-1862) and APPROVAL_REJECTED — §28 names no rejection event, so
 // this vocabulary extension is chosen and recorded here (T-008's ticket
 // documents it). APPROVAL_CANCELLED is not defined: no producer until an
-// abort/cancel slice. node:sqlite binds null/number/bigint/string/Buffer
-// only, hence 1|0 booleans.
+// abort/cancel slice. T-009 adds the schedule events, all ingest-derived
+// post-hoc from the recorded schedule block (never live in-run):
+// JOB_READY (§28:1852) per dispatched job, plus three documented vocabulary
+// extensions chosen per the T-008 precedent — §28 names no job-terminal or
+// phase events, so JOB_SUCCEEDED / JOB_FAILED / PHASE_COMPLETED are defined
+// here and pinned by the extended Gate 1.6. Never-dispatched jobs get no
+// events: they are recorded as not-dispatched, never fabricated as
+// terminal. node:sqlite binds null/number/bigint/string/Buffer only, hence
+// 1|0 booleans.
 
 // ---------- T-008: approval gates ----------
 
@@ -427,15 +434,32 @@ export interface DagJobSpec {
 /**
  * The run's actual DAG, derived purely from the report: exactly one phase
  * (`main`, no dependencies), one dependency-free job per candidate, zero
- * edges. There is no producer of non-trivial DAG data today — the report
- * types carry no phase/job/policy fields — so this slice lands the shape and
- * the derivation rather than pretend today's graph is interesting.
+ * edges. The flat fallback for schedule-less reports — a report carrying a
+ * schedule block (T-009 --jobs mode) derives its REAL structure in `ingest`
+ * instead (multiple phases, expanded dependency edges), making this slice
+ * the non-trivial-DAG producer T-006 flagged as absent.
  */
 export function deriveDag(report: RunReport): { phaseId: string; jobs: DagJobSpec[] } {
   return {
     phaseId: DERIVED_PHASE_ID,
     jobs: report.candidates.map((c) => ({ id: c.id, dependencies: [] })),
   }
+}
+
+/** Phase row source: the flat derivation (`main`, null completion) or a
+ *  schedule block's declared phases (T-009 — `completion`'s first producer). */
+interface DagPhase {
+  id: string
+  dependencies: string[]
+  completion: string | null
+}
+
+/** Job row source: node id, its phase, and the expanded edges the ready
+ *  function enforced (flat derivation: candidate id, `main`, none). */
+interface DagJobRow {
+  id: string
+  phaseId: string
+  dependencies: string[]
 }
 
 /**
@@ -497,14 +521,21 @@ export function cycleRefusal(jobs: readonly DagJobSpec[]): string | null {
  * natural key; `job_dependencies` is re-derived (delete + insert) so re-ingest
  * stays idempotent; `events` is append-only and never rewrites prior rows.
  * The DAG is derived from the report — a pure function, validated before any
- * DB side effect (acyclic by construction today; the interesting inputs are
- * synthetic and live in the gate). Attempt stamps are copied from
+ * DB side effect. A report carrying a schedule block (T-009 --jobs mode)
+ * derives the REAL phases/jobs/edges from it; otherwise T-006's flat
+ * derivation stands. Attempt and schedule stamps are copied from
  * report-carried values, never `Date.now()`. Throws on failure — the caller
  * (src/cli.ts) logs loudly and continues.
  */
 export function ingest(report: RunReport, dbPath: string): void {
-  const dag = deriveDag(report)
-  const refusal = unknownDependencyRefusal(dag.jobs) ?? cycleRefusal(dag.jobs)
+  const schedule = report.schedule
+  const phases: DagPhase[] = schedule
+    ? schedule.phases.map((p) => ({ id: p.id, dependencies: [...p.dependencies], completion: p.completion }))
+    : [{ id: DERIVED_PHASE_ID, dependencies: [], completion: null }]
+  const dagJobs: DagJobRow[] = schedule
+    ? schedule.jobs.map((j) => ({ id: j.id, phaseId: j.phaseId, dependencies: [...j.dependencies] }))
+    : report.candidates.map((c) => ({ id: c.id, phaseId: DERIVED_PHASE_ID, dependencies: [] }))
+  const refusal = unknownDependencyRefusal(dagJobs) ?? cycleRefusal(dagJobs)
   if (refusal) throw new Error(`derived job DAG for run ${report.runId} refused: ${refusal}`)
 
   const db = new DatabaseSync(dbPath)
@@ -513,7 +544,9 @@ export function ingest(report: RunReport, dbPath: string): void {
     db.exec('BEGIN')
     try {
       upsertRun(db, report)
-      upsertPhase(db, report.runId)
+      for (const p of phases) {
+        upsertPhase(db, report.runId, p)
+      }
       insertEvent(db, report.runId, 'RUN_CREATED', report.startedAt, {
         repo: report.repo,
         baseSha: report.baseSha,
@@ -522,7 +555,6 @@ export function ingest(report: RunReport, dbPath: string): void {
       })
       for (const c of report.candidates) {
         upsertCandidate(db, report.runId, c)
-        upsertJob(db, report.runId, c)
         // Attempts (T-007): one row and one derived ATTEMPT_STARTED event per
         // recorded attempt, keyed (run_id, job_id, attempt_number). Reports
         // that predate T-007 carry no attempts array — zero rows, unchanged
@@ -554,7 +586,20 @@ export function ingest(report: RunReport, dbPath: string): void {
           })
         }
       }
-      rederiveJobDependencies(db, report.runId, dag.jobs)
+      // Job rows: from the schedule when present — the real structure,
+      // including never-dispatched jobs (worker/model/brief written empty:
+      // nothing executed, nothing fabricated); else one job per candidate,
+      // T-006's derivation verbatim.
+      const byId = new Map(report.candidates.map((c) => [c.id, c]))
+      for (const j of dagJobs) {
+        const c = byId.get(j.id)
+        upsertJobRow(db, report.runId, j, c?.workerId ?? '', c?.model ?? '', c?.brief ?? '')
+      }
+      rederiveJobDependencies(db, report.runId, dagJobs)
+      // Derived schedule events (T-009) — post-hoc and report-derived, so
+      // re-ingest stays deterministic and a DB failure can never influence a
+      // run. Appended after the per-candidate block, in schedule order.
+      if (schedule) insertScheduleEvents(db, report, schedule)
       db.exec('COMMIT')
     } catch (e) {
       try {
@@ -591,24 +636,35 @@ function upsertRun(db: DatabaseSync, report: RunReport): void {
   )
 }
 
-/** The derived phase: `main`, no dependencies. §6.3 policy columns
- *  (`completion`, `earlyStop`, `approvalGate`) stay null — no producer in
- *  `RunReport` this slice. */
-function upsertPhase(db: DatabaseSync, runId: string): void {
+/** One row per phase. Flat derivation: `main`, no dependencies, §6.3 policy
+ *  columns null. Schedule derivation (T-009): the real phases, with the
+ *  declared dependencies and the completion policy — `completion`'s first
+ *  producer. `earlyStop`/`approvalGate` stay null (no producer; refused in
+ *  the --jobs spec until their successor tickets land). */
+function upsertPhase(db: DatabaseSync, runId: string, p: DagPhase): void {
   db.prepare(
     `INSERT INTO phases (run_id, phase_id, dependencies_json, completion, early_stop_json, approval_gate_json)
      VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(run_id, phase_id) DO UPDATE SET
        dependencies_json = excluded.dependencies_json, completion = excluded.completion,
        early_stop_json = excluded.early_stop_json, approval_gate_json = excluded.approval_gate_json`,
-  ).run(runId, DERIVED_PHASE_ID, JSON.stringify([]), null, null, null)
+  ).run(runId, p.id, JSON.stringify(p.dependencies), p.completion, null, null)
 }
 
-/** One job per candidate: `job_id` IS the candidate id, in the run's single
- *  phase, with the worker/model/brief strings copied out of `CandidateReport`.
- *  Every §6.4 policy column stays null — no producer in
+/** One row per job. Flat derivation: `job_id` IS the candidate id, in the
+ *  run's single phase, empty dependencies. Schedule derivation (T-009): the
+ *  real phase id and expanded dependency edges; a never-dispatched job
+ *  carries empty worker/model/brief (nothing executed — stated, not
+ *  smoothed). Every §6.4 policy column stays null — no producer in
  *  `RunReport`/`CandidateReport` this slice. */
-function upsertJob(db: DatabaseSync, runId: string, c: CandidateReport): void {
+function upsertJobRow(
+  db: DatabaseSync,
+  runId: string,
+  j: DagJobRow,
+  workerId: string,
+  model: string,
+  brief: string,
+): void {
   db.prepare(
     `INSERT INTO jobs (run_id, job_id, phase_id, worker_id, model, brief, dependencies_json,
        role_json, workspace_json, permissions_json, prompt_json, context_plan_json,
@@ -627,12 +683,12 @@ function upsertJob(db: DatabaseSync, runId: string, c: CandidateReport): void {
        gate_policy_json = excluded.gate_policy_json`,
   ).run(
     runId,
-    c.id,
-    DERIVED_PHASE_ID,
-    c.workerId,
-    c.model,
-    c.brief,
-    JSON.stringify([]),
+    j.id,
+    j.phaseId,
+    workerId,
+    model,
+    brief,
+    JSON.stringify(j.dependencies),
     null, null, null, null, null, null, null, null, null, null,
   )
 }
@@ -672,8 +728,8 @@ function upsertAttempt(db: DatabaseSync, runId: string, jobId: string, a: Attemp
 }
 
 /** Dependency edges are re-derived (delete + insert) so re-ingest stays
- *  idempotent while `events` appends. Zero rows today — the derived DAG is a
- *  flat fan-out. */
+ *  idempotent while `events` appends. Flat reports derive zero edges; a
+ *  schedule-carrying report (T-009) derives its real expanded edges. */
 function rederiveJobDependencies(db: DatabaseSync, runId: string, jobs: readonly DagJobSpec[]): void {
   db.prepare('DELETE FROM job_dependencies WHERE run_id = ?').run(runId)
   const insert = db.prepare(
@@ -684,6 +740,74 @@ function rederiveJobDependencies(db: DatabaseSync, runId: string, jobs: readonly
       insert.run(runId, j.id, d)
     }
   }
+}
+
+// ---------- T-009: derived schedule events ----------
+
+/**
+ * The derived schedule events, appended after the per-candidate block in
+ * schedule order — all ingest-derived post-hoc from the recorded schedule,
+ * never live in-run, all stamps pure functions of the report (never
+ * `Date.now()`), so re-ingest is deterministic:
+ *
+ * - `JOB_READY` (§28:1852) per DISPATCHED job, `at` = the max of its
+ *   dependencies' finish stamps (the run's `startedAt` for dependency-free
+ *   jobs). Never-dispatched jobs get no events — they are recorded as
+ *   not-dispatched in the schedule block, never fabricated as terminal.
+ * - `JOB_SUCCEEDED` / `JOB_FAILED` per dispatched job (the documented §28
+ *   vocabulary extensions — §28 names no job-terminal events), `at` = the
+ *   job's own finish stamp, payload naming job and phase.
+ * - `PHASE_COMPLETED` per phase that reached terminal success on every job
+ *   (the `all` completion policy), `at` = the max finish stamp of its jobs.
+ *   A failed or blocked phase gets no event — §28 names no such event and
+ *   this slice defines none (the T-008 extension precedent covers only what
+ *   has a producer).
+ */
+function insertScheduleEvents(db: DatabaseSync, report: RunReport, schedule: RunSchedule): void {
+  const byId = new Map(report.candidates.map((c) => [c.id, c]))
+  const finishAt = new Map<string, string>()
+  for (const c of report.candidates) finishAt.set(c.id, jobFinishAt(report, c))
+  for (const j of schedule.jobs) {
+    if (j.dispatchIndex === null) continue
+    const c = byId.get(j.id)
+    if (!c) {
+      throw new Error(`schedule job '${j.id}' dispatched at index ${j.dispatchIndex} but carries no candidate report`)
+    }
+    const deps = j.dependencies
+      .map((d) => finishAt.get(d))
+      .filter((s): s is string => s !== undefined)
+    const readyAt = deps.length === 0
+      ? report.startedAt
+      : deps.reduce((max, s) => (Date.parse(s) > Date.parse(max) ? s : max), report.startedAt)
+    insertEvent(db, report.runId, 'JOB_READY', readyAt, { jobId: j.id, phaseId: j.phaseId })
+    insertEvent(db, report.runId, c.passedAllGates ? 'JOB_SUCCEEDED' : 'JOB_FAILED', finishAt.get(c.id)!, {
+      jobId: j.id,
+      phaseId: j.phaseId,
+    })
+  }
+  for (const p of schedule.phases) {
+    if (p.status !== 'completed') continue
+    const stamps = schedule.jobs
+      .filter((j) => j.phaseId === p.id && j.dispatchIndex !== null)
+      .map((j) => finishAt.get(j.id))
+      .filter((s): s is string => s !== undefined)
+    const at = stamps.length === 0
+      ? report.startedAt
+      : stamps.reduce((max, s) => (Date.parse(s) > Date.parse(max) ? s : max), report.startedAt)
+    insertEvent(db, report.runId, 'PHASE_COMPLETED', at, { phaseId: p.id })
+  }
+}
+
+/** A dispatched job's finish stamp: its last attempt's `endedAt` when the
+ *  report carries attempts, else the candidate-ladder derivation
+ *  (`candidateAt`: startedAt + worker duration). Pure function of the
+ *  report — never the wall clock. */
+function jobFinishAt(report: RunReport, c: CandidateReport): string {
+  const ended = (c.attempts ?? [])
+    .map((a) => a.endedAt)
+    .filter((s): s is string => typeof s === 'string' && !Number.isNaN(Date.parse(s)))
+  if (ended.length === 0) return candidateAt(report, c)
+  return ended.reduce((max, s) => (Date.parse(s) > Date.parse(max) ? s : max))
 }
 
 function upsertCandidate(db: DatabaseSync, runId: string, c: CandidateReport): void {
