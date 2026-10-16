@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseBriefs, parseReview } from './parse.js'
-import type { CandidateReport, Gate, GateResult, PlannerReport, ReviewReport, RunReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
+import type { Attempt, CandidateReport, FailureRecord, Gate, GateResult, PlannerReport, ReviewReport, RunReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
 
 export interface SkeletonOptions {
   runId: string
@@ -18,6 +19,15 @@ export interface SkeletonOptions {
   candidateIds: string[]
   concurrency: number
   timeoutMs: number
+  /**
+   * Maximum number of attempts per candidate (T-007; CLI default 1 = a
+   * single attempt, the pre-retry behavior). Only mechanical failures are
+   * retried — an attempt that throws or whose worker fails (non-zero exit /
+   * timeout). Verdicts are never re-rolled: a worker that succeeded but
+   * produced a zero-byte diff or failed gates is eliminated on the ladder
+   * exactly as before (decisions.md: machine gates decide survival).
+   */
+  maxAttempts: number
   gates: Gate[]
   worker: WorkerAdapter
   workspaces: WorkspaceProvider
@@ -57,7 +67,9 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
     console.log('')
   }
 
-  // Lease every candidate up front so all workers start from the same base.
+  // Lease every candidate's FIRST attempt up front so all workers start from
+  // the same base. Retry attempts (T-007) lease their own fresh worktree
+  // lazily inside the candidate's lane, at the same baseSha.
   const leases = new Map<string, WorkspaceLease>()
   for (const id of opts.candidateIds) {
     leases.set(id, opts.workspaces.lease(`wt/${id}`, opts.baseSha))
@@ -223,7 +235,23 @@ async function runReview(
   return report
 }
 
-async function runCandidate(id: string, lease: WorkspaceLease, brief: string, opts: SkeletonOptions): Promise<CandidateReport> {
+/** §7.7 context fingerprint, narrowed to what has a producer: sha256 over
+ *  brief + model + the composed prompt with the workspace-path line excluded,
+ *  so the same brief+model hashes identically across attempts (an
+ *  input-context hash compares inputs, not worktree paths). The full
+ *  fingerprint adds prompt version, role version, selected artifact
+ *  IDs/hashes, reasoning configuration, and project-manifest version
+ *  (§7.7:615-620) — none has a producer until the Milestone-2 context
+ *  system. */
+function inputContextHash(brief: string, model: string, workspacePath: string): string {
+  const promptWithoutWorkspace = builderPrompt(brief, workspacePath)
+    .split('\n')
+    .filter((line) => line !== `  ${workspacePath}`)
+    .join('\n')
+  return createHash('sha256').update(`${brief}\n${model}\n${promptWithoutWorkspace}`).digest('hex')
+}
+
+async function runCandidate(id: string, firstLease: WorkspaceLease, brief: string, opts: SkeletonOptions): Promise<CandidateReport> {
   const dir = join(opts.artifactsDir, id)
   mkdirSync(dir, { recursive: true })
   const base: CandidateReport = {
@@ -231,7 +259,7 @@ async function runCandidate(id: string, lease: WorkspaceLease, brief: string, op
     workerId: opts.worker.id,
     model: opts.model,
     brief,
-    workspacePath: lease.path,
+    workspacePath: firstLease.path,
     workerOk: false,
     workerTimedOut: false,
     workerDurationMs: 0,
@@ -239,54 +267,147 @@ async function runCandidate(id: string, lease: WorkspaceLease, brief: string, op
     diffBytes: 0,
     gates: [],
     passedAllGates: false,
+    attempts: [],
   }
 
-  try {
-    console.log(`[${id}] worker start (${opts.worker.id}, model=${opts.model})`)
-    const result = await opts.worker.execute({
-      prompt: builderPrompt(brief, lease.path),
-      model: opts.model,
-      cwd: lease.path,
-      logPath: join(dir, 'worker.log'),
-      timeoutMs: opts.timeoutMs,
-    })
-    base.workerOk = result.ok
-    base.workerTimedOut = result.timedOut
-    base.workerDurationMs = result.durationMs
-    console.log(`[${id}] worker done in ${(result.durationMs / 1000).toFixed(0)}s ok=${result.ok} exit=${result.exitCode}`)
+  // Bounded same-config retry (T-007): a mechanical failure re-runs as a
+  // fresh attempt in a fresh worktree at the same baseSha — a fresh attempt
+  // adopts nothing from the prior attempt's worktree, branch, or process
+  // state (spec §15.1). Retries stay inside the candidate's lane, so
+  // lane/concurrency semantics are untouched.
+  let lease = firstLease
+  for (let n = 1; ; n++) {
+    if (n >= 2) {
+      // Attempt-scoped lease id: two leases on `wt/<id>` would both derive
+      // `swarm/wt-<id>` (the T-004 branch-collision hazard), and attempt 2
+      // would overwrite attempt 1's worker.log. Attempts ≥ 2 get their own
+      // evidence directory too.
+      lease = opts.workspaces.lease(`wt/${id}-a${n}`, opts.baseSha)
+      base.workspacePath = lease.path
+    }
+    const evidenceDir = n === 1 ? dir : join(dir, `attempt-${n}`)
+    mkdirSync(evidenceDir, { recursive: true })
+    const logPath = join(evidenceDir, 'worker.log')
+    const diffPath = join(evidenceDir, 'diff.patch')
 
-    let diff = ''
+    const attempt: Attempt = {
+      id: `${id}-a${n}`,
+      jobId: id,
+      number: n,
+      state: 'running',
+      startedAt: new Date().toISOString(),
+      inputContextHash: inputContextHash(brief, opts.model, lease.path),
+      promptVersion: null,
+      outputArtifacts: [logPath],
+    }
+    base.attempts.push(attempt)
+
     try {
-      diff = opts.workspaces.diff(lease)
-      const diffPath = join(dir, 'diff.patch')
-      writeFileSync(diffPath, diff)
-      base.diffPath = diffPath
-      base.diffBytes = Buffer.byteLength(diff)
-      console.log(`[${id}] diff captured: ${base.diffBytes} bytes`)
-    } catch (e) {
-      console.log(`[${id}] diff capture failed: ${errorMessage(e)}`)
-    }
-
-    for (const gate of opts.gates) {
-      const r: GateResult = await gate.run(lease.path)
-      base.gates.push(r)
-      console.log(`[${id}] gate ${r.name}: ${r.passed ? 'PASS' : 'FAIL'} (${(r.durationMs / 1000).toFixed(1)}s)`)
-    }
-    base.passedAllGates = base.gates.length > 0 && base.gates.every((g) => g.passed) && base.diffBytes > 0
-
-    if (opts.reviewerModel && base.passedAllGates) {
-      base.review = await runReview(opts, {
-        id,
-        dir,
-        workspacePath: lease.path,
-        brief,
-        diff,
-        gateLines: base.gates.map((g) => `- ${g.name}: ${g.passed ? 'PASS' : 'FAIL'}`),
+      console.log(`[${id}] attempt ${n}: worker start (${opts.worker.id}, model=${opts.model})`)
+      const result = await opts.worker.execute({
+        prompt: builderPrompt(brief, lease.path),
+        model: opts.model,
+        cwd: lease.path,
+        logPath,
+        timeoutMs: opts.timeoutMs,
       })
+      attempt.endedAt = new Date().toISOString()
+      console.log(`[${id}] attempt ${n}: worker done in ${(result.durationMs / 1000).toFixed(0)}s ok=${result.ok} exit=${result.exitCode}`)
+
+      // A failed worker is the only worker-side retryable leg. A worker that
+      // SUCCEEDED is final no matter what the verdict will be: zero-byte
+      // diffs and failed gates are ladder verdicts, and re-rolling them
+      // would be model-shopping around a machine verdict (decisions.md:
+      // gates decide survival).
+      const failure: FailureRecord | null = result.ok ? null : {
+        reason: 'worker-failed',
+        message: result.timedOut ? `worker timed out after ${opts.timeoutMs}ms` : `worker exited with code ${result.exitCode}`,
+        timedOut: result.timedOut,
+        exitCode: result.exitCode,
+      }
+
+      // Diff evidence is captured on every attempt — a retried leg's diff is
+      // still audit history (spec §6.5). Gates do NOT run here: retryable
+      // legs never reach them.
+      let diff = ''
+      let diffCaptured = false
+      try {
+        diff = opts.workspaces.diff(lease)
+        writeFileSync(diffPath, diff)
+        attempt.outputArtifacts.push(diffPath)
+        diffCaptured = true
+        console.log(`[${id}] attempt ${n}: diff captured: ${Buffer.byteLength(diff)} bytes`)
+      } catch (e) {
+        console.log(`[${id}] attempt ${n}: diff capture failed: ${errorMessage(e)}`)
+      }
+
+      if (failure && base.attempts.length < opts.maxAttempts) {
+        attempt.state = 'failed'
+        attempt.failure = failure
+        console.log(`[${id}] attempt ${n} failed (${failure.reason}); retrying with a fresh workspace (${base.attempts.length}/${opts.maxAttempts})`)
+        if (opts.cleanWorkspaces) {
+          try {
+            opts.workspaces.dispose(lease)
+          } catch (e) {
+            console.log(`[${id}] workspace dispose failed: ${errorMessage(e)}`)
+          }
+        }
+        continue
+      }
+
+      // Final attempt (worker succeeded, or the bound was reached): the
+      // candidate's top-level fields are this attempt's values — the exact
+      // flow and verdict ladder the runner had before T-007, so the run
+      // summary, the store's per-candidate writes, and clean/integrate
+      // discovery are unchanged.
+      attempt.state = result.ok ? 'succeeded' : 'failed'
+      if (failure) attempt.failure = failure
+      base.workerOk = result.ok
+      base.workerTimedOut = result.timedOut
+      base.workerDurationMs = result.durationMs
+      if (diffCaptured) {
+        base.diffPath = diffPath
+        base.diffBytes = Buffer.byteLength(diff)
+      }
+
+      for (const gate of opts.gates) {
+        const r: GateResult = await gate.run(lease.path)
+        base.gates.push(r)
+        console.log(`[${id}] gate ${r.name}: ${r.passed ? 'PASS' : 'FAIL'} (${(r.durationMs / 1000).toFixed(1)}s)`)
+      }
+      base.passedAllGates = base.gates.length > 0 && base.gates.every((g) => g.passed) && base.diffBytes > 0
+
+      if (opts.reviewerModel && base.passedAllGates) {
+        base.review = await runReview(opts, {
+          id,
+          dir,
+          workspacePath: lease.path,
+          brief,
+          diff,
+          gateLines: base.gates.map((g) => `- ${g.name}: ${g.passed ? 'PASS' : 'FAIL'}`),
+        })
+      }
+      break
+    } catch (e) {
+      attempt.endedAt = new Date().toISOString()
+      attempt.state = 'failed'
+      attempt.failure = { reason: 'error', message: errorMessage(e), timedOut: false, exitCode: null }
+      console.log(`[${id}] attempt ${n} errored: ${attempt.failure.message}`)
+      if (base.attempts.length < opts.maxAttempts) {
+        console.log(`[${id}] attempt ${n} → retrying with a fresh workspace (${base.attempts.length}/${opts.maxAttempts})`)
+        if (opts.cleanWorkspaces) {
+          try {
+            opts.workspaces.dispose(lease)
+          } catch (e2) {
+            console.log(`[${id}] workspace dispose failed: ${errorMessage(e2)}`)
+          }
+        }
+        continue
+      }
+      base.error = attempt.failure.message
+      console.log(`[${id}] candidate errored: ${base.error}`)
+      break
     }
-  } catch (e) {
-    base.error = errorMessage(e)
-    console.log(`[${id}] candidate errored: ${base.error}`)
   }
 
   if (opts.cleanWorkspaces) {

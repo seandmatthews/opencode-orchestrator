@@ -136,13 +136,14 @@ lock files afterward.
 node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs
 ```
 
-Pins the durable run records (T-003) and the derived job DAG (T-006):
-`src/store/index.ts` ingests a finished `RunReport` into SQLite (`node:sqlite`,
-schema v2: `runs`, `candidates`, `gate_results`, `events` plus T-006's
-`phases`, `jobs`, `job_dependencies`) — zero npm dependencies. All tables are
-`CREATE TABLE IF NOT EXISTS`, so an existing v1 `refinery.db` gains the DAG
-tables on its next ingest — no migration machinery, no backfill: old runs gain
-DAG rows only when re-ingested, which appends a fresh event block by design.
+Pins the durable run records (T-003), the derived job DAG (T-006), and the
+attempt records (T-007): `src/store/index.ts` ingests a finished `RunReport`
+into SQLite (`node:sqlite`, schema v3: `runs`, `candidates`, `gate_results`,
+`events`, T-006's `phases`/`jobs`/`job_dependencies`, plus T-007's `attempts`)
+— zero npm dependencies. All tables are `CREATE TABLE IF NOT EXISTS`, so an
+existing v1/v2 `refinery.db` gains the newer tables on its next ingest — no
+migration machinery, no backfill: old runs gain DAG/attempt rows only when
+re-ingested, which appends a fresh event block by design.
 One call site in `src/cli.ts` immediately after `runSkeleton` returns, behind
 `--db <path>` (default `C:\swarm\refinery.db`). Failure policy is
 log-and-continue: a failed DB write prints one loud `PERSISTENCE FAILED` line
@@ -154,6 +155,8 @@ a verbatim copy of run 20261011022419) into a fresh temp DB and asserts:
 
 - exact row counts and field values across `runs`/`candidates`/`gate_results`,
   including `planner_json`/`review_json` round-trips,
+- the fixture predates attempts and yields zero `attempts` rows (pre-T-007
+  reports ingest unchanged),
 - the derived job DAG (T-006) matches the report's real fan-out: exactly one
   `phases` row (`phase_id = 'main'`, `dependencies_json` `[]`, §6.3 policy
   columns null), one `jobs` row per candidate (`job_id` = the candidate id,
@@ -172,10 +175,21 @@ a verbatim copy of run 20261011022419) into a fresh temp DB and asserts:
   eliminated candidate emits `GATE_FAILED` + `CANDIDATE_ELIMINATED` with `at`
   derived from `startedAt` + the candidate's worker duration (never
   `Date.now()`, so re-ingest is deterministic),
+- the attempts table (T-007), on a hand-built retried-candidate variant of
+  the fixture (the elim-variant pattern): one row per recorded attempt keyed
+  `(run_id, job_id, attempt_number)` with
+  state/started_at/ended_at/input_context_hash/output_artifacts_json/
+  failure_json copied from the report record, `prompt_version`/
+  `process_identity_json`/`worker_session_id` null (no producer this slice —
+  stated, not smoothed), a candidate still carrying the pre-T-007 shape (no
+  `attempts` array) yielding zero rows, exactly one derived `ATTEMPT_STARTED`
+  per attempt with `at` taken from the attempt's own `startedAt` and a
+  payload naming job/attempt id/number,
 - re-ingest of the same report leaves `runs`/`candidates`/`gate_results` —
-  and the DAG tables (`phases`/`jobs` upsert by natural key,
-  `job_dependencies` re-derived delete+insert) — idempotent by natural key
-  while `events` appends and never rewrites prior rows,
+  the DAG tables (`phases`/`jobs` upsert by natural key, `job_dependencies`
+  re-derived delete+insert) — and the `attempts` rows (upsert by natural
+  key) idempotent, while `events` appends a fresh deterministic block and
+  never rewrites prior rows,
 - `PRAGMA integrity_check` returns `ok`,
 - the source fixture is byte-identical after ingestion (persistence is
   read-only over evidence — T-002 rule),
@@ -221,6 +235,70 @@ The gate ingests the vendored fixture into a fresh temp DB and asserts:
 - the dump never writes: the DB file is byte-identical (sha256 before/after
   both dumps), and a write against a `readOnly`-opened handle throws —
   pinning the open option itself against node:sqlite churn (Known issues #7).
+
+## Gate 1.8 — attempts + bounded same-config retry (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-retry.mjs
+```
+
+Pins the T-007 runner semantics: per-job Attempt records in the report plus a
+bounded same-config retry (`--max-attempts`, default 1), with the
+`CandidateReport.attempts` array added (report-shape change). The check
+drives `runSkeleton` directly with a **fake `WorkerAdapter`** (the seam at
+`src/types.ts` makes this trivial — the engine stays harness-agnostic) and
+fake `Gate` objects against throwaway fixture repos (one per scenario, so
+`swarm/*` branch namespaces cannot collide; list-form git calls only), zero
+model tokens. It asserts:
+
+- **fail-once-then-succeed × `maxAttempts` 2** → exactly two attempts;
+  attempt 1 `failed` with a `FailureRecord` (reason `worker-failed`, exit
+  code, not timed out), attempt 2 `succeeded` with no failure record; the
+  final candidate's verdict is identical in shape to today's (worker ok,
+  gates pass, `diffBytes > 0`, no error) and its `workspacePath` is the final
+  attempt's worktree; the worker executed exactly twice; the on-disk
+  `report.json` carries the attempts arrays (the store ingests the artifact).
+- **fresh workspace per attempt (spec §15.1)**: attempt 1 leases `wt/<id>`
+  (branch `swarm/wt-c01`), attempt 2 leases `wt/<id>-a2` (branch
+  `swarm/wt-c01-a2`) at the same `baseSha` (both worktrees' `rev-parse HEAD`
+  equals the run base); attempt 2's diff contains only its own change —
+  nothing adopted from attempt 1's worktree or branch; one branch per
+  attempt, each leased by exactly one worktree, no collisions.
+- **attempt-scoped evidence**: attempt 1's `worker.log`/`diff.patch` survive
+  at today's paths (`<id>/worker.log` is not overwritten — its content is
+  still attempt 1's), attempts ≥ 2 write under `<id>/attempt-<n>/`, and each
+  attempt's `outputArtifacts` names its own paths with the files existing on
+  disk (a thrown attempt names just its `worker.log`).
+- **the bound eliminates**: an always-failing worker yields exactly
+  `maxAttempts` attempts and the candidate's final verdict is the same
+  elimination the ladder produces today (worker failed, no gates pass).
+- **default is today's behavior**: with `maxAttempts` 1 (the CLI default) a
+  succeeding candidate records exactly one `succeeded` attempt with today's
+  lease id (`wt/c01`), branch (`swarm/wt-c01`), and evidence paths
+  (`<id>/worker.log`, `<id>/diff.patch`), and no attempt-scoped directory; a
+  failing one records exactly one attempt and is eliminated as before —
+  the only report difference is the added `attempts` array of length 1.
+- **retry fires only on the mechanical legs**: a worker that succeeds with a
+  zero-byte diff, or succeeds and fails gates, is eliminated exactly as
+  today and never re-rolled (no-op-then-pass and gates-fail-then-pass fake
+  workers produce exactly one attempt each, with the attempt `succeeded` and
+  no failure record); a thrown attempt (ladder leg `error`) IS retried —
+  attempt 1's `FailureRecord` carries reason `error`, the message, exit code
+  null, `timedOut` false — and the retried candidate passes.
+- **input-context hash**: the same brief+model hashes identically across
+  attempts (64-hex sha256 over brief + model + the composed prompt with the
+  workspace-path line excluded — the §7.7 fingerprint narrowed to what has a
+  producer); `promptVersion` is null on every attempt.
+- **CLI**: `--help` documents `--max-attempts <n>` (default 1, values < 1
+  refused); `--max-attempts 0` (and a non-integer) refuse with exit 1
+  naming the flag, before the checkout lock is taken or any artifacts dir
+  exists (the run root stays empty, no `locks/` directory).
+
+Not pinned here: a real harness retry (Gate 2 exercises real workers with
+default `maxAttempts` 1 — no behavior change), §15.2/§29 startup
+reconciliation (`abandoned` has no producer until the reconciliation slice),
+§30's other failure policies, and the full §7.7 fingerprint (Milestone-2
+context system).
 
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 

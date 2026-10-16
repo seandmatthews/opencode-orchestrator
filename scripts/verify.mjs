@@ -455,6 +455,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.8: attempts + bounded retry (T-007) ----------
+section('Gate 1.8 — attempts + bounded retry (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-retry.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'retry self-check exit 0')
+} catch (e) {
+  fail(`retry self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

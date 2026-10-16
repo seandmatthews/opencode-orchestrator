@@ -38,6 +38,12 @@ Options:
   --db <path>              SQLite DB for durable run records (default:
                            C:\\swarm\\refinery.db)
   --timeout-min <n>        Per-worker wall-clock limit in minutes (default: 15)
+  --max-attempts <n>       Retry a mechanically failed candidate (worker
+                           non-zero exit/timeout or thrown error) as a fresh
+                           attempt in a fresh worktree, up to n total
+                           attempts per candidate (default: 1; values < 1
+                           refused). Verdicts (no-op, gates-failed) are
+                           never retried.
   --clean                  Dispose candidate workspaces after evidence capture
   --opencode-bin <path>    Override the opencode executable path
 
@@ -59,6 +65,7 @@ interface Options {
   forceLock: boolean
   db: string
   timeoutMs: number
+  maxAttempts: number
   clean: boolean
   gates: { name: string; command: string }[]
   opencodeBin: string
@@ -79,6 +86,7 @@ function parseArgs(argv: string[]): Options {
     forceLock: false,
     db: 'C:\\swarm\\refinery.db',
     timeoutMs: 15 * 60_000,
+    maxAttempts: 1,
     clean: false,
     gates: [],
     opencodeBin: '',
@@ -109,6 +117,14 @@ function parseArgs(argv: string[]): Options {
       case '--force-lock': opts.forceLock = true; break
       case '--db': opts.db = value(); break
       case '--timeout-min': opts.timeoutMs = Number(value()) * 60_000; break
+      case '--max-attempts': {
+        // Refused at parse time: parseArgs runs before repo validation, the
+        // checkout lock, and any artifacts dir exists.
+        const n = Number(value())
+        if (!Number.isInteger(n) || n < 1) throw new Error(`--max-attempts expects an integer >= 1, got: ${argv[i]}`)
+        opts.maxAttempts = n
+        break
+      }
       case '--clean': opts.clean = true; break
       case '--opencode-bin': opts.opencodeBin = value(); break
       case '--gate': {
@@ -192,6 +208,7 @@ async function runPipeline(opts: Options): Promise<void> {
     candidateIds: Array.from({ length: opts.candidates }, (_, i) => `c${String(i + 1).padStart(2, '0')}`),
     concurrency: opts.concurrency,
     timeoutMs: opts.timeoutMs,
+    maxAttempts: opts.maxAttempts,
     gates: opts.gates.map((g) => new CommandGate(g.name, g.command)),
     worker: createWorker(opts.workerId, opts),
     workspaces: new WorktreeProvider(opts.repo, join(artifactsDir)),

@@ -1,4 +1,5 @@
-// Store-ingest self-check (Gate 1.6, fast tier, T-003 + T-006) — run under tsx:
+// Store-ingest self-check (Gate 1.6, fast tier, T-003 + T-006 + T-007) — run
+// under tsx:
 //   node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs
 // Pins the durable run records against the vendored real report
 // (scripts/fixtures/report-real.json): exact rows/fields, append-only events
@@ -6,7 +7,10 @@
 // (loud, non-fatal at the CLI) failed-write path — without model tokens.
 // T-006 extends it with the derived job DAG (phases/jobs/job_dependencies)
 // and the pure validators on hand-built synthetic inputs (Gate 0.5's
-// hand-built-input pattern — no pipeline, no model tokens).
+// hand-built-input pattern — no pipeline, no model tokens). T-007 extends it
+// with the attempts table: a hand-built retried-candidate variant of the
+// fixture (the elim-variant pattern) pins row shape/values, ATTEMPT_STARTED
+// derivation, and re-ingest idempotency with append-only events.
 import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -38,6 +42,7 @@ try {
   t('one run row', count('runs') === 1)
   t('one row per candidate', count('candidates') === report.candidates.length)
   t('one row per candidate gate', count('gate_results') === report.candidates.reduce((n, c) => n + c.gates.length, 0))
+  t('fixture predates attempts: zero attempt rows (pre-T-007 reports ingest unchanged)', count('attempts') === 0)
 
   const run = db.prepare('SELECT * FROM runs WHERE run_id = ?').get(report.runId)
   t('run_id matches', run?.run_id === report.runId)
@@ -74,7 +79,7 @@ try {
   }))
 
   // ---------- T-006: the derived DAG matches the report's real fan-out ----------
-  t('SCHEMA_VERSION is 2', SCHEMA_VERSION === 2)
+  t('SCHEMA_VERSION is 3', SCHEMA_VERSION === 3)
   t('one phase row for the run', count('phases') === 1)
   const phase = db.prepare('SELECT * FROM phases WHERE run_id = ?').get(report.runId)
   t("phase_id is 'main'", phase?.phase_id === 'main')
@@ -140,6 +145,78 @@ try {
   t('candidate event at derived from startedAt + worker duration',
     gateFail?.at === expectedAt && eliminated?.at === expectedAt)
   elimDb.close()
+
+  // ---------- T-007: the attempts table on a hand-built retried candidate ----------
+  // Exactly like the elim-variant: the vendored fixture cloned, one candidate
+  // given an attempts array by hand. c01's attempt 2 mirrors its real final
+  // values (the top-level fields are the FINAL attempt's values — T-007
+  // semantics). c02 keeps the pre-T-007 shape (no attempts field) on purpose:
+  // mixed runs stay ingestable.
+  const retried = structuredClone(report)
+  const rc = retried.candidates[0]
+  const hashA = 'a'.repeat(64)
+  const attempt1 = {
+    id: `${rc.id}-a1`, jobId: rc.id, number: 1, state: 'failed',
+    startedAt: '2026-10-11T02:24:20.100Z', endedAt: '2026-10-11T02:24:53.600Z',
+    inputContextHash: hashA, promptVersion: null,
+    outputArtifacts: [
+      'C:\\swarm\\verify\\20261011022419\\c01\\worker.log',
+      'C:\\swarm\\verify\\20261011022419\\c01\\diff.patch',
+    ],
+    failure: { reason: 'worker-failed', message: 'worker exited with code 1', timedOut: false, exitCode: 1 },
+  }
+  const attempt2 = {
+    id: `${rc.id}-a2`, jobId: rc.id, number: 2, state: 'succeeded',
+    startedAt: '2026-10-11T02:24:54.000Z', endedAt: '2026-10-11T02:25:27.400Z',
+    inputContextHash: hashA, promptVersion: null,
+    outputArtifacts: [
+      'C:\\swarm\\verify\\20261011022419\\c01\\attempt-2\\worker.log',
+      'C:\\swarm\\verify\\20261011022419\\c01\\attempt-2\\diff.patch',
+    ],
+  }
+  rc.attempts = [attempt1, attempt2]
+  const retriedDbPath = join(sandbox, 'retried.db')
+  ingest(retried, retriedDbPath)
+  const retriedDb = new DatabaseSync(retriedDbPath)
+  t('retried variant: one attempts row per recorded attempt',
+    retriedDb.prepare('SELECT COUNT(*) AS n FROM attempts').get().n === 2)
+  for (const a of [attempt1, attempt2]) {
+    const row = retriedDb.prepare('SELECT * FROM attempts WHERE run_id = ? AND job_id = ? AND attempt_number = ?')
+      .get(retried.runId, rc.id, a.number)
+    t(`retried variant: attempt ${a.number} row matches the report record (state/stamps/hash/artifacts/failure)`,
+      row?.state === a.state && row?.started_at === a.startedAt && row?.ended_at === a.endedAt
+      && row?.input_context_hash === a.inputContextHash
+      && eq(JSON.parse(row?.output_artifacts_json), a.outputArtifacts)
+      && (a.failure ? eq(JSON.parse(row?.failure_json), a.failure) : row?.failure_json == null))
+    t(`retried variant: attempt ${a.number} producer-less columns null (prompt_version/process_identity/worker_session)`,
+      row?.prompt_version == null && row?.process_identity_json == null && row?.worker_session_id == null)
+  }
+  t('retried variant: the candidate without an attempts field yields zero rows (pre-T-007 shape tolerated)',
+    retriedDb.prepare('SELECT COUNT(*) AS n FROM attempts WHERE job_id = ?').get(retried.candidates[1].id).n === 0)
+  const retriedEvents = retriedDb.prepare('SELECT type, at, payload FROM events ORDER BY seq').all()
+  t('retried variant: exactly one ATTEMPT_STARTED per attempt, in order, after RUN_CREATED, at the attempt stamps',
+    eq(retriedEvents.map((e) => e.type), ['RUN_CREATED', 'ATTEMPT_STARTED', 'ATTEMPT_STARTED'])
+    && retriedEvents[1]?.at === attempt1.startedAt && retriedEvents[2]?.at === attempt2.startedAt)
+  t('retried variant: ATTEMPT_STARTED payloads name the job, attempt id, and number',
+    eq(JSON.parse(retriedEvents[1]?.payload), { jobId: rc.id, attemptId: attempt1.id, attemptNumber: 1 })
+    && eq(JSON.parse(retriedEvents[2]?.payload), { jobId: rc.id, attemptId: attempt2.id, attemptNumber: 2 }))
+  const attemptRowsBefore = retriedDb.prepare('SELECT * FROM attempts WHERE run_id = ? ORDER BY attempt_number').all(retried.runId)
+  const retriedEventsBefore = retriedDb.prepare('SELECT seq, type, at, payload FROM events ORDER BY seq').all()
+  retriedDb.close()
+
+  // re-ingest of the retried variant: attempt rows idempotent, events append-only
+  ingest(retried, retriedDbPath)
+  const retriedDb2 = new DatabaseSync(retriedDbPath)
+  t('retried re-ingest: attempt rows unchanged (upsert by natural key)',
+    eq(retriedDb2.prepare('SELECT * FROM attempts WHERE run_id = ? ORDER BY attempt_number').all(retried.runId), attemptRowsBefore))
+  const retriedEventsAfter = retriedDb2.prepare('SELECT seq, type, at, payload FROM events ORDER BY seq').all()
+  t('retried re-ingest: events appended (a fresh deterministic block), prior rows untouched',
+    retriedEventsAfter.length === retriedEventsBefore.length * 2
+    && eq(retriedEventsAfter.slice(0, retriedEventsBefore.length), retriedEventsBefore)
+    && eq(retriedEventsAfter.slice(retriedEventsBefore.length).map((e) => e.type),
+      ['RUN_CREATED', 'ATTEMPT_STARTED', 'ATTEMPT_STARTED']))
+  t('retried re-ingest: integrity_check ok', retriedDb2.prepare('PRAGMA integrity_check').get()['integrity_check'] === 'ok')
+  retriedDb2.close()
 
   // ---------- T-006: pure validators on hand-built inputs (Gate 0.5 pattern) ----------
   // The derived DAG is acyclic by construction; the interesting validator
