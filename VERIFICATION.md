@@ -136,27 +136,46 @@ lock files afterward.
 node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs
 ```
 
-Pins the durable run records (T-003): `src/store/index.ts` ingests a finished
-`RunReport` into SQLite (`node:sqlite`, schema v1: `runs`, `candidates`,
-`gate_results`, `events`) — zero npm dependencies. One call site in `src/cli.ts`
-immediately after `runSkeleton` returns, behind `--db <path>` (default
-`C:\swarm\refinery.db`). Failure policy is log-and-continue: a failed DB write
-prints one loud `PERSISTENCE FAILED` line and never changes the run's exit code,
-stdout verdicts, or artifacts — persistence records verdicts, it never
-influences them.
+Pins the durable run records (T-003) and the derived job DAG (T-006):
+`src/store/index.ts` ingests a finished `RunReport` into SQLite (`node:sqlite`,
+schema v2: `runs`, `candidates`, `gate_results`, `events` plus T-006's
+`phases`, `jobs`, `job_dependencies`) — zero npm dependencies. All tables are
+`CREATE TABLE IF NOT EXISTS`, so an existing v1 `refinery.db` gains the DAG
+tables on its next ingest — no migration machinery, no backfill: old runs gain
+DAG rows only when re-ingested, which appends a fresh event block by design.
+One call site in `src/cli.ts` immediately after `runSkeleton` returns, behind
+`--db <path>` (default `C:\swarm\refinery.db`). Failure policy is
+log-and-continue: a failed DB write prints one loud `PERSISTENCE FAILED` line
+and never changes the run's exit code, stdout verdicts, or artifacts —
+persistence records verdicts, it never influences them.
 
 The gate ingests the vendored real report (`scripts/fixtures/report-real.json`,
 a verbatim copy of run 20261011022419) into a fresh temp DB and asserts:
 
 - exact row counts and field values across `runs`/`candidates`/`gate_results`,
   including `planner_json`/`review_json` round-trips,
+- the derived job DAG (T-006) matches the report's real fan-out: exactly one
+  `phases` row (`phase_id = 'main'`, `dependencies_json` `[]`, §6.3 policy
+  columns null), one `jobs` row per candidate (`job_id` = the candidate id,
+  `worker_id`/`model`/`brief` copied verbatim, empty dependencies, every §6.4
+  policy column null), and zero `job_dependencies` rows — the report carries
+  no non-trivial DAG data today (`src/runner.ts` is a flat fan-out), stated
+  honestly rather than smoothed over,
+- the pure validators (`unknownDependencyRefusal`, `cycleRefusal`, exported
+  from the store module, no I/O) accept the derived flat DAG and refuse
+  hand-built synthetic inputs — a 3-cycle and a self-dependency (the refusal
+  names every job on the cycle) and an unknown-dependency reference (the
+  refusal names the offender and the missing id) — Gate 0.5's hand-built-input
+  pattern: no pipeline, no model tokens,
 - `events` semantics: an all-pass report emits exactly `RUN_CREATED` at the
   report's own `startedAt`; a modified report with a failed gate and an
   eliminated candidate emits `GATE_FAILED` + `CANDIDATE_ELIMINATED` with `at`
   derived from `startedAt` + the candidate's worker duration (never
   `Date.now()`, so re-ingest is deterministic),
-- re-ingest of the same report leaves `runs`/`candidates`/`gate_results`
-  idempotent by natural key while `events` appends and never rewrites prior rows,
+- re-ingest of the same report leaves `runs`/`candidates`/`gate_results` —
+  and the DAG tables (`phases`/`jobs` upsert by natural key,
+  `job_dependencies` re-derived delete+insert) — idempotent by natural key
+  while `events` appends and never rewrites prior rows,
 - `PRAGMA integrity_check` returns `ok`,
 - the source fixture is byte-identical after ingestion (persistence is
   read-only over evidence — T-002 rule),
@@ -172,6 +191,36 @@ Not pinned here and not permanently required: pipeline no-behavior-change
 (exit code, stdout verdicts, `report.json` content) was proven once by a real
 `npm run verify:full` run recorded in T-003's Landed section. Gate 2 is not
 extended for the store — spending model tokens on every verify buys nothing.
+
+## Gate 1.7 — dag dump CLI (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-dag.mjs
+```
+
+Pins the read-only job-DAG dump (T-006): `npm run dag -- --run <runId>
+[--db <path>] [--json]` (`src/dag.ts`, the clean/integrate standalone-entry
+pattern) prints a run's recorded DAG — its phases, jobs, and dependency
+edges; `--json` emits the same structure as JSON (what a future
+scheduler/dashboard would consume). This is the repo's first DB readback:
+post-hoc inspection of what ingest already recorded, feeding no verdict
+(decisions.md: machine gates decide survival). `--db` defaults to
+`C:\swarm\refinery.db` — same literal as `src/cli.ts` (decisions.md: run root
+is `C:\swarm\`).
+
+The gate ingests the vendored fixture into a fresh temp DB and asserts:
+
+- `--run <runId>` exits 0 and prints the phases, jobs, and edges sections;
+  `--json` exits 0 and parses to exactly the derived structure — one `main`
+  phase with no dependencies, one job per candidate (`jobId` = candidate id,
+  `workerId`/`model`/`brief` verbatim, empty dependencies), zero edges,
+- refusals exit non-zero with nothing on stdout (the T-005 refusal pattern):
+  an unknown runId (message names it), a missing DB file — and the dump must
+  not create an empty `refinery.db` as a side effect (asserted absent
+  afterward) — and a missing `--run` (message names the requirement),
+- the dump never writes: the DB file is byte-identical (sha256 before/after
+  both dumps), and a write against a `readOnly`-opened handle throws —
+  pinning the open option itself against node:sqlite churn (Known issues #7).
 
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 

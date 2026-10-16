@@ -445,6 +445,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.7: dag dump CLI (T-006) ----------
+section('Gate 1.7 — dag dump (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-dag.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'dag dump self-check exit 0')
+} catch (e) {
+  fail(`dag dump self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
