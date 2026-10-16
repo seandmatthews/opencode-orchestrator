@@ -609,6 +609,82 @@ state (any future rerun is a fresh lease), and Windows Job Objects (§15.3
 — not a permanent extension. Gate 3 runs once at landing (adapter change:
 `onSpawn` + `WorkerResult.pid`).
 
+## Gate 1.12 — process-tree termination hardening (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-kill-tree.mjs
+```
+
+Pins T-011 (spec §15.3's MVP contract: Windows tree termination, verify
+descendants disappear, remaining descendants are cleanup failures):
+`src/kill-tree.ts`'s `killTreeVerified(pid)` — alive check first (an
+already-gone root is a *reported result* `{rootWasLive: false, verified:
+false}`, never a swallowed error — the pre-T-011 silent catch is removed), a
+fixed-constant PowerShell CIM snapshot of the pid→ppid map taken BEFORE the
+kill (list-form `powershell.exe -NoProfile -NonInteractive -Command
+<constant>` — zero interpolation, so the list-form rule holds trivially), the
+verbatim list-form `taskkill /pid <pid> /T /F`, then a post-kill
+`process.kill(pid, 0)` sweep over the root plus every snapshot pid. Scope is
+descendants visible at snapshot time: the narrow snapshot-to-kill race is
+documented, false survivors via pid reuse are acceptable — the failure
+direction is loud, not silent — and the race-free mechanism stays Windows Job
+Objects "Later" (spec §15.3:1084, decisions.md 2026-10-10).
+
+Two consumers changed shape, both pinned here:
+
+- `src/gate/command.ts` owns its timeout: exec's built-in `timeout` option is
+  gone (it killed only the direct shell child and orphaned the subtree — the
+  recorded red bar: grandparent AND grandchild alive after an exec timeout).
+  At expiry `killTreeVerified(child.pid)` fires while the shell child lives;
+  unproven kill outcomes land on the new `GateResult.cleanupFailures`.
+  Timeout FAIL semantics are byte-identical to the exec-timeout shape:
+  `passed: false`, `exitCode: null` (a killed shell carries no meaningful
+  numeric code), `durationMs ≥ timeoutMs`, `outputTail` as collected.
+- `src/worker/run-with-timeout.ts` (new) is the harness-agnostic core of a
+  timed worker run — drain to the log, wait for exit, verified tree kill at
+  expiry, the outcome appended to the log (never asserted):
+  `tree killed, verified: N processes reaped` on success, loud
+  `CLEANUP FAIL: pid N survived taskkill /T /F` /
+  `CLEANUP FAIL: root pid N already gone before kill; descendant verification
+  impossible` lines otherwise, returning `{timedOut, exitCode,
+  cleanupFailures}`. `OpenCodeWorker` keeps only the harness specifics (bin
+  path, `run -m <model>` args, the PWD/OLDPWD pinning — untouched, ground
+  rule 5). The runner aggregates worker-side + gate-side failures onto the
+  candidate's report entry (`CandidateReport.cleanupFailures` — report.json's
+  one place answering "did anything survive"); the fields are absent on every
+  non-timeout path, the store's explicit column selects are untouched, and a
+  cleanup failure never changes any verdict (decisions.md: gates decide
+  survival).
+
+The check plants real node process trees and asserts on the real process
+table — `process.kill(pid, 0)` — never a mock; zero model tokens, no git, no
+opencode binary:
+
+- **S1** — tiny-timeout `CommandGate` against a grandchild-spawning node
+  command: `passed: false`, `exitCode: null`, `durationMs ≥ timeoutMs`, no
+  cleanup failures, and every script-tracked pid dead (the red-bar shape:
+  both pids the check spawned and tracked).
+- **S2** — normally-completing gates (passing AND failing) are unchanged:
+  today's GateResult shape, no `cleanupFailures` key on any non-timeout path;
+  source-level pin that the exec options stay
+  `windowsHide`/`cwd`/`encoding`/`maxBuffer` and the built-in `timeout`
+  option is gone.
+- **S3** — `killTreeVerified` on an already-gone pid returns
+  `{rootWasLive: false, verified: false, survivors: []}` as a reported
+  result — no throw, no silence (the removed-catch regression pin).
+- **S4** — `runChildWithTimeout` on a node tree with a tiny timeout:
+  `timedOut: true`, the whole tree dead, the log carries
+  `tree killed, verified: N processes reaped` plus the drained child stdout,
+  and no `CLEANUP FAIL` — driven with no opencode involvement.
+- **S5** — snapshot-depth sanity: the pre-kill enumeration of a planted
+  3-level tree contains mid and leaf, and the verified kill returns
+  `{rootWasLive: true, verified: true, survivors: []}` with all three pids
+  dead.
+
+The check sweeps everything it planted best-effort at the end (AGENTS.md #10
+mechanized for its own spawns) and its throwaway sandbox under `C:\swarm\`
+is removed afterward.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
@@ -678,6 +754,22 @@ get trusted with worktrees — see Known issues #1.
    docs/decisions.md entry against the 2026-10-10 "TypeScript on Node 22" decision.
    `src/store/index.ts` uses only DatabaseSync open/exec/prepare semantics.
    Gate 1's stderr therefore contains this warning; it is not a failure.
+8. **Dead roots are never relied upon to reap descendants (T-011).** Whether
+   `taskkill /T /F` reaches the descendants of an already-dead root (Windows
+   reparenting) is unverified, and `killTreeVerified` does not depend on it:
+   a root already gone at kill time is the reported result
+   `{rootWasLive: false, verified: false}` — unverifiable, never silently
+   success. Both in-run call sites (gate timeout, worker timeout) fire their
+   kill while the root is alive by construction; recovery (T-010)
+   verify-before-kills the pids it records.
+9. **Descendant verification is Windows-only today (T-011).** Off-Windows,
+   `killTreeVerified` is a best-effort root SIGKILL reported as
+   `verified: false` (Windows-first repo, decisions.md 2026-10-10), so every
+   POSIX timeout logs a `CLEANUP FAIL ... could not be verified` line by
+   design. The Rust Windows Job-Objects helper remains the named fallback if
+   `taskkill /T /F` ever proves insufficient (decisions.md 2026-10-10), and
+   is the race-free successor to the pre-kill CIM snapshot's narrow
+   snapshot-to-kill race (spec §15.3:1084 "Later").
 
 ## Definition of done (per ticket)
 

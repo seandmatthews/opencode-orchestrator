@@ -388,6 +388,11 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
   }
 
   let lease: WorkspaceLease | null = null
+  // T-011: cleanup failures accumulate across the job's attempts (worker-side
+  // from every executed attempt, gate-side from the final one) and land on
+  // the candidate report — recorded evidence that never changes a verdict
+  // (decisions.md: gates decide survival).
+  const cleanupFailures: string[] = []
   for (let n = 1; ; n++) {
     // Attempt-scoped lease id (T-007): two leases on `wt/<id>` would both
     // derive `swarm/wt-<id>` (the T-004 branch-collision hazard), and
@@ -446,6 +451,9 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
       })
       attempt.endedAt = new Date().toISOString()
       console.log(`[${id}] attempt ${n}: worker done in ${(result.durationMs / 1000).toFixed(0)}s ok=${result.ok} exit=${result.exitCode}`)
+      // T-011: worker-side cleanup failures (a timeout kill that could not be
+      // verified) are evidence on the candidate, never a retry/verdict input.
+      cleanupFailures.push(...(result.cleanupFailures ?? []))
 
       // A failed worker is the only worker-side retryable leg. A worker that
       // SUCCEEDED is final no matter what the verdict will be: zero-byte
@@ -523,6 +531,9 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
       for (const gate of job.gates) {
         const r: GateResult = await gate.run(lease.path)
         base.gates.push(r)
+        // T-011: gate-side cleanup failures (a timed-out gate whose tree kill
+        // was not proven good) join the candidate's evidence, named by gate.
+        cleanupFailures.push(...(r.cleanupFailures ?? []).map((line) => `gate ${r.name}: ${line}`))
         console.log(`[${id}] gate ${r.name}: ${r.passed ? 'PASS' : 'FAIL'} (${(r.durationMs / 1000).toFixed(1)}s)`)
       }
       base.passedAllGates = base.gates.length > 0 && base.gates.every((g) => g.passed) && base.diffBytes > 0
@@ -568,6 +579,11 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
       console.log(`[${id}] workspace dispose failed: ${errorMessage(e)}`)
     }
   }
+
+  // T-011: the candidate report's one place answering "did anything survive a
+  // timeout". Absent when nothing failed — happy-path reports are unchanged —
+  // and never an input to any verdict.
+  if (cleanupFailures.length > 0) base.cleanupFailures = cleanupFailures
 
   return base
 }

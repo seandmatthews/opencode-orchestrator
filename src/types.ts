@@ -14,7 +14,13 @@ export interface WorkerExecutionRequest {
   cwd: string
   /** Absolute path of the file stdout/stderr are appended to. */
   logPath: string
-  /** Hard wall-clock limit; the worker process tree is killed at expiry. */
+  /**
+   * Hard wall-clock limit; at expiry the worker process tree is killed with
+   * list-form `taskkill /pid X /T /F` and the kill is VERIFIED (T-011, spec
+   * §15.3): every descendant captured in the pre-kill snapshot must be gone
+   * afterwards — survivors are reported as cleanup failures, never silently
+   * ignored and never asserted.
+   */
   timeoutMs: number
   /**
    * Engine-supplied (T-010): called by an adapter ONCE, right after spawn,
@@ -42,6 +48,14 @@ export interface WorkerResult {
    * the same pid here.
    */
   pid: number | null
+  /**
+   * Present only when a timeout's verified tree kill could not fully prove
+   * the tree dead (survivors, an already-gone root, or verification
+   * impossible — T-011, spec §15.3): loud evidence for the human, aggregated
+   * onto the candidate report by the runner. Never a verdict — gates decide
+   * survival (decisions.md 2026-10-10). Absent on every non-timeout path.
+   */
+  cleanupFailures?: string[]
 }
 
 /**
@@ -76,6 +90,12 @@ export interface GateResult {
   exitCode: number | null
   durationMs: number
   outputTail: string
+  /**
+   * Present only when this gate timed out and its verified process-tree kill
+   * could not fully prove the tree dead (T-011, spec §15.3). Evidence only,
+   * never a verdict. Absent on every non-timeout path.
+   */
+  cleanupFailures?: string[]
 }
 
 /**
@@ -227,6 +247,14 @@ export interface CandidateReport {
    * values; gates attach only to the final attempt.
    */
   attempts: Attempt[]
+  /**
+   * Aggregated worker-side + gate-side cleanup failures (T-011) — the one
+   * place report.json answers "did anything survive a timeout". Absent on
+   * every non-timeout path; a cleanup failure never changes `workerOk`,
+   * `passedAllGates`, or any verdict (decisions.md 2026-10-10: gates decide
+   * survival).
+   */
+  cleanupFailures?: string[]
   /** Present only for candidates that passed all gates (when review is enabled). */
   review?: ReviewReport
   error?: string
