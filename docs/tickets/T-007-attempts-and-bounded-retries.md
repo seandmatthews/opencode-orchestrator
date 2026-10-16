@@ -243,14 +243,14 @@ hence Risk 3, and the owning Gate 2 run.
 - [x] VERIFICATION.md gains the Gate 1.8 section and the extended Gate 1.6
       description, and the ticket status + index row move in the same change-set
       (AGENTS.md #6; tickets README rules) — pinned by change-set review.
-- [ ] One real-pipeline `npm run verify:full` at landing, recorded in this ticket's
+- [x] One real-pipeline `npm run verify:full` at landing, recorded in this ticket's
       Landed section — `src/runner.ts` and the report-shape change are both on
       VERIFICATION.md:200-201's trigger list; the T-003:166-175 precedent. Gate 2 is
       not permanently extended. **Not run in the lane session** — the driving
       pipeline owns it (it re-runs the fast tier and runs the full e2e gate on
-      merge exactly because `touchesPipeline` is true here); whoever lands the
-      merge must confirm the driving `verify:full` is green and append the record
-      below.
+      merge exactly because `touchesPipeline` is true here); recorded 2026-10-16:
+      the driving script ran `node scripts/verify.mjs full` in the lane pre-merge →
+      exit 0, then merged as `cfaa4fa` and re-ran the fast tier green on main.
 
 ## Landed
 
