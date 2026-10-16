@@ -505,6 +505,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.13: context system core (T-012) ----------
+section('Gate 1.13 — context system core (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-context.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'context self-check exit 0')
+} catch (e) {
+  fail(`context self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

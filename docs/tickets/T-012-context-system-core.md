@@ -1,6 +1,6 @@
 # T-012 — Context system core: ContextPlan/ContextPacket, deterministic budgets + selectors, fingerprints, `context inspect` CLI
 
-**Status:** proposed
+**Status:** done
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 2
 **Depends on:** T-006 (proposed) — an **ordering dependency, not a build dependency**: this slice's pure core and CLI import nothing from T-006's code (no store, no runner, no `src/dag.ts`), but the packet's job identity is defined against T-006's §6.4 job model and the store-resident successor slice cannot start until T-006 lands. Stated, not smoothed.
@@ -200,7 +200,7 @@ back — the §26.4 precursor, not the Milestone-7 UI.
 
 ## Acceptance criteria
 
-- [ ] ContextPlan parsing: a valid plan parses; unknown fields, a present
+- [x] ContextPlan parsing: a valid plan parses; unknown fields, a present
       `distillation` block (not yet consumed), `maxInputTokens ≤ 0`, and a
       selector outside the §7.6:593-605 vocabulary are each refused — non-zero
       with a message naming the offense, before anything is built — pinned by
@@ -208,42 +208,42 @@ back — the §26.4 precursor, not the Milestone-7 UI.
       section + hook in `scripts/verify.mjs` before the fast-tier finish,
       `scripts/verify.mjs:448`; gate number = next free integer at landing,
       1.13 under the planned ordering, the T-008:96 move).
-- [ ] Determinism: two builds from identical plan + artifact inputs produce
+- [x] Determinism: two builds from identical plan + artifact inputs produce
       byte-identical packet JSON, and the same inputs → same inclusions → same
       fingerprint — pinned by **Gate 1.13**.
-- [ ] Layer 1 is always present and never trimmed (§7.2:516-518); a plan whose
+- [x] Layer 1 is always present and never trimmed (§7.2:516-518); a plan whose
       mandatory layer alone exceeds `maxInputTokens` is refused as
       unsatisfiable — pinned by **Gate 1.13**.
-- [ ] Budget enforcement: Layer 4 entries are included only while budget remains
+- [x] Budget enforcement: Layer 4 entries are included only while budget remains
       (§7.2:540-542) in the documented deterministic order; plan `exclusions`
       remove before selection; every input artifact appears in the manifest
       exactly once — included, or excluded with `excluded-by-plan`/
       `excluded-by-budget` — nothing silent (§7.2:544) — pinned by **Gate 1.13**.
-- [ ] Each deterministic §7.6:593-605 selector (type, candidate, phase, producer
+- [x] Each deterministic §7.6:593-605 selector (type, candidate, phase, producer
       role, machine gate status, lineage, timestamp, explicit ID, tag) returns
       exactly the matching artifacts on hand-built sets; timestamps compare
       lexicographically (no Date parsing, no wall clock) — pinned by
       **Gate 1.13**.
-- [ ] Layer-3 distilled entries pass through with §7.4:567-576-style source refs
+- [x] Layer-3 distilled entries pass through with §7.4:567-576-style source refs
       carried into the packet and rendered by the inspector — pinned by
       **Gate 1.13**.
-- [ ] Fingerprint (§7.7 narrowed): identical inputs → identical hash; changing
+- [x] Fingerprint (§7.7 narrowed): identical inputs → identical hash; changing
       any produced component — one selected artifact's hash, the selection set,
       the model string, any plan field — yields a different hash; the four
       producerless §7.7:614-620 components are recorded null — pinned by
       **Gate 1.13**.
-- [ ] `npm run context -- --plan <p> --packet <p>` exits 0 and renders the
+- [x] `npm run context -- --plan <p> --packet <p>` exits 0 and renders the
       §26.4:1748-1756 fields — token budget (cap + per-layer ledger), per-layer
       included artifacts, excluded artifacts with reasons, L3 source chains,
       context fingerprint; `--json` emits the same structure as JSON — pinned by
       **Gate 1.13**.
-- [ ] Inspector refusals exit non-zero and print no body: missing `--plan`/
+- [x] Inspector refusals exit non-zero and print no body: missing `--plan`/
       `--packet`, missing file, unparseable JSON, packet whose recorded ledger is
       inconsistent or over cap, fingerprint mismatch on recompute — pinned by
       **Gate 1.13**.
-- [ ] The inspector never writes: plan and packet files are byte-identical after
+- [x] The inspector never writes: plan and packet files are byte-identical after
       an inspect (hash before/after) — pinned by **Gate 1.13**.
-- [ ] No pipeline behavior change: `src/runner.ts`, the `RunReport` shape,
+- [x] No pipeline behavior change: `src/runner.ts`, the `RunReport` shape,
       adapters, gate code, and workspace handling are untouched (context
       selection cannot influence verdicts — decisions.md: gates decide;
       AGENTS.md #2), `package.json` gains exactly one script, and
@@ -251,9 +251,71 @@ back — the §26.4 precursor, not the Milestone-7 UI.
       before this change, verified 2026-10-14 this session: `npm run typecheck`
       → exit 0 (Gate 0); `npm run verify` → "verify (fast) complete: ALL GREEN",
       exit 0 — and it must stay green after.
-- [ ] VERIFICATION.md carries the new gate section, and the ticket status + index
+- [x] VERIFICATION.md carries the new gate section, and the ticket status + index
       row move in the same change-set (AGENTS.md #6; tickets README rules) —
       pinned by change-set review.
+
+## Landed
+
+Landed 2026-10-16 on `ticket/T-012-context-system-core`, lane worktree off HEAD
+`0cbaa73`. Exactly the ticketed slice; no pipeline file touched.
+
+**What changed:**
+
+- `src/context.ts` (new) — the pure module: `parseContextPlan` (refusals as
+  `ContextRefusal`, naming the offense), `parseArtifactQuery`, `matchesQuery`
+  (the §7.6:593-605 deterministic subset), `buildContextPacket` (four layers,
+  budget, manifest), `estimateTokens` (`ceil(chars/4)`), `canonicalJson` /
+  `planHashOf` / `fingerprintHashOf` (§7.7 narrowed to
+  `{model, planHash, selected}`), and the full type vocabulary. No I/O, no
+  model knowledge, zero new npm dependencies (`node:crypto` sha256 only).
+- `src/context-inspect.ts` (new) — the read-only CLI (`npm run context`):
+  renders §26.4:1748-1756 as text or `--json`, validates a packet against its
+  `--plan` (ledger recompute, over-cap, fingerprint recompute), refuses
+  non-zero before any body, never writes. Paths resolve absolute or against
+  `--run-root` (default `C:\swarm`).
+- `scripts/check-context.mjs` (new) — **Gate 1.13**, hooked into
+  `scripts/verify.mjs` after Gate 1.12, before the fast-tier finish. 124
+  assertions, ALL GREEN.
+- `VERIFICATION.md` — new Gate 1.13 section in the same change-set.
+- `package.json` — exactly one new script (`"context"`).
+- `docs/tickets/T-012-context-system-core.md` + `docs/tickets/README.md` —
+  status/index row (this change-set).
+
+**Vocabulary the ticket left to be chosen here (documented in
+`src/context.ts`, pinned by Gate 1.13):**
+
+- The manifest's two-reason vocabulary covers every non-inclusion:
+  `excluded-by-budget` records anything not selected that no exclusion query
+  matched — matched no rule, fell past a rule's limit, or did not fit the
+  remaining budget (the packet it could have joined was full).
+- Layer-3 claim: an artifact carrying non-empty `sourceRefs` is Layer-3 class
+  — claimed after Layer 1, before L2/L4 rules run, and never visible to
+  L2/L4 selection; Layer 3 itself is budget-respecting (a distilled entry
+  that cannot fit is excluded-by-budget).
+- Budget scan semantics: an inclusion that would overflow the cap is skipped
+  and the documented-order scan continues (a later, smaller candidate may
+  still fit); "included only while budget remains" holds per inclusion.
+- `timestamp-desc` ordering places timestamp-less records last
+  (id-ascending among themselves).
+- `lineageContains`/`tagged` are array-membership selectors (§6.8 `lineage`
+  is an id array), not substring matches.
+
+**Measured gates (this lane, 2026-10-16):** Gate 0 `npm run typecheck` →
+exit 0. Gate 1.13 `node node_modules/tsx/dist/cli.mjs
+scripts/check-context.mjs` → ALL GREEN, 124/124 assertions. Full fast tier
+`node scripts/verify.mjs fast` → "verify (fast) complete: ALL GREEN", exit 0
+(Gates 0/1/0.5/1.5/1.6/1.7/1.8/1.9/1.10/1.11/1.12/1.13). Gate 2 not run —
+not required: the diff touches no pipeline file (no `src/runner.ts`, no
+adapter, no gate code, no workspace handling, no report-shape change); per
+the ticket's Verification section, the first successor that composes packets
+into prompts owns a Gate 2 run. Gate 3 n/a (no adapter).
+
+**Deviations:** none from the ticket's contract. Line-number references in
+the ticket text drifted (e.g. the fast-tier finish moved from
+`scripts/verify.mjs:448` to the end of the Gate 1.12 block as gates 1.7-1.12
+landed) — the hook position follows the intent: after the last fast-tier
+gate, before `if (tier === 'fast') finish()`.
 
 ## Verification
 
