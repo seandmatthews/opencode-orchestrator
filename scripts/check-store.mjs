@@ -79,7 +79,9 @@ try {
   }))
 
   // ---------- T-006: the derived DAG matches the report's real fan-out ----------
-  t('SCHEMA_VERSION is 3', SCHEMA_VERSION === 3)
+  // Version bumped 3 -> 4 by T-008 (the approval_gates slice); each schema
+  // slice moves this pinned assertion in its own change-set.
+  t('SCHEMA_VERSION is 4', SCHEMA_VERSION === 4)
   t('one phase row for the run', count('phases') === 1)
   const phase = db.prepare('SELECT * FROM phases WHERE run_id = ?').get(report.runId)
   t("phase_id is 'main'", phase?.phase_id === 'main')

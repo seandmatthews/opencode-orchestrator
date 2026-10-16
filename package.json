@@ -10,6 +10,7 @@
     "clean": "tsx src/clean.ts",
     "integrate": "tsx src/integrate.ts",
     "dag": "tsx src/dag.ts",
+    "approvals": "tsx src/approvals.ts",
     "verify": "node scripts/verify.mjs fast",
     "verify:full": "node scripts/verify.mjs full"
   },

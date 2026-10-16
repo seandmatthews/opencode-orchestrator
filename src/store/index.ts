@@ -1,6 +1,6 @@
-// Durable run records (T-003 store, T-006 job DAG, T-007 attempts) — slices
-// of the stage-1 state store (spec §27 Persistence Model, §28 Event Log,
-// §34 Milestone 1).
+// Durable run records (T-003 store, T-006 job DAG, T-007 attempts, T-008
+// approval gates) — slices of the stage-1 state store (spec §27 Persistence
+// Model, §28 Event Log, §34 Milestone 1).
 //
 // Zero npm dependencies: Node's built-in `node:sqlite` (DatabaseSync).
 // node:sqlite is experimental on Node 22 — see VERIFICATION.md Known issues.
@@ -10,24 +10,35 @@
 // the report — event timestamps derive from the report's own stamps and
 // durations, never from the wall clock — so re-ingest is deterministic.
 // Persistence records verdicts; it never influences them.
+//
+// Wall-clock scoping of the determinism rule (T-008): approval requests and
+// decisions are primary human facts no report carries, so their rows
+// (`requested_at`/`decided_at`) and events (`APPROVAL_REQUESTED` /
+// `APPROVAL_GRANTED` / `APPROVAL_REJECTED`) are legitimately wall-clock
+// stamped — written only by `requestApproval`/`decideApproval`, the only
+// approval writers, always operator-driven through src/approvals.ts. The
+// determinism rule continues to govern everything derived from the report:
+// `ingest` is untouched and stays a pure function of the report.
 
+import { userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { Attempt, CandidateReport, RunReport } from '../types.js'
 
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
 
-// Schema v3 (T-007): the v2 tables plus spec §27's `attempts`. Everything is
-// CREATE TABLE IF NOT EXISTS, so an existing v1/v2 refinery.db gains the new
-// tables on its next ingest — no migration machinery, no backfill: old runs
-// gain attempt rows only when re-ingested, which appends a fresh event block
-// by design (Gate 1.6 re-ingest semantics). The §6.5 columns without a
-// producer this slice (`prompt_version`, `process_identity_json`,
+// Schema v4 (T-008): the v3 tables plus spec §27's `approval_gates`, narrowed
+// to the columns with a producer (spec §21's `cancelled` state and the
+// `APPROVAL_CANCELLED` event have none until an abort/cancel slice — not
+// pre-defined, the T-007 'abandoned' precedent). Everything is CREATE TABLE IF
+// NOT EXISTS, so an existing v1/v2/v3 refinery.db gains the new table on its
+// next use — no migration machinery, no backfill. The §6.5 columns without a
+// producer the attempts slice (`prompt_version`, `process_identity_json`,
 // `worker_session_id`) are nullable and written null — stated honestly, not
-// smoothed over. Schema v2 (T-006) added `phases`/`jobs`/`job_dependencies`.
-// The §6.3/§6.4 policy columns are nullable and stay null this slice:
-// RunReport/CandidateReport carry none of those fields, so there is no
-// producer — stated honestly, not smoothed over.
+// smoothed over. Schema v2 (T-006) added `phases`/`jobs`/`job_dependencies`,
+// schema v3 (T-007) `attempts`. The §6.3/§6.4 policy columns are nullable and
+// stay null this slice: RunReport/CandidateReport carry none of those fields,
+// so there is no producer — stated honestly, not smoothed over.
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS runs (
   run_id       TEXT PRIMARY KEY,
@@ -122,13 +133,281 @@ CREATE TABLE IF NOT EXISTS attempts (
   failure_json          TEXT,
   PRIMARY KEY (run_id, job_id, attempt_number)
 );
+CREATE TABLE IF NOT EXISTS approval_gates (
+  run_id       TEXT NOT NULL REFERENCES runs(run_id),
+  phase_id     TEXT NOT NULL,
+  job_id       TEXT NOT NULL,
+  state        TEXT NOT NULL,
+  requested_at TEXT NOT NULL,
+  requested_by TEXT NOT NULL,
+  decided_at   TEXT,
+  decided_by   TEXT,
+  note         TEXT,
+  PRIMARY KEY (run_id, phase_id, job_id)
+);
 `
 
 // Event vocabulary — spec §28. This slice emits ATTEMPT_STARTED (T-007,
 // derived per recorded attempt) on top of T-003's three; live in-run
 // emission is carved off (would touch the runner). ATTEMPT_ABANDONED
 // (§28:1863) has no producer until the startup-reconciliation slice.
-// node:sqlite binds null/number/bigint/string/Buffer only, hence 1|0 booleans.
+// T-008 adds the approval events: APPROVAL_REQUESTED / APPROVAL_GRANTED
+// (§28:1861-1862) and APPROVAL_REJECTED — §28 names no rejection event, so
+// this vocabulary extension is chosen and recorded here (T-008's ticket
+// documents it). APPROVAL_CANCELLED is not defined: no producer until an
+// abort/cancel slice. node:sqlite binds null/number/bigint/string/Buffer
+// only, hence 1|0 booleans.
+
+// ---------- T-008: approval gates ----------
+
+/**
+ * Lifecycle of one approval (spec §21:1289-1294 names four states; only the
+ * three with a producer are defined here — a human request/decision through
+ * src/approvals.ts). `'cancelled'` has no producer until an abort/cancel
+ * slice exists and is deliberately not pre-defined (the T-007 'abandoned'
+ * precedent).
+ */
+export type ApprovalState = 'waiting_for_approval' | 'approved' | 'rejected'
+
+/** The decisions an operator can record. §24's other outcomes (`return to
+ *  generation`, `pin candidate for later`) have no downstream model — carved
+ *  off (T-008's Does-NOT-claim). */
+export type ApprovalDecision = 'approved' | 'rejected'
+
+export interface ApprovalRequestOptions {
+  runId: string
+  /** Narrow to one job; omit to request every survivor of the run. */
+  jobId?: string
+  /** Who asks; defaults to the OS username. */
+  by?: string
+  note?: string
+}
+
+export interface ApprovalDecisionOptions {
+  runId: string
+  jobId: string
+  decision: ApprovalDecision
+  /** Who decides; defaults to the OS username. */
+  by?: string
+  /** The decider's note; replaces the row's note only when provided. */
+  note?: string
+}
+
+export interface ApprovalRow {
+  runId: string
+  phaseId: string
+  jobId: string
+  state: ApprovalState
+  requestedAt: string
+  requestedBy: string
+  decidedAt: string | null
+  decidedBy: string | null
+  note: string | null
+}
+
+/**
+ * Record `waiting_for_approval` for a finished run's survivors — the jobs
+ * whose candidate passed all gates (`candidates.passed_all_gates`), keyed on
+ * T-006's derived phase/job rows. One `approval_gates` row plus exactly one
+ * `APPROVAL_REQUESTED` event per requested job, in one transaction. Jobs that
+ * already carry an approval row (any state) are skipped, never rewritten —
+ * writes are additive-only. An eliminated candidate is refused: gates decide
+ * survival (decisions.md 2026-10-10), and a human approval must not resurrect
+ * one. Throws on every refusal before any write. The stamps are wall-clock —
+ * see the header comment's scoping of the determinism rule.
+ */
+export function requestApproval(dbPath: string, opts: ApprovalRequestOptions): ApprovalRow[] {
+  if (!opts.runId) throw new Error('--run <runId> is required')
+  const db = openApprovalWriter(dbPath)
+  try {
+    const run = db.prepare('SELECT run_id FROM runs WHERE run_id = ?').get(opts.runId)
+    if (!run) throw new Error(`no recorded run '${opts.runId}' in ${dbPath}`)
+    const survivors = new Set(
+      db.prepare('SELECT candidate_id FROM candidates WHERE run_id = ? AND passed_all_gates = 1')
+        .all(opts.runId).map((r) => r.candidate_id as string),
+    )
+    const jobs = db.prepare('SELECT job_id, phase_id FROM jobs WHERE run_id = ? ORDER BY job_id')
+      .all(opts.runId) as { job_id: string; phase_id: string }[]
+    // Without --job: every survivor of the run. With --job: exactly that
+    // job — refused when unknown or eliminated; a human approval must not
+    // resurrect a candidate the gates decided out (decisions.md).
+    if (opts.jobId !== undefined) {
+      if (!candidateExists(db, opts.runId, opts.jobId)) {
+        throw new Error(`no candidate '${opts.jobId}' in run '${opts.runId}'`)
+      }
+      if (!survivors.has(opts.jobId)) throw new Error(survivorRefusal(opts.jobId))
+      if (!jobs.some((j) => j.job_id === opts.jobId)) {
+        throw new Error(`no derived job row for '${opts.jobId}' — ingest the run with a T-006-era store first`)
+      }
+    }
+    const targets = opts.jobId === undefined
+      ? jobs.filter((j) => survivors.has(j.job_id))
+      : jobs.filter((j) => j.job_id === opts.jobId)
+
+    const existing = new Set(
+      db.prepare('SELECT job_id FROM approval_gates WHERE run_id = ?').all(opts.runId).map((r) => r.job_id as string),
+    )
+    // One wall-clock stamp per request invocation — the documented deviation
+    // for primary human facts (header comment), never report-derived.
+    const at = new Date().toISOString()
+    const by = opts.by ?? osUsername()
+    const rows: ApprovalRow[] = []
+    db.exec('BEGIN')
+    try {
+      const insert = db.prepare(
+        `INSERT INTO approval_gates (run_id, phase_id, job_id, state, requested_at, requested_by, decided_at, decided_by, note)
+         VALUES (?, ?, ?, 'waiting_for_approval', ?, ?, NULL, NULL, ?)`,
+      )
+      for (const j of targets) {
+        if (existing.has(j.job_id)) continue // additive-only: an existing record is never rewritten
+        insert.run(opts.runId, j.phase_id, j.job_id, at, by, opts.note ?? null)
+        insertEvent(db, opts.runId, 'APPROVAL_REQUESTED', at, {
+          phaseId: j.phase_id,
+          jobId: j.job_id,
+          requestedBy: by,
+        })
+        rows.push({
+          runId: opts.runId, phaseId: j.phase_id, jobId: j.job_id, state: 'waiting_for_approval',
+          requestedAt: at, requestedBy: by, decidedAt: null, decidedBy: null, note: opts.note ?? null,
+        })
+      }
+      db.exec('COMMIT')
+    } catch (e) {
+      try { db.exec('ROLLBACK') } catch { /* nothing to undo */ }
+      throw e
+    }
+    return rows
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * Record an operator's approve/reject on one pending approval: upserts the
+ * row's state/`decided_at`/`decided_by` (and `note` when provided) and
+ * appends exactly one `APPROVAL_GRANTED`/`APPROVAL_REJECTED` event, inside
+ * one transaction. Nothing else is touched — runs, candidates, gate_results,
+ * artifacts, and prior event rows stay byte-for-byte as they were
+ * (rejection appends, it never rewrites). Throws on every refusal before any
+ * write; a double-decide refusal names the row's current state — the audit
+ * record is not rewritable. The stamps are wall-clock — see the header
+ * comment's scoping of the determinism rule.
+ */
+export function decideApproval(dbPath: string, opts: ApprovalDecisionOptions): ApprovalRow {
+  if (opts.decision !== 'approved' && opts.decision !== 'rejected') {
+    throw new Error(`unknown --decision '${String(opts.decision)}' (expected approved|rejected)`)
+  }
+  const db = openApprovalWriter(dbPath)
+  try {
+    const run = db.prepare('SELECT run_id FROM runs WHERE run_id = ?').get(opts.runId)
+    if (!run) throw new Error(`no recorded run '${opts.runId}' in ${dbPath}`)
+    const job = db.prepare('SELECT job_id, phase_id FROM jobs WHERE run_id = ? AND job_id = ?')
+      .get(opts.runId, opts.jobId) as { job_id: string; phase_id: string } | undefined
+    if (!job) {
+      if (!candidateExists(db, opts.runId, opts.jobId)) {
+        throw new Error(`no candidate '${opts.jobId}' in run '${opts.runId}'`)
+      }
+      throw new Error(`no derived job row for '${opts.jobId}' — ingest the run with a T-006-era store first`)
+    }
+    if (!candidateIsSurvivor(db, opts.runId, opts.jobId)) throw new Error(survivorRefusal(opts.jobId))
+    const row = db.prepare('SELECT * FROM approval_gates WHERE run_id = ? AND phase_id = ? AND job_id = ?')
+      .get(opts.runId, job.phase_id, opts.jobId) as Record<string, unknown> | undefined
+    if (!row) throw new Error(`no approval request recorded for job '${opts.jobId}' — request one first`)
+    if (row.state !== 'waiting_for_approval') {
+      throw new Error(`approval for job '${opts.jobId}' is already '${String(row.state)}' — the audit record is not rewritable`)
+    }
+
+    const at = new Date().toISOString()
+    const by = opts.by ?? osUsername()
+    db.exec('BEGIN')
+    try {
+      db.prepare(
+        `UPDATE approval_gates SET state = ?, decided_at = ?, decided_by = ?,
+           note = COALESCE(?, note)
+         WHERE run_id = ? AND phase_id = ? AND job_id = ?`,
+      ).run(opts.decision, at, by, opts.note ?? null, opts.runId, job.phase_id, opts.jobId)
+      insertEvent(db, opts.runId, opts.decision === 'approved' ? 'APPROVAL_GRANTED' : 'APPROVAL_REJECTED', at, {
+        phaseId: job.phase_id,
+        jobId: opts.jobId,
+        decidedBy: by,
+      })
+      db.exec('COMMIT')
+    } catch (e) {
+      try { db.exec('ROLLBACK') } catch { /* nothing to undo */ }
+      throw e
+    }
+    return {
+      runId: opts.runId, phaseId: job.phase_id, jobId: opts.jobId, state: opts.decision,
+      requestedAt: row.requested_at as string, requestedBy: row.requested_by as string,
+      decidedAt: at, decidedBy: by, note: opts.note ?? (row.note as string | null),
+    }
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * The pending-approval queue (spec §26.6's Milestone-7 UI, token-free CLI
+ * precursor): rows in `waiting_for_approval`, optionally narrowed to one run.
+ * Read-only — the DB opens readOnly and nothing here ever writes.
+ */
+export function listPendingApprovals(dbPath: string, runId?: string): ApprovalRow[] {
+  const db = new DatabaseSync(dbPath, { readOnly: true })
+  try {
+    const sql = `SELECT * FROM approval_gates WHERE state = 'waiting_for_approval'${runId ? ' AND run_id = ?' : ''} ORDER BY run_id, phase_id, job_id`
+    const stmt = db.prepare(sql)
+    const rows = (runId ? stmt.all(runId) : stmt.all()) as Record<string, unknown>[]
+    return rows.map(rowApproval)
+  } finally {
+    db.close()
+  }
+}
+
+function rowApproval(r: Record<string, unknown>): ApprovalRow {
+  return {
+    runId: r.run_id as string,
+    phaseId: r.phase_id as string,
+    jobId: r.job_id as string,
+    state: r.state as ApprovalState,
+    requestedAt: r.requested_at as string,
+    requestedBy: r.requested_by as string,
+    decidedAt: (r.decided_at as string | null) ?? null,
+    decidedBy: (r.decided_by as string | null) ?? null,
+    note: (r.note as string | null) ?? null,
+  }
+}
+
+/** Every approval writer opens through here: the schema runs first (CREATE
+ *  TABLE IF NOT EXISTS, so an older DB gains the table on next use — no
+ *  migration machinery) but never a missing DB file — the caller refuses
+ *  those before any open, so no subcommand creates a refinery.db as a side
+ *  effect (the T-006 refusal pattern). */
+function openApprovalWriter(dbPath: string): DatabaseSync {
+  const db = new DatabaseSync(dbPath)
+  db.exec(SCHEMA_SQL)
+  return db
+}
+
+/** Gates decide survival (decisions.md 2026-10-10): an approval for an
+ *  eliminated candidate is refused — a human approval must not resurrect one. */
+function survivorRefusal(jobId: string): string {
+  return `job '${jobId}' is not a survivor — gates decided it out, and an approval must not resurrect an eliminated candidate`
+}
+
+function candidateExists(db: DatabaseSync, runId: string, candidateId: string): boolean {
+  return db.prepare('SELECT 1 AS one FROM candidates WHERE run_id = ? AND candidate_id = ?')
+    .get(runId, candidateId) !== undefined
+}
+
+function candidateIsSurvivor(db: DatabaseSync, runId: string, candidateId: string): boolean {
+  return db.prepare('SELECT 1 AS one FROM candidates WHERE run_id = ? AND candidate_id = ? AND passed_all_gates = 1')
+    .get(runId, candidateId) !== undefined
+}
+
+/** The OS username is the `requested_by`/`decided_by` default (T-008). */
+function osUsername(): string {
+  return userInfo().username
+}
 
 // ---------- T-006: the derived job DAG ----------
 

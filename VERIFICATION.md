@@ -138,10 +138,11 @@ node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs
 
 Pins the durable run records (T-003), the derived job DAG (T-006), and the
 attempt records (T-007): `src/store/index.ts` ingests a finished `RunReport`
-into SQLite (`node:sqlite`, schema v3: `runs`, `candidates`, `gate_results`,
-`events`, T-006's `phases`/`jobs`/`job_dependencies`, plus T-007's `attempts`)
+into SQLite (`node:sqlite`, schema v4: `runs`, `candidates`, `gate_results`,
+`events`, T-006's `phases`/`jobs`/`job_dependencies`, T-007's `attempts`, and
+T-008's `approval_gates` — which ingest never writes; Gate 1.9 owns it)
 — zero npm dependencies. All tables are `CREATE TABLE IF NOT EXISTS`, so an
-existing v1/v2 `refinery.db` gains the newer tables on its next ingest — no
+existing v1/v2/v3 `refinery.db` gains the newer tables on its next use — no
 migration machinery, no backfill: old runs gain DAG/attempt rows only when
 re-ingested, which appends a fresh event block by design.
 One call site in `src/cli.ts` immediately after `runSkeleton` returns, behind
@@ -299,6 +300,92 @@ default `maxAttempts` 1 — no behavior change), §15.2/§29 startup
 reconciliation (`abandoned` has no producer until the reconciliation slice),
 §30's other failure policies, and the full §7.7 fingerprint (Milestone-2
 context system).
+
+## Gate 1.9 — approval gates (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-approvals.mjs
+```
+
+Pins the durable approval records (T-008): the `approval_gates` table (schema
+v4) in the T-003 store, written only by `requestApproval`/`decideApproval`
+through the standalone `npm run approvals` CLI (`src/approvals.ts`, the
+clean/integrate/dag standalone pattern) — `request` records
+`waiting_for_approval` for a finished run's survivors, `decide` records
+`approved`/`rejected` on one pending row, `list` is the pending-approval
+queue (spec §26.6's Milestone-7 UI, token-free precursor, exactly as the
+`dag` dump is §26.2's). Zero behavior change to the pipeline: plain ingest is
+approval-blind and nothing automated consumes a decision this slice — the
+value delivered is the durable decision record and the queue; the successor
+ticket that wires approval state into `integrate` extends T-005's refusal
+contract and owns its own Gate 2 run.
+
+**Wall-clock scoping of the determinism rule — documented, not discovered:**
+ingest's stamps stay pure functions of the report (never `Date.now()`), but
+approval requests and decisions are primary human facts no report carries, so
+their rows (`requested_at`/`decided_at`) and events are legitimately
+wall-clock stamped, written only by operator action through the CLI. The
+determinism rule continues to govern everything report-derived (`ingest` is
+untouched). The gate pins both halves: approval stamps parse as ISO-8601 and
+differ from the report's own stamps, while `RUN_CREATED` stays at the
+report's `startedAt`.
+
+The check ingests the vendored fixture into fresh temp DBs (plus its
+elim-variant, where c02's build gate fails and only c01 survives) and drives
+ingest and the CLI as separate subprocess invocations — each subcommand sees
+the state the previous process persisted, proving state lives in the DB, not
+in any process. That is the exercisable form of "survives orchestrator
+restart" today; the paused-execution form is carved until the scheduler or
+crash-recovery slices exist (T-007's carve stands). It asserts:
+
+- plain ingest is approval-blind: zero `approval_gates` rows and no
+  `APPROVAL_*` events — approval state exists only through explicit operator
+  action,
+- `request` records the queue: exactly one row per surviving candidate keyed
+  `(run_id, phase_id, job_id)` with `phase_id` from T-006's derived phase and
+  `job_id` = candidate id, state `waiting_for_approval`, `requested_at`
+  wall-clock, `requested_by` recorded (`--by` or the OS username default) —
+  plus exactly one `APPROVAL_REQUESTED` event per row, `at` the row's own
+  stamp, payload naming phase/job/requester; `--job` narrows to one; jobs
+  already carrying an approval row are skipped, never rewritten
+  (additive-only); survivors only — the elim-variant run records nothing for
+  the eliminated candidate,
+- `decide --decision approved|rejected` flips the row with
+  `decided_at`/`decided_by` recorded and appends exactly one
+  `APPROVAL_GRANTED` / `APPROVAL_REJECTED` event — `APPROVAL_REJECTED` is
+  the slice's documented vocabulary extension (spec §28 names no rejection
+  event),
+- rejection corrupts nothing: after a reject, `runs`, `candidates`, and
+  `gate_results` rows are value-identical to before (full-table comparisons),
+  every prior event row (seq, type, at, payload) is unchanged with exactly
+  one row appended, and `PRAGMA integrity_check` returns `ok`,
+- the queue view: `list` exits 0 and prints pending rows; decided rows drop
+  out of the default queue; the empty queue prints `no pending approvals`;
+  `--json` emits the same structure as JSON,
+- read-only views never write: the DB file is byte-identical (sha256
+  before/after `list` and `list --json`; readOnly open), and a write against
+  a readOnly-opened handle throws — the Known issues #7 node:sqlite churn
+  guard, same as Gate 1.7,
+- refusals exit non-zero with nothing on stdout and no DB side effects:
+  missing DB file for all three subcommands (no subcommand ever creates a
+  `refinery.db` — asserted absent afterward), unknown runId on request and
+  decide (`list --run` is a filter — an unknown run simply has an empty
+  queue, stated rather than smoothed over), request/decide for an eliminated
+  candidate (the refusal names the rule: an approval must not resurrect one
+  — decisions.md 2026-10-10, gates decide survival), decide on an unknown
+  job or a survivor with no recorded request, double-decide (the refusal
+  names the row's current state — the audit record is not rewritable),
+  unknown `--decision` value, missing flags, unknown subcommand — and the
+  refusals wrote nothing (row/event counts re-checked after),
+- process death: request, decide, and list run as separate processes and each
+  sees the state the previous one persisted.
+
+Not pinned here and carved by the ticket: the `'cancelled'` state and
+`APPROVAL_CANCELLED` event (no producer until an abort/cancel slice), §24's
+other outcomes (`return to generation`, `pin candidate for later`), §26.6's
+UI (the CLI `list` is the precursor), approval-gate enforcement anywhere in
+the pipeline (`npm run integrate` does not gate on approval state), and
+in-run pause/resume.
 
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
