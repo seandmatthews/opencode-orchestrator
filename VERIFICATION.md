@@ -136,8 +136,9 @@ lock files afterward.
 node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs
 ```
 
-Pins the durable run records (T-003), the derived job DAG (T-006), and the
-attempt records (T-007): `src/store/index.ts` ingests a finished `RunReport`
+Pins the durable run records (T-003), the derived job DAG (T-006), the
+attempt records (T-007), and the recorded schedule (T-009):
+`src/store/index.ts` ingests a finished `RunReport`
 into SQLite (`node:sqlite`, schema v4: `runs`, `candidates`, `gate_results`,
 `events`, T-006's `phases`/`jobs`/`job_dependencies`, T-007's `attempts`, and
 T-008's `approval_gates` — which ingest never writes; Gate 1.9 owns it)
@@ -162,9 +163,9 @@ a verbatim copy of run 20261011022419) into a fresh temp DB and asserts:
   `phases` row (`phase_id = 'main'`, `dependencies_json` `[]`, §6.3 policy
   columns null), one `jobs` row per candidate (`job_id` = the candidate id,
   `worker_id`/`model`/`brief` copied verbatim, empty dependencies, every §6.4
-  policy column null), and zero `job_dependencies` rows — the report carries
-  no non-trivial DAG data today (`src/runner.ts` is a flat fan-out), stated
-  honestly rather than smoothed over,
+  policy column null), and zero `job_dependencies` rows — the flat derivation
+  is the fallback for schedule-less reports; a report carrying a schedule
+  block derives its REAL structure instead (the T-009 bullet below),
 - the pure validators (`unknownDependencyRefusal`, `cycleRefusal`, exported
   from the store module, no I/O) accept the derived flat DAG and refuse
   hand-built synthetic inputs — a 3-cycle and a self-dependency (the refusal
@@ -191,6 +192,22 @@ a verbatim copy of run 20261011022419) into a fresh temp DB and asserts:
   re-derived delete+insert) — and the `attempts` rows (upsert by natural
   key) idempotent, while `events` appends a fresh deterministic block and
   never rewrites prior rows,
+- the schedule block (T-009), on a hand-built DAG variant of the fixture
+  (the elim-variant pattern: two real phases `foundation` → `app` with the
+  expanded edge `c02 -> c01`, c02's gates failed): two `phases` rows with
+  the real ids, declared dependencies, and the `completion` policy (its
+  first producer; `early_stop_json`/`approval_gate_json` stay null), job
+  rows carrying their real phase and expanded edges with worker/model/brief
+  joined from the candidate reports, exactly one real `job_dependencies`
+  edge, and the derived schedule events after the per-candidate block in
+  schedule order — `JOB_READY` (§28:1852) per dispatched job with `at` = the
+  max of its dependencies' finish stamps (run `startedAt` for
+  dependency-free jobs), `JOB_SUCCEEDED`/`JOB_FAILED` (the documented §28
+  vocabulary extensions — §28 names no job-terminal events) at each job's
+  own finish stamp, `PHASE_COMPLETED` only for the phase that reached
+  terminal success on every job — every `at` a pure function of the report
+  (never `Date.now()`); re-ingest leaves the DAG rows idempotent while
+  events append a fresh deterministic block,
 - `PRAGMA integrity_check` returns `ok`,
 - the source fixture is byte-identical after ingestion (persistence is
   read-only over evidence — T-002 rule),
@@ -386,6 +403,93 @@ other outcomes (`return to generation`, `pin candidate for later`), §26.6's
 UI (the CLI `list` is the precursor), approval-gate enforcement anywhere in
 the pipeline (`npm run integrate` does not gate on approval state), and
 in-run pause/resume.
+
+## Gate 1.10 — deterministic scheduler (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-scheduler.mjs
+```
+
+Pins the T-009 scheduler: the minimal `--jobs` spec (the §6.3/§6.4 subset —
+only fields with a producer; `completion` accepts only `"all"`; job ids are
+`[a-z0-9][a-z0-9-]*` so derived lease/branch names stay collision-free),
+`src/scheduler.ts`'s pure ready-queue function, the DAG-driven runner loop
+in `src/runner.ts` under the existing concurrency cap, the T-007 retry rule
+verbatim with attempt-scoped `wt/<jobId>-a<n>` leases, phase completion
+`all`, lazy leasing at the run's `baseSha`, and the recorded
+`RunReport.schedule` block. No existing gate can pin scheduler behavior —
+the fast tier never runs the pipeline and Gate 2 spends model tokens and
+cannot assert determinism — so this gate drives the exported pure function
+directly and the runner end-to-end with a **fake `WorkerAdapter`** (the
+`src/types.ts` seam; the Gate 1.8 pattern) against throwaway fixture repos
+(one per scenario, list-form git calls only), zero model tokens. It asserts:
+
+- the ready-queue function is pure and dependency-safe on synthetic DAGs
+  (chain, diamond, independent, mixed): only jobs whose every dependency has
+  reached terminal SUCCESS are returned — a terminal-FAILED dependency
+  blocks its dependents for good while independents stay ready — tie-broken
+  by ascending job id, bounded by the cap minus in-flight, with identical
+  inputs giving identical output and no input mutated; the determinism
+  contract is the ready order (never wall-clock, never insertion order,
+  never model opinion), documented in `src/scheduler.ts`,
+- `parseJobsSpec`: phase dependencies expand to job edges (every job of a
+  phase depends on every job of each phase it depends on), defaults apply
+  (`completion: "all"`, empty dependencies), optional per-job
+  `model`/`worker`/`timeoutMs`/`gates` are preserved, and every refusal
+  names its offense: unknown fields (including `approvalGate`,
+  `earlyStop`, and the §6.4 policy fields), non-`all` completion, empty job
+  set, duplicate ids, id charset violations, unknown phase references,
+  job-less phases, unknown dependencies (T-006's validator message), and a
+  cycle — job-level or surfacing through expanded phase edges — whose
+  refusal names the cycle (T-006's `cycleRefusal`),
+- determinism end-to-end: two runs over the same `--jobs` spec with the same
+  fake-worker outcomes produce identical recorded schedule blocks (per-job
+  `dispatchIndex` equal across the reports), under a cap-1 two-phase DAG and
+  a wide-cap chain; concurrent completion interleaving is not deterministic
+  and is not claimed to be,
+- the concurrency cap is never exceeded: the fake adapter counts in-flight
+  executions; on five dependency-free jobs under cap 2 the observed maximum
+  is 2 (parallelism observed, never exceeded) with every job executed
+  exactly once,
+- dependent jobs dispatch only after their dependencies reach terminal
+  success — across phases via expanded phase edges (the fake adapter records
+  the worker call order; the recorded `dispatchIndex` and expanded edges
+  agree with it),
+- the T-007 retry rule verbatim in `--jobs` mode: fail-once-then-succeed
+  requeues the job as a fresh attempt in `wt/<jobId>-a<n>` at the same
+  `baseSha` (exactly two attempts, one dispatch, one branch per attempt, no
+  collisions); an always-failing worker hits the `maxAttempts` bound and the
+  job records terminal failure; a succeeded-but-no-op or gates-failed leg is
+  never re-rolled (exactly one attempt, job failed); a thrown leg IS
+  retried,
+- phase completion `all`: a failed job fails its phase, the dependent
+  phase's job is never dispatched — recorded as not-dispatched
+  (`dispatchIndex: null`, no candidate report, no branch/worktree ever
+  created), never fabricated as terminal — and the independent phase still
+  runs to completion (`completed`),
+- default mode is today's behavior: without `--jobs`, candidate ids in
+  order, one dispatch per candidate, today's lease ids/branches and evidence
+  paths (`wt/<id>`, `swarm/wt-<id>`, `<id>/worker.log`, `<id>/diff.patch`),
+  the runner's stdout attempt/gate lines unchanged, and **no `schedule`
+  block** in the report (in memory or on disk); the degenerate one-phase
+  spec is synthesized and driven through the same loop, and the legacy
+  fan-out is deleted,
+- spec refusals exit 1 and write nothing, before the checkout lock, repo
+  validation, or any artifacts dir exists (the T-007 CLI-refusal pattern):
+  each bad spec is refused through the real CLI with a non-git `--repo`, so
+  the jobs refusal winning over the repo error proves the ordering, and the
+  run root stays empty (no artifacts dir, no `locks/` directory) across all
+  refusal cases; `--help` documents `--jobs <path>`.
+
+Not pinned here and carved by the ticket: completion policies beyond `all`
+(quorum, all-machine-gates, at-least-n — no requeue/elimination semantics
+defined), `earlyStop`/`approvalGate` in the spec (refused until their
+successor tickets land), in-run approval pause and restart reconciliation
+(§29, the T-007/T-008 carves stand), live in-run event emission (ingest
+stays post-hoc and derived), and any adapter change (`src/worker/opencode.ts`
+untouched; Gate 3 n/a). The real-harness face of the rewritten loop is
+pinned once at landing by a real `npm run verify:full` (recorded in T-009's
+Landed section) — not a permanent Gate 2 extension.
 
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 

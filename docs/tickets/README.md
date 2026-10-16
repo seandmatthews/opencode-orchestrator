@@ -45,7 +45,7 @@ Rules:
 | T-006 | Job DAG: phase/job tables, DAG validation, `dag` dump CLI | high | done 2026-10-16 |
 | T-007 | Attempt records + bounded same-config retry | high | done 2026-10-16 |
 | T-008 | Approval gates: durable records, `approvals` decide CLI, pending queue | high | done 2026-10-16 |
-| T-009 | Deterministic scheduler core: minimal job spec, DAG-driven execution | high | proposed |
+| T-009 | Deterministic scheduler core: minimal job spec, DAG-driven execution | high | done 2026-10-16 |
 | T-010 | Startup reconciliation: abandoned attempts, process-tree sweep, retry disposition | high | proposed |
 | T-011 | In-run process-tree termination hardening (spec §15.3) | high | proposed |
 | T-012 | Context system core: ContextPlan/ContextPacket, budgets, selectors, fingerprints, `context inspect` CLI | high | proposed |
