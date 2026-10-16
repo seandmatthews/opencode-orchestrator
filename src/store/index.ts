@@ -1,5 +1,6 @@
-// Durable run records (T-003 store, T-006 job DAG) — slices of the stage-1
-// state store (spec §27 Persistence Model, §28 Event Log, §34 Milestone 1).
+// Durable run records (T-003 store, T-006 job DAG, T-007 attempts) — slices
+// of the stage-1 state store (spec §27 Persistence Model, §28 Event Log,
+// §34 Milestone 1).
 //
 // Zero npm dependencies: Node's built-in `node:sqlite` (DatabaseSync).
 // node:sqlite is experimental on Node 22 — see VERIFICATION.md Known issues.
@@ -12,16 +13,19 @@
 
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { CandidateReport, RunReport } from '../types.js'
+import type { Attempt, CandidateReport, RunReport } from '../types.js'
 
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
-// Schema v2 (T-006): the four v1 tables plus spec §27's `phases`/`jobs`/
-// `job_dependencies`. Everything is CREATE TABLE IF NOT EXISTS, so an existing
-// v1 refinery.db gains the new tables on its next ingest — no migration
-// machinery, no backfill: old runs gain DAG rows only when re-ingested, which
-// appends a fresh event block by design (Gate 1.6 re-ingest semantics). The
-// §6.3/§6.4 policy columns are nullable and stay null this slice:
+// Schema v3 (T-007): the v2 tables plus spec §27's `attempts`. Everything is
+// CREATE TABLE IF NOT EXISTS, so an existing v1/v2 refinery.db gains the new
+// tables on its next ingest — no migration machinery, no backfill: old runs
+// gain attempt rows only when re-ingested, which appends a fresh event block
+// by design (Gate 1.6 re-ingest semantics). The §6.5 columns without a
+// producer this slice (`prompt_version`, `process_identity_json`,
+// `worker_session_id`) are nullable and written null — stated honestly, not
+// smoothed over. Schema v2 (T-006) added `phases`/`jobs`/`job_dependencies`.
+// The §6.3/§6.4 policy columns are nullable and stay null this slice:
 // RunReport/CandidateReport carry none of those fields, so there is no
 // producer — stated honestly, not smoothed over.
 const SCHEMA_SQL = `
@@ -103,10 +107,27 @@ CREATE TABLE IF NOT EXISTS job_dependencies (
   depends_on_job_id TEXT NOT NULL,
   PRIMARY KEY (run_id, job_id, depends_on_job_id)
 );
+CREATE TABLE IF NOT EXISTS attempts (
+  run_id                TEXT NOT NULL REFERENCES runs(run_id),
+  job_id                TEXT NOT NULL,
+  attempt_number        INTEGER NOT NULL,
+  state                 TEXT NOT NULL,
+  started_at            TEXT,
+  ended_at              TEXT,
+  input_context_hash    TEXT NOT NULL,
+  prompt_version        TEXT,
+  process_identity_json TEXT,
+  worker_session_id     TEXT,
+  output_artifacts_json TEXT,
+  failure_json          TEXT,
+  PRIMARY KEY (run_id, job_id, attempt_number)
+);
 `
 
-// Event vocabulary — spec §28. This slice emits only these three; live
-// in-run emission is carved off (would touch the runner).
+// Event vocabulary — spec §28. This slice emits ATTEMPT_STARTED (T-007,
+// derived per recorded attempt) on top of T-003's three; live in-run
+// emission is carved off (would touch the runner). ATTEMPT_ABANDONED
+// (§28:1863) has no producer until the startup-reconciliation slice.
 // node:sqlite binds null/number/bigint/string/Buffer only, hence 1|0 booleans.
 
 // ---------- T-006: the derived job DAG ----------
@@ -193,13 +214,14 @@ export function cycleRefusal(jobs: readonly DagJobSpec[]): string | null {
 /**
  * Persist one finished run. The only DB writer in the store.
  *
- * `runs`/`candidates`/`gate_results`/`phases`/`jobs` upsert by natural key;
- * `job_dependencies` is re-derived (delete + insert) so re-ingest stays
- * idempotent; `events` is append-only and never rewrites prior rows. The DAG
- * is derived from the report — a pure function, validated before any DB side
- * effect (acyclic by construction today; the interesting inputs are synthetic
- * and live in the gate). Throws on failure — the caller (src/cli.ts) logs
- * loudly and continues.
+ * `runs`/`candidates`/`gate_results`/`phases`/`jobs`/`attempts` upsert by
+ * natural key; `job_dependencies` is re-derived (delete + insert) so re-ingest
+ * stays idempotent; `events` is append-only and never rewrites prior rows.
+ * The DAG is derived from the report — a pure function, validated before any
+ * DB side effect (acyclic by construction today; the interesting inputs are
+ * synthetic and live in the gate). Attempt stamps are copied from
+ * report-carried values, never `Date.now()`. Throws on failure — the caller
+ * (src/cli.ts) logs loudly and continues.
  */
 export function ingest(report: RunReport, dbPath: string): void {
   const dag = deriveDag(report)
@@ -222,6 +244,20 @@ export function ingest(report: RunReport, dbPath: string): void {
       for (const c of report.candidates) {
         upsertCandidate(db, report.runId, c)
         upsertJob(db, report.runId, c)
+        // Attempts (T-007): one row and one derived ATTEMPT_STARTED event per
+        // recorded attempt, keyed (run_id, job_id, attempt_number). Reports
+        // that predate T-007 carry no attempts array — zero rows, unchanged
+        // otherwise. `at` comes from the attempt's own startedAt (never the
+        // wall clock), so re-ingest is deterministic; the fallback to the
+        // run's start only covers spec-optional missing stamps.
+        for (const a of c.attempts ?? []) {
+          upsertAttempt(db, report.runId, c.id, a)
+          insertEvent(db, report.runId, 'ATTEMPT_STARTED', a.startedAt ?? report.startedAt, {
+            jobId: c.id,
+            attemptId: a.id,
+            attemptNumber: a.number,
+          })
+        }
         for (const g of c.gates) {
           upsertGateResult(db, report.runId, c.id, g)
           if (!g.passed) {
@@ -319,6 +355,40 @@ function upsertJob(db: DatabaseSync, runId: string, c: CandidateReport): void {
     c.brief,
     JSON.stringify([]),
     null, null, null, null, null, null, null, null, null, null,
+  )
+}
+
+/** One row per recorded attempt of a job: `job_id` is the candidate id
+ *  (T-006 derives one job per candidate), `attempt_number` is 1-based.
+ *  Stamps and hashes are copied verbatim out of the report's Attempt record.
+ *  `prompt_version`/`process_identity_json`/`worker_session_id` are written
+ *  null this slice — no producer in `Attempt` (T-007). */
+function upsertAttempt(db: DatabaseSync, runId: string, jobId: string, a: Attempt): void {
+  db.prepare(
+    `INSERT INTO attempts (run_id, job_id, attempt_number, state, started_at, ended_at,
+       input_context_hash, prompt_version, process_identity_json, worker_session_id,
+       output_artifacts_json, failure_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(run_id, job_id, attempt_number) DO UPDATE SET
+       state = excluded.state, started_at = excluded.started_at, ended_at = excluded.ended_at,
+       input_context_hash = excluded.input_context_hash, prompt_version = excluded.prompt_version,
+       process_identity_json = excluded.process_identity_json,
+       worker_session_id = excluded.worker_session_id,
+       output_artifacts_json = excluded.output_artifacts_json,
+       failure_json = excluded.failure_json`,
+  ).run(
+    runId,
+    jobId,
+    a.number,
+    a.state,
+    a.startedAt ?? null,
+    a.endedAt ?? null,
+    a.inputContextHash,
+    a.promptVersion ?? null,
+    a.processIdentity ? JSON.stringify(a.processIdentity) : null,
+    a.workerSessionId ?? null,
+    JSON.stringify(a.outputArtifacts ?? []),
+    a.failure ? JSON.stringify(a.failure) : null,
   )
 }
 

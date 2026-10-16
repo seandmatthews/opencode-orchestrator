@@ -1,9 +1,9 @@
 # T-007 — Attempt records + bounded same-config retry
 
-**Status:** proposed
+**Status:** done 2026-10-16
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 3
-**Depends on:** T-006 (proposed — must land first; transitively T-003)
+**Depends on:** T-006 (done 2026-10-16; transitively T-003)
 
 ## What
 
@@ -198,55 +198,150 @@ hence Risk 3, and the owning Gate 2 run.
 
 ## Acceptance criteria
 
-- [ ] Default run is today's behavior: without `--max-attempts` every candidate
+- [x] Default run is today's behavior: without `--max-attempts` every candidate
       records exactly one attempt, with today's lease id (`wt/<id>`), branch
       (`swarm/wt-c01`), and evidence paths (`<id>/worker.log`, `<id>/diff.patch`);
       the only report difference is the added `attempts` array of length 1 — pinned
       by **Gate 1.8** (default-mode assertions).
-- [ ] Bounded retry end-to-end: a fake worker that fails once then succeeds, with
+- [x] Bounded retry end-to-end: a fake worker that fails once then succeeds, with
       `maxAttempts = 2`, yields exactly two recorded attempts — attempt 1 `failed`
       with a `FailureRecord` (reason `worker-failed`), attempt 2 `succeeded` — and a
       final candidate verdict identical in shape to today's — pinned by **Gate 1.8**
       (fake `WorkerAdapter` + throwaway fixture repo, zero model tokens).
-- [ ] The bound is respected and failure after the bound eliminates: an
+- [x] The bound is respected and failure after the bound eliminates: an
       always-failing worker yields exactly `maxAttempts` attempts, then the
       candidate's final verdict is the same elimination the ladder produces today —
       pinned by **Gate 1.8**.
-- [ ] Fresh workspace per attempt (§15.1): attempt n ≥ 2 runs in a new lease at the
+- [x] Fresh workspace per attempt (§15.1): attempt n ≥ 2 runs in a new lease at the
       same `baseSha`, clean at lease time (nothing adopted from attempt 1's worktree
       or branch), and lease ids/branches never collide across attempts — pinned by
       **Gate 1.8**.
-- [ ] Attempt evidence is attempt-scoped: attempt 1's `worker.log`/`diff.patch`
+- [x] Attempt evidence is attempt-scoped: attempt 1's `worker.log`/`diff.patch`
       survive attempt 2 (no overwrite of `<id>/worker.log`), attempts ≥ 2 write under
       `<id>/attempt-<n>/`, and each attempt's `outputArtifacts` names its own paths —
       pinned by **Gate 1.8**.
-- [ ] Retry fires only on the mechanical legs: a worker that succeeds with a
+- [x] Retry fires only on the mechanical legs: a worker that succeeds with a
       zero-byte diff, or succeeds and fails gates, is eliminated exactly as today and
       never re-rolled — pinned by **Gate 1.8** (no-op-then-pass and
       gates-fail-then-pass fake workers produce exactly one attempt each).
-- [ ] Store: ingest of a retried-candidate report produces one `attempts` row per
+- [x] Store: ingest of a retried-candidate report produces one `attempts` row per
       attempt keyed `(run_id, job_id, attempt_number)` with
       state/started_at/ended_at/input_context_hash/output_artifacts_json/failure_json
       as recorded, and `prompt_version`/`process_identity_json`/`worker_session_id`
       null — pinned by the **extended Gate 1.6** (hand-built retried-candidate
       variant of `scripts/fixtures/report-real.json`, the elim-variant pattern
       `scripts/check-store.mjs:88-107`).
-- [ ] Derived attempt events stay deterministic and append-only: exactly one
+- [x] Derived attempt events stay deterministic and append-only: exactly one
       `ATTEMPT_STARTED` per attempt with `at` from the report-carried stamp (never
       `Date.now()`); re-ingest upserts attempt rows by natural key while prior
       `events` rows are untouched and `PRAGMA integrity_check` returns `ok` — pinned
       by the **extended Gate 1.6**.
-- [ ] CLI: `--max-attempts <n>` appears in the usage text, defaults to 1, and a
+- [x] CLI: `--max-attempts <n>` appears in the usage text, defaults to 1, and a
       value < 1 is refused with exit 1 before the checkout lock is taken or any
       artifacts dir exists — pinned by **Gate 1.8** (CLI parse-refusal assertions)
       and **Gate 0**.
-- [ ] VERIFICATION.md gains the Gate 1.8 section and the extended Gate 1.6
+- [x] VERIFICATION.md gains the Gate 1.8 section and the extended Gate 1.6
       description, and the ticket status + index row move in the same change-set
       (AGENTS.md #6; tickets README rules) — pinned by change-set review.
 - [ ] One real-pipeline `npm run verify:full` at landing, recorded in this ticket's
       Landed section — `src/runner.ts` and the report-shape change are both on
       VERIFICATION.md:200-201's trigger list; the T-003:166-175 precedent. Gate 2 is
-      not permanently extended.
+      not permanently extended. **Not run in the lane session** — the driving
+      pipeline owns it (it re-runs the fast tier and runs the full e2e gate on
+      merge exactly because `touchesPipeline` is true here); whoever lands the
+      merge must confirm the driving `verify:full` is green and append the record
+      below.
+
+## Landed
+
+2026-10-16, in one change-set on `ticket/T-007-attempts-and-bounded-retries`.
+
+- `src/types.ts` — the attempt vocabulary, chosen and documented here per the
+  ticket: `AttemptState = 'running' | 'succeeded' | 'failed'` (`'abandoned'`
+  left for the reconciliation slice), `FailureReason` = the elimination-ladder
+  vocabulary with `FailureRecord = { reason, message, timedOut, exitCode }`,
+  `RetryPolicy = { maxAttempts: number }`, `Attempt` per §6.5 field-for-field
+  (`startedAt`/`endedAt` optional as §6.5 types them; `promptVersion: string |
+  null`; `processIdentity?`/`workerSessionId?` absent this slice), and
+  `CandidateReport.attempts: Attempt[]`. One choice the ticket left open:
+  `ProcessIdentity` (the spec never defines it) is pinned as `{ pid, startedAt }`
+  — the same shape the checkout lock records (`src/lock.ts`) — with no producer
+  until T-010/T-011.
+- `src/runner.ts` — `SkeletonOptions.maxAttempts` (required; CLI default 1);
+  `runCandidate` loops attempts inside the candidate's lane. Attempt 1 keeps the
+  up-front lease (`wt/<id>`); attempt n ≥ 2 leases `wt/<id>-a<n>` at the same
+  `baseSha` inside the lane and writes evidence under `<id>/attempt-<n>/`.
+  Retry rule exactly as specified: an attempt whose worker failed (`!workerOk`,
+  non-zero exit or timeout) or that threw (ladder leg `error`) is retried while
+  `attempts.length < maxAttempts`; a succeeded worker is final no matter the
+  upcoming verdict (no-op / gates-failed are never re-rolled); gates run only on
+  the final attempt, whose values fill the unchanged top-level `CandidateReport`
+  fields, so the verdict ladder, run summary, and store per-candidate writes are
+  byte-for-byte the old flow. `inputContextHash` = sha256 over brief + model +
+  the composed prompt with the workspace-path line excluded (computed per
+  attempt; identical across attempts for the same brief+model).
+- `src/store/index.ts` — `SCHEMA_VERSION` 2 → 3; `attempts` table appended to
+  `SCHEMA_SQL` with `CREATE TABLE IF NOT EXISTS` (PK `(run_id, job_id,
+  attempt_number)`, the twelve ticket columns); ingest derives one row per
+  recorded attempt (upsert by natural key inside the existing transaction;
+  stamps copied from the report, never `Date.now()`;
+  `prompt_version`/`process_identity_json`/`worker_session_id` written null)
+  plus exactly one derived `ATTEMPT_STARTED` per attempt with `at` from the
+  attempt's `startedAt`; `events` untouched and append-only. Reports predating
+  T-007 (no `attempts` array) ingest unchanged with zero attempt rows.
+- `src/cli.ts` — `--max-attempts <n>`, default 1, values < 1 (and non-integers)
+  refused at parse time with exit 1 — parse runs before repo validation, the
+  checkout lock, and any artifacts dir; documented in the usage text. Adapters
+  untouched; `src/worker/opencode.ts` remains the only harness-aware file.
+- `scripts/check-retry.mjs` (new) + Gate 1.8 hook in `scripts/verify.mjs`
+  after Gate 1.7 (the T-003/T-005 slice-owns-its-gate precedent) — 41
+  assertions across eight scenarios: fail-once-then-succeed ×2, always-fail
+  ×2 (bound), default succeed/fail ×1, no-op-then-pass ×2 (not re-rolled),
+  gates-fail-then-pass ×2 (not re-rolled), throw-once-then-succeed ×2, and
+  the CLI usage/parse-refusal checks. Beyond the ticket's listed set it also
+  pins the throw leg (the ticket's retry rule names "an attempt that throws"
+  as retryable) and that the on-disk `report.json` carries the attempts the
+  store will ingest.
+- `scripts/check-store.mjs` — extended Gate 1.6 with 12 new assertions (and
+  the `SCHEMA_VERSION is 3` update): zero attempt rows for the pre-T-007
+  fixture, the hand-built retried-candidate variant (row values, producer-less
+  columns null, the no-attempts candidate tolerated), `ATTEMPT_STARTED`
+  derivation with payloads, and re-ingest idempotency with append-only events.
+- VERIFICATION.md — extended Gate 1.6 section (schema v3, attempts + retried-
+  variant bullets) and the new Gate 1.8 section. Ticket status + index row in
+  the same change-set.
+
+Deviations, stated rather than smoothed:
+
+- Diff evidence is captured on **every** attempt, including retryable legs
+  (gates still run only on the final attempt). The ticket fixes attempt 1's
+  paths and requires each attempt's `outputArtifacts` to name its own paths;
+  capturing the failed leg's diff keeps that promise honest and gives §6.5's
+  "complete audit history". A thrown attempt captures no diff and names only
+  its `worker.log`.
+- `--max-attempts` also refuses non-integer values (`nope`), not only values
+  < 1 — `Number('nope') < 1` is false, so the integer guard is what makes the
+  ticket's refusal real; pinned by Gate 1.8 S8.
+- Known narrow gap left as-is (no ride-along): for a retried candidate,
+  `clean`'s report-driven fallback branch (`branchForLeaseId('wt/' + id)`)
+  names `swarm/wt-c01` while the final attempt's worktree branch is
+  `swarm/wt-c01-a2`. Benign in every git-visible state — disposal uses the
+  branch observed in `worktree list --porcelain` (`src/clean.ts:216-217`) and
+  wt/-discovery maps attempt directories by name (`src/clean.ts:165`) — and
+  only reachable if a worktree was hand-removed while its branch survived. A
+  successor touching `src/clean.ts` should derive the fallback from the last
+  attempt's lease id.
+- Measured gates (this lane, Node v22.23.1): Gate 0 `npm run typecheck` →
+  exit 0 (green before the change too, at lane creation); Gate 1 fixture
+  regenerated, `build ok` + `tests ok`, tree clean; Gate 0.5 ALL GREEN
+  (17 ok); Gate 1.5 clean/lock/integrate sections ALL GREEN; extended Gate
+  1.6 → 67 ok + `check-store: ALL GREEN`, exit 0, only the documented
+  node:sqlite ExperimentalWarning (Known issues #7); Gate 1.7 ALL GREEN
+  (22 ok); new Gate 1.8 → 41 ok + `check-retry: ALL GREEN`, exit 0;
+  `node scripts/verify.mjs fast` (Gates 0 / 1 / 0.5 / 1.5 / 1.6 / 1.7 / 1.8)
+  → `verify (fast) complete: ALL GREEN`, exit 0. Gate 2 not run here — owned
+  by the driving pipeline at landing (see the unchecked criterion above);
+  Gate 3 n/a (no adapter change; `processIdentity` stays null).
 
 ## Verification
 
