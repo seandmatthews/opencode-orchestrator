@@ -1,9 +1,9 @@
 # T-010 — Startup reconciliation: abandoned attempts, process-tree sweep, retry disposition
 
-**Status:** proposed
+**Status:** done 2026-10-16
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 3
-**Depends on:** T-006 + T-007 (both proposed — must land first; transitively T-003). **T-009 is NOT a dependency of this carve** — actual rerunning/resume scheduling is carved to its own successor (first Does-NOT-claim below). Only if T-009 has already landed does the dispatch-recording hook move from `runCandidate` into the scheduler's dispatch loop; the records and the `recover` command are identical either way.
+**Depends on:** T-006 + T-007 (both done 2026-10-16; transitively T-003). **T-009 is NOT a dependency of this carve** — actual rerunning/resume scheduling is carved to its own successor (first Does-NOT-claim below). T-009 landed before this ticket, so the dispatch-recording hook lives in the scheduler's dispatch loop (inside `runJob`, which both modes drive); the records and the `recover` command are identical either way.
 
 ## What
 
@@ -230,52 +230,52 @@ silently.
 
 ## Acceptance criteria
 
-- [ ] Every run writes `<runDir>/dispatch.jsonl` (header, dispatch, pid, completion
+- [x] Every run writes `<runDir>/dispatch.jsonl` (header, dispatch, pid, completion
       lines as specified) via best-effort appends, a fake adapter records its real
       child's pid through `onSpawn` before any hang, and today's default run
       behavior is otherwise unchanged (exit code, stdout verdicts, `report.json`) —
       pinned by **Gate 1.11** (fake `WorkerAdapter` run assertions) and **Gate 0**.
-- [ ] A run hard-killed mid-flight (driver subprocess killed by pid only, leaving a
+- [x] A run hard-killed mid-flight (driver subprocess killed by pid only, leaving a
       real orphaned worker and a stale lock, exactly the §15.2 shape) is refused by
       `recover` without `--force-lock`: non-zero exit, the refusal names the holder,
       and nothing was written — no `recovery.json`, no DB rows, the orphan still
       alive — pinned by **Gate 1.11**.
-- [ ] With `--force-lock`, `recover` proceeds, releases the lock on every path (no
+- [x] With `--force-lock`, `recover` proceeds, releases the lock on every path (no
       residual `.lock` files), and the orphaned worker whose pid was recorded in
       `dispatch.jsonl` is verified (live, identity vs the dispatch record) and then
       actually dead — asserted against the real process, not a mock — pinned by
       **Gate 1.11**.
-- [ ] Abandonment marks are durable: the un-completed attempt becomes one `attempts`
+- [x] Abandonment marks are durable: the un-completed attempt becomes one `attempts`
       row with state `'abandoned'`, a failure record with reason `'abandoned'`, and
       `process_identity` from the dispatch record, plus exactly one
       `ATTEMPT_ABANDONED` event; the completed attempt of the same killed run is
       **not** fabricated into the store; `PRAGMA integrity_check` returns `ok` —
       pinned by **Gate 1.11** (temp-DB assertions).
-- [ ] Verify-before-kill never blindly kills: a dispatch record whose pid is not
+- [x] Verify-before-kill never blindly kills: a dispatch record whose pid is not
       alive, and a dispatch with no recorded pid, are reported as cleanup failures
       (§15.3:1080) with no kill attempt, the recorded failure appears in
       `recovery.json`, and the command exits non-zero — while the lock file's
       (dead) orchestrator pid is never consulted — pinned by **Gate 1.11**.
-- [ ] Workspace inspection is report-only: `recover` lists every worktree under
+- [x] Workspace inspection is report-only: `recover` lists every worktree under
       `wt/` (the `src/clean.ts` discovery path, including the no-`report.json`
       fallback) with branch and dirty state, and afterwards worktrees, branches,
       and all evidence files (`dispatch.jsonl`, logs, anything pre-existing) are
       intact and no disposal happened — pinned by **Gate 1.11**, with **Gate 1.5**
       staying green (`npm run verify`).
-- [ ] Retry disposition follows T-007's bound and the no-re-roll rule: the same
+- [x] Retry disposition follows T-007's bound and the no-re-roll rule: the same
       kill-mid-run scenario with `maxAttempts 2` yields disposition `retryable`,
       with `maxAttempts 1` yields `terminal` / `bound-exhausted`, and a completion
       line with `ok` + `diffBytes 0` yields `terminal` / `no-op` — all recorded in
       `<runDir>/recovery.json` — pinned by **Gate 1.11**.
-- [ ] Recovery never reruns: after `recover`, no new worktree exists, no new worker
+- [x] Recovery never reruns: after `recover`, no new worktree exists, no new worker
       process was spawned (no stray node processes beyond the asserted-dead orphan —
       AGENTS.md #10), `dispatch.jsonl` gained no lines from recovery, and
       `recovery.json` is the only new artifact — pinned by **Gate 1.11**.
-- [ ] Refusals exit non-zero and write nothing: missing/unknown `--run`, a finished
+- [x] Refusals exit non-zero and write nothing: missing/unknown `--run`, a finished
       run (`report.json` present), an already-reconciled run (`recovery.json`
       present — a second `recover` on the killed-run scenario refuses naming it) —
       pinned by **Gate 1.11**.
-- [ ] Finished-run persistence is untouched: `ingest`, the four-table schema v1
+- [x] Finished-run persistence is untouched: `ingest`, the four-table schema v1
       write path, and the log-and-continue posture are unchanged, and the
       wall-clock deviation for abandonment stamps is documented in the
       `src/store/index.ts` header and VERIFICATION.md in the same change-set —
@@ -283,16 +283,135 @@ silently.
       2026-10-14: `node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs` →
       "check-store: ALL GREEN", exit 0, only the documented node:sqlite
       ExperimentalWarning, Known issues #7) plus change-set review.
-- [ ] VERIFICATION.md gains the Gate 1.11 section (including the kill-mid-run
+- [x] VERIFICATION.md gains the Gate 1.11 section (including the kill-mid-run
       scenario description and the wall-clock scoping), and the ticket status +
       index row move in the same change-set (AGENTS.md #6; tickets README rules) —
       pinned by change-set review.
 - [ ] One real-pipeline `npm run verify:full` at landing, recorded in this ticket's
       Landed section — `src/runner.ts` is on VERIFICATION.md:200-201's trigger
       list; the T-003:166-175 / T-007 precedent. Gate 2 is not permanently
-      extended.
-- [ ] Gate 3 once at landing (adapter change: `onSpawn` + `WorkerResult.pid` in
+      extended. **Not run in the lane session** — the driving pipeline owns it
+      (it re-runs the fast tier and runs the full e2e gate on merge exactly
+      because `touchesPipeline` is true here); whoever lands the merge must
+      confirm the driving `verify:full` is green and append the record below.
+- [x] Gate 3 once at landing (adapter change: `onSpawn` + `WorkerResult.pid` in
       `src/worker/opencode.ts`), recorded in Landed.
+
+## Landed
+
+2026-10-16, in one change-set on `ticket/T-010-startup-reconciliation` (lane
+base `03a2ca7`, T-009 already landed, so the dispatch hook lives in `runJob` —
+the loop both modes drive — exactly as the dependency note anticipated).
+
+- `src/types.ts` — the T-007/T-008 reservations paid off: `AttemptState`
+  gains `'abandoned'`, `FailureReason` gains `'abandoned'` (the documented
+  vocabulary extension: §28:1863 names `ATTEMPT_ABANDONED` but no reason
+  vocabulary; the T-008 `APPROVAL_REJECTED` choose-and-document precedent),
+  `WorkerExecutionRequest` gains optional `onSpawn?: (pid: number) => void`,
+  and `WorkerResult` gains `pid: number | null`. `ProcessIdentity`'s doc
+  updated: the in-run producer is the dispatch evidence; ingest-derived
+  attempt rows still record it absent.
+- `src/runner.ts` — `runSkeleton` appends `<runDir>/dispatch.jsonl`
+  (best-effort, can never break a run): the `run` header at run start, one
+  `dispatch` line per attempt when the lease exists, one `pid` line via the
+  adapter's `onSpawn` callback, one `completion` line per adapter-resolved
+  attempt after diff capture (`diffBytes` from the capture; a thrown attempt
+  gets none so recovery treats it as recorded-running and can still kill its
+  recorded pid).
+- `src/worker/opencode.ts` — still the only harness-aware file: calls
+  `req.onSpawn?.(child.pid)` right after the spawn and returns
+  `pid: child.pid ?? null`.
+- `src/store/index.ts` — additive-only: `recordAbandonedAttempts(runId,
+  attempts, dbPath)`, the second DB writer — one `attempts` row per
+  abandoned attempt (state `'abandoned'`, failure reason `'abandoned'`,
+  `process_identity` = `{pid, startedAt, leaseId, branch}` from the dispatch
+  record — the field T-007 recorded null now has a producer — `started_at`
+  from the dispatch stamp) plus exactly one `ATTEMPT_ABANDONED` event per
+  attempt, one transaction, `runs`/`candidates`/`gate_results`/prior events
+  untouched, completed attempts never fabricated. Two documented facts:
+  (1) the wall-clock scoping (second case in the header comment) — the
+  report was never written, so the abandonment stamp is the recovery
+  moment; (2) the connection opens with
+  `{ enableForeignKeyConstraints: false }` (verified this session: node:sqlite
+  enforces FKs by default, and a crashed run has no `runs` row — fabricating
+  one is forbidden, so the writer's own connection disables FKs; `ingest`
+  keeps its default FK-on connection and `PRAGMA integrity_check` stays ok).
+  Zero attempts ⇒ no-op that never opens the DB.
+- `src/workspace/worktree.ts` + `src/clean.ts` — `sniffRepo` and
+  `registeredWorktrees` extracted from clean.ts (the ticket's
+  "reuse/extract, do not duplicate") plus the shared `normPath`; clean.ts
+  imports them, recover reuses them. Clean semantics untouched (Gate 1.5
+  green).
+- `src/recover.ts` (new) + `npm run recover` in package.json — refusals
+  before any write (finished run, already-reconciled, missing/unknown
+  `--run`); pre-T-010 crash (no readable dispatch.jsonl) ⇒ inspection-only,
+  exit 0 with a noted report; then repo derivation (dispatch header, falling
+  back to worktree `.git` pointers), the T-004 lock refused without
+  `--force-lock` and released in a `finally` on every path, abandonment
+  marks, verify-before-kill (`pid-not-alive` / `no-pid-recorded` /
+  `identity-mismatch` / `kill-failed` are cleanup failures, never
+  blind-killed; identity = alive check plus a PowerShell creation-time
+  window check — a process created before the dispatch stamp or after the
+  pid stamp ±10s is not the recorded worker; creation time unobtainable
+  degrades to alive-only, noted), report-only workspace inspection, retry
+  disposition from dispatch records only (`no-op` terminal / `bound-exhausted`
+  terminal / else `retryable` with reason null while the bound allows),
+  `recovery.json` written last; exit 1 with the failure recorded when any
+  cleanup or write failed. The lock file's pid is never consulted for
+  killing.
+- `scripts/check-recovery.mjs` (new) + Gate 1.11 hook in
+  `scripts/verify.mjs` after Gate 1.10 — 50 assertions across seven
+  scenarios (R1 completed run + evidence structure; R2/R3 real kill-mid-run
+  at maxAttempts 1 and 2 — driver subprocess killed by pid only, leaving a
+  real detached orphan and a stale lock; R4 verify-before-kill with dead /
+  never-recorded / identity-mismatch pids and an untouched lock pid; R5
+  synthetic dispositions; R6 refusals; R7 pre-T-010 inspection-only). The
+  fixture worker spawns the hung child detached because node binds
+  non-detached children to the parent's lifetime on Windows — without
+  `detached: true` the §15.2 orphan cannot exist to be verified and killed
+  (probed this session: a non-detached grandchild dies within ~600ms of the
+  orchestrator's death, clean exit or not).
+- VERIFICATION.md — the Gate 1.11 section (scenario description, wall-clock
+  scoping, carve list). Ticket status + index row in the same change-set.
+
+Deviations, stated rather than smoothed:
+
+- `input_context_hash` is written `''` and `output_artifacts_json` `[]` on
+  abandoned rows — the columns are NOT NULL and dispatch evidence carries
+  neither hash nor artifact paths; stated in the writer's doc, not smoothed.
+- The gate fixture's hung worker is spawned detached (above) — a fixture
+  necessity, not an engine behavior: `src/worker/opencode.ts` keeps its
+  non-detached spawn (a worker that outlives its orchestrator in production
+  is the harness's own process behavior, which is exactly what recovery's
+  report-not-kill posture tolerates).
+- `identityMatches` uses the window `[dispatch.startedAt − 10s,
+  pidLine.at + 10s]` rather than the ticket's literal "creation time not
+  after the dispatch `startedAt`": the child is necessarily created after
+  the dispatch stamp (spawn follows the line), so a strict `<=` could never
+  pass; the window keeps the reused-pid guarantee (any reuse happens after
+  the pid line) while letting the real worker verify.
+- `recover` writes `recovery.json` on the inspection-only path too (with a
+  `note` field beyond the ticket's shape) — "exit 0 with that report" read
+  as producing the report; it also makes the already-reconciled refusal
+  uniform.
+
+Measured gates (this lane, Node v22.23.1): Gate 0 `npm run typecheck` →
+exit 0; `node scripts/verify.mjs fast` (Gates 0 / 1 / 0.5 / 1.5 /
+1.6 / 1.7 / 1.8 / 1.9 / 1.10 / 1.11) → `verify (fast) complete: ALL GREEN`,
+exit 0 — including the extended Gate 1.6 (`ingest` untouched; only the
+documented node:sqlite ExperimentalWarning, Known issues #7) and Gate 1.5
+(clean/lock/integrate semantics unchanged after the extraction). New Gate
+1.11: 50 ok, `check-recovery: ALL GREEN`, exit 0, three consecutive green
+runs (the kill-mid-run scenarios are timing-sensitive, so it was run
+back-to-back to check stability). Gate 3 (adapter change), run in the lane:
+`node scripts/diag-pwd.mjs C:\swarm\demo-target` → harness reports the
+inherited-PWD directory (the Known issues #1 demonstration);
+`node scripts/diag-pwd.mjs C:\swarm\demo-target C:\swarm\demo-target` →
+harness reports the override target — identical output from the main
+checkout's pre-change adapter, confirming the change is invisible to the
+probe. Gate 2 not run here — owned by the driving pipeline at landing (the
+unchecked criterion above). No stray processes left behind (the gate tears
+its orphans down in a `finally`, AGENTS.md #10).
 
 ## Verification
 
@@ -302,14 +421,14 @@ token-free. Gate 0.5 n/a (`src/parse.ts` untouched). Gate 1.6 green before this
 change, verified 2026-10-14 (ALL GREEN, exit 0, Known issues #7 warning only) and
 must stay green after — `ingest` is untouched. The **new Gate 1.11**
 (`scripts/check-recovery.mjs` + new VERIFICATION.md section + hook in
-`scripts/verify.mjs` after the claimed Gate 1.10, before the fast-tier finish at
-`scripts/verify.mjs:448` — the T-003/T-005/T-006/T-007/T-008/T-009
-slice-owns-its-gate precedent; no existing gate can pin recovery: Gate 1.5 pins
-clean/lock/integrate, Gate 1.6 pins finished-report ingest, Gate 2 spends model
-tokens) runs via `npm run verify` — not yet run for this ticket; no code exists.
-**Gate 2 once**, at landing, recorded in Landed — required here (trigger list:
-`src/runner.ts`), not a permanent extension. **Gate 3 once**, at landing (adapter
-change).
+`scripts/verify.mjs` after Gate 1.10, before the fast-tier finish — the
+T-003/T-005/T-006/T-007/T-008/T-009 slice-owns-its-gate precedent; no existing
+gate can pin recovery: Gate 1.5 pins clean/lock/integrate, Gate 1.6 pins
+finished-report ingest, Gate 2 spends model tokens) runs via `npm run verify` —
+run in the lane, see Landed. **Gate 2 once**, at landing, recorded in Landed —
+required here (trigger list: `src/runner.ts`), not a permanent extension; not
+run in the lane session (the driving pipeline owns it). **Gate 3 once**, at
+landing (adapter change) — run in the lane, see Landed.
 
 ## References
 

@@ -19,6 +19,16 @@
 // approval writers, always operator-driven through src/approvals.ts. The
 // determinism rule continues to govern everything derived from the report:
 // `ingest` is untouched and stays a pure function of the report.
+//
+// Wall-clock scoping, second case (T-010): abandonment marks are primary
+// recovery facts no report carries — the report was never written, the run
+// died — so the `attempts` rows and `ATTEMPT_ABANDONED` events written by
+// `recordAbandonedAttempts` (the second DB writer, driven by the standalone
+// `npm run recover`) are legitimately wall-clock stamped: `started_at` comes
+// from the crashed run's dispatch evidence, while the abandonment stamp
+// itself (`ended_at` and the event's `at`) is the moment of recovery. No
+// report exists to derive from, so the deviation is documented, not
+// smoothed: `ingest` is untouched and stays a pure function of the report.
 
 import { userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -150,7 +160,9 @@ CREATE TABLE IF NOT EXISTS approval_gates (
 // Event vocabulary — spec §28. This slice emits ATTEMPT_STARTED (T-007,
 // derived per recorded attempt) on top of T-003's three; live in-run
 // emission is carved off (would touch the runner). ATTEMPT_ABANDONED
-// (§28:1863) has no producer until the startup-reconciliation slice.
+// (§28:1863) is written by T-010's `recordAbandonedAttempts` — the only
+// producer, for attempts whose dispatch was recorded but never completed —
+// wall-clock stamped per the header's second scoping case.
 // T-008 adds the approval events: APPROVAL_REQUESTED / APPROVAL_GRANTED
 // (§28:1861-1862) and APPROVAL_REJECTED — §28 names no rejection event, so
 // this vocabulary extension is chosen and recorded here (T-008's ticket
@@ -414,6 +426,101 @@ function candidateIsSurvivor(db: DatabaseSync, runId: string, candidateId: strin
 /** The OS username is the `requested_by`/`decided_by` default (T-008). */
 function osUsername(): string {
   return userInfo().username
+}
+
+// ---------- T-010: startup reconciliation ----------
+
+/**
+ * One abandoned attempt of a crashed run, as read from the run's
+ * `<runDir>/dispatch.jsonl` evidence (src/recover.ts). `startedAt` is the
+ * dispatch record's stamp (when the attempt actually started);
+ * `processIdentity` extends ProcessIdentity with the dispatch record's
+ * lease/branch — the process-identity field T-007 recorded null now has a
+ * producer.
+ */
+export interface AbandonedAttemptInput {
+  jobId: string
+  attemptNumber: number
+  startedAt: string | null
+  processIdentity: {
+    pid: number | null
+    startedAt: string | null
+    leaseId: string | null
+    branch: string | null
+  }
+}
+
+/**
+ * Mark a crashed run's recorded-`running` attempts abandoned (spec §15.2
+ * step 1) — the second DB writer after `ingest`. One `attempts` row per
+ * attempt (state 'abandoned', a failure record with reason 'abandoned',
+ * `process_identity_json` from the dispatch record, `started_at` from the
+ * dispatch stamp) plus exactly one `ATTEMPT_ABANDONED` event per attempt,
+ * inside one transaction. Never touches `runs`/`candidates`/`gate_results`
+ * or any prior event row, and never fabricates completed attempts of the
+ * crashed run — their evidence lives in dispatch.jsonl; the store records
+ * only what §15.2 step 1 requires.
+ *
+ * The abandonment stamp (the rows' `ended_at` and the events' `at`) is the
+ * wall-clock moment of recovery — the header's second scoping case: the
+ * report was never written, so there is no report-derived stamp to take.
+ * `input_context_hash` is '' (a NOT NULL column with no producer in dispatch
+ * evidence), `prompt_version`/`worker_session_id` null, `output_artifacts_json`
+ * '[]' — stated, not smoothed. The connection opens with foreign-key
+ * constraints disabled: a crashed run was never ingested, so no `runs` row
+ * exists, and this writer must not fabricate one. Zero attempts is a no-op
+ * that never opens the DB (recovering a run with nothing to mark writes
+ * nothing — no refinery.db created as a side effect).
+ */
+export function recordAbandonedAttempts(runId: string, attempts: AbandonedAttemptInput[], dbPath: string): void {
+  if (attempts.length === 0) return
+  const db = new DatabaseSync(dbPath, { enableForeignKeyConstraints: false })
+  try {
+    db.exec(SCHEMA_SQL)
+    const abandonedAt = new Date().toISOString()
+    const failure = {
+      reason: 'abandoned',
+      message: `run ${runId} died before this attempt completed; marked abandoned by startup reconciliation`,
+      timedOut: false,
+      exitCode: null,
+    }
+    db.exec('BEGIN')
+    try {
+      const insertAttempt = db.prepare(
+        `INSERT INTO attempts (run_id, job_id, attempt_number, state, started_at, ended_at,
+           input_context_hash, prompt_version, process_identity_json, worker_session_id,
+           output_artifacts_json, failure_json)
+         VALUES (?, ?, ?, 'abandoned', ?, ?, '', NULL, ?, NULL, '[]', ?)`,
+      )
+      for (const a of attempts) {
+        insertAttempt.run(
+          runId,
+          a.jobId,
+          a.attemptNumber,
+          a.startedAt ?? null,
+          abandonedAt,
+          JSON.stringify(a.processIdentity),
+          JSON.stringify(failure),
+        )
+        insertEvent(db, runId, 'ATTEMPT_ABANDONED', abandonedAt, {
+          jobId: a.jobId,
+          attemptId: `${a.jobId}-a${a.attemptNumber}`,
+          attemptNumber: a.attemptNumber,
+          pid: a.processIdentity.pid,
+        })
+      }
+      db.exec('COMMIT')
+    } catch (e) {
+      try {
+        db.exec('ROLLBACK')
+      } catch {
+        // transaction was already rolled back or never opened — nothing to undo
+      }
+      throw e
+    }
+  } finally {
+    db.close()
+  }
 }
 
 // ---------- T-006: the derived job DAG ----------

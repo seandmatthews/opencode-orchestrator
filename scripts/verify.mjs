@@ -485,6 +485,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.11: startup reconciliation (T-010) ----------
+section('Gate 1.11 — startup reconciliation (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-recovery.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'recovery self-check exit 0')
+} catch (e) {
+  fail(`recovery self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

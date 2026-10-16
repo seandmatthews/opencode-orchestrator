@@ -491,6 +491,118 @@ untouched; Gate 3 n/a). The real-harness face of the rewritten loop is
 pinned once at landing by a real `npm run verify:full` (recorded in T-009's
 Landed section) — not a permanent Gate 2 extension.
 
+## Gate 1.11 — startup reconciliation (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-recovery.mjs
+```
+
+Pins T-010: the in-run evidence producer recovery consumes, and the
+standalone `npm run recover -- --run <runId> [--db <path>] [--run-root
+<path>] [--force-lock]` (src/recover.ts, the clean/integrate standalone
+pattern) that reconciles a run the orchestrator died in — marks + kills +
+inspection + disposition, and it NEVER reruns anything (no lease, no worker,
+no scheduling; recovery.json has no consumer this slice — the resume
+scheduler is its own successor ticket).
+
+The evidence producer is `<runDir>/dispatch.jsonl` (written by runSkeleton,
+src/runner.ts): a `run` header line
+(`{type:'run', runId, repo, baseSha, goal, model, maxAttempts, startedAt}`),
+one `dispatch` line per attempt
+(`{type:'dispatch', jobId, attempt, leaseId, branch, worktreePath,
+startedAt}`), one `pid` line per attempt as soon as the adapter knows its
+root pid (`{type:'pid', jobId, attempt, pid, at}` — engine-supplied
+`WorkerExecutionRequest.onSpawn`, called by an adapter once, right after
+spawn), and one `completion` line per adapter-resolved attempt
+(`{type:'completion', jobId, attempt, ok, timedOut, exitCode, diffBytes,
+endedAt}` — a thrown attempt gets none, so recovery conservatively treats it
+as recorded-running and can still kill its recorded pid). Best-effort
+appends that can never break a run (the adapter's appendLog posture); part
+of the run's evidence set, never deleted, structurally ignored by `clean`.
+`WorkerResult.pid` carries the same pid for the completion record. The store
+is post-hoc only, so a hard-killed run leaves partial evidence instead of
+zero DB rows.
+
+**Wall-clock scoping of the determinism rule — documented, not discovered
+(the T-008 precedent):** abandonment stamps are primary recovery facts no
+report carries — the report was never written, the run died — so the
+attempts rows and `ATTEMPT_ABANDONED` events written by
+`recordAbandonedAttempts` (the second DB writer, src/store/index.ts) are
+legitimately wall-clock stamped (`started_at` from the dispatch evidence,
+the abandonment stamp from the moment of recovery). The determinism rule
+continues to govern everything report-derived: `ingest` is untouched and
+stays a pure function of the report (Gate 1.6 stays green).
+
+The check drives the runner with a **fake `WorkerAdapter`** (the
+src/types.ts seam; the Gate 1.8/1.10 pattern) whose real child is a spawned
+node sleeper, and builds the kill-mid-run scenario for real: a subprocess
+"orchestrator" (tsx + runSkeleton, holding the T-004 checkout lock the way
+src/cli.ts does) is killed **by pid only** (`taskkill /F`, no `/T`),
+leaving a real orphaned worker (spawned detached, since node binds
+non-detached children to the parent's lifetime on Windows), a stale lock,
+and zero DB rows — exactly the spec §15.2 shape. All process assertions run
+against the real process table, never a mock. It asserts:
+
+- **evidence**: every run writes dispatch.jsonl with the four line shapes
+  above (pid recorded through onSpawn before any hang, dispatch before pid
+  before completion, completion carrying the captured diffBytes); a
+  completed run's exit code, stdout verdict lines, and report.json are
+  unchanged (the T-009 default-mode assertions stay green in Gate 1.10);
+- **the lock refusal**: the crashed run is refused by `recover` without
+  `--force-lock` — exit 1 naming the holder pid and lock path, and nothing
+  written (no recovery.json, no DB file, the orphan still alive);
+- **the kill, verified**: with `--force-lock`, recover proceeds, releases
+  the lock on every path (no residual `.lock` files), and the recorded
+  orphan is identity-verified live (creation time inside the dispatch
+  evidence window — Windows reuses pids; §15.2:1071 applies symmetrically to
+  killing) and then actually dead;
+- **durable abandonment marks**: the un-completed attempt becomes exactly
+  one `attempts` row (state `abandoned`, failure reason `abandoned`,
+  `process_identity` = `{pid, startedAt, leaseId, branch}` from the dispatch
+  record, `started_at` from the dispatch stamp) plus exactly one
+  `ATTEMPT_ABANDONED` event; the completed attempt of the same killed run is
+  NOT fabricated into the store; `runs`/`candidates` stay empty;
+  `PRAGMA integrity_check` returns `ok`;
+- **verify-before-kill never blindly kills** (§15.3:1080): a recorded-but-
+  dead pid (`pid-not-alive`), a dispatch with no recorded pid
+  (`no-pid-recorded`), and a live pid outside the evidence window
+  (`identity-mismatch` — by construction: a backdated dispatch record naming
+  the live gate process) are each reported as cleanup failures with no kill
+  attempt, the command exits non-zero, the marks still land, and the lock
+  file's (dead) orchestrator pid is never consulted;
+- **workspace inspection is report-only**: every worktree under `wt/` (plus
+  the dispatch records' paths, with the no-report.json fallback) is listed
+  with branch and dirty state, and worktrees, branches, logs, diffs, and
+  dispatch.jsonl are byte-identical afterwards — no disposal happened (Gate
+  1.5 pins clean's own semantics);
+- **retry disposition from dispatch records only**: completion `ok` +
+  `diffBytes 0` ⇒ terminal `no-op` (a machine verdict is never re-rolled);
+  attempts used ≥ the dispatch header's maxAttempts ⇒ terminal
+  `bound-exhausted`; everything else (never completed, `!ok`, timedOut, or
+  completed with a diff but no durably recorded verdict) ⇒ `retryable` while
+  the bound allows — pinned across the real kill-mid-run scenario at
+  maxAttempts 1 and 2, and synthetic evidence;
+- **refusals exit non-zero and write nothing**: missing `--run`, unknown
+  run dir, a finished run (report.json present), an already-reconciled run
+  (recovery.json present — a second recover names it, and appends no
+  events);
+- **a pre-T-010 crash** (no dispatch.jsonl) reconciles inspection-only:
+  exit 0, workspaces listed, nothing marked, no DB created, and the report
+  records the note;
+- **recovery never reruns**: no new worktree, no new branch, dispatch.jsonl
+  byte-identical, and recovery.json is the only new artifact.
+
+Not pinned here and carved by the ticket: resume scheduling / rerunning
+(the "run continues correctly after restart" half of §35 — recovery.json has
+no consumer until the successor ticket), §29 steps 6/8 (artifact/hash
+validation, waiting-approvals preservation — needs T-008's records), the §27
+`workspace_leases` table and §16 lease GC, adoption of process or worktree
+state (any future rerun is a fresh lease), and Windows Job Objects (§15.3
+"Later" — `killTree`'s `taskkill /T /F` stays). Gate 2 runs once at landing
+(`src/runner.ts` is on the trigger list), recorded in T-010's Landed section
+— not a permanent extension. Gate 3 runs once at landing (adapter change:
+`onSpawn` + `WorkerResult.pid`).
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash

@@ -1,11 +1,34 @@
 import { createHash } from 'node:crypto'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseBriefs, parseReview } from './parse.js'
 import { buildSchedule, readyJobs } from './scheduler.js'
 import type { PhaseSpec } from './scheduler.js'
 import { DERIVED_PHASE_ID } from './store/index.js'
 import type { Attempt, CandidateReport, FailureRecord, Gate, GateResult, PlannerReport, ReviewReport, RunReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
+
+/**
+ * Best-effort append to <runDir>/dispatch.jsonl (T-010) — the in-run evidence
+ * artifact startup reconciliation consumes. The store is post-hoc only (ingest
+ * runs after runSkeleton returns), so a hard-killed run would leave zero DB
+ * rows; this file leaves partial evidence instead of nothing. Appends can
+ * never break a run (the adapter's appendLog posture,
+ * src/worker/opencode.ts). The file is part of the run's evidence set:
+ * `clean` never deletes it (it sweeps worktrees and swarm/* branches only),
+ * and `recover` reads it after a crash. Line shapes (one JSON object per
+ * line, appended in this order per attempt):
+ *   {type:'run', runId, repo, baseSha, goal, model, maxAttempts, startedAt}
+ *   {type:'dispatch', jobId, attempt, leaseId, branch, worktreePath, startedAt}
+ *   {type:'pid', jobId, attempt, pid, at}
+ *   {type:'completion', jobId, attempt, ok, timedOut, exitCode, diffBytes, endedAt}
+ */
+function appendDispatchEvidence(artifactsDir: string, line: object): void {
+  try {
+    appendFileSync(join(artifactsDir, 'dispatch.jsonl'), `${JSON.stringify(line)}\n`)
+  } catch {
+    // Evidence appends must never break a run.
+  }
+}
 
 /** One fully-resolved executable job (T-009 --jobs mode): the spec's
  *  scheduling fields with the run-level flags applied as defaults
@@ -91,6 +114,18 @@ export function builderPrompt(goal: string, workspacePath: string): string {
 export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
   const startedAt = new Date().toISOString()
   mkdirSync(join(opts.artifactsDir, 'wt'), { recursive: true })
+  // T-010: the run header is the first dispatch.jsonl line — recovery derives
+  // the target repo and the retry bound (maxAttempts) from it after a crash.
+  appendDispatchEvidence(opts.artifactsDir, {
+    type: 'run',
+    runId: opts.runId,
+    repo: opts.repo,
+    baseSha: opts.baseSha,
+    goal: opts.goal,
+    model: opts.model,
+    maxAttempts: opts.maxAttempts,
+    startedAt,
+  })
 
   // Planning tier (default mode only): one smart-model job turns the goal
   // into N distinct briefs. Failure here degrades gracefully — candidates
@@ -375,6 +410,18 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
       outputArtifacts: [logPath],
     }
     base.attempts.push(attempt)
+    // T-010: the dispatch is on disk the moment the lease exists — a crash
+    // after this point leaves the worktree discoverable and the attempt
+    // reconcilable (dispatch without a completion line = recorded-running).
+    appendDispatchEvidence(opts.artifactsDir, {
+      type: 'dispatch',
+      jobId: id,
+      attempt: n,
+      leaseId: lease.id,
+      branch: lease.branch,
+      worktreePath: lease.path,
+      startedAt: attempt.startedAt,
+    })
 
     try {
       console.log(`[${id}] attempt ${n}: worker start (${job.worker.id}, model=${job.model})`)
@@ -384,6 +431,16 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
         cwd: lease.path,
         logPath,
         timeoutMs: job.timeoutMs,
+        // T-010: the pid line lands as soon as the adapter knows its root
+        // pid — before any hang — so recovery can find it after a crash
+        // while execute() never resolves.
+        onSpawn: (pid) => appendDispatchEvidence(opts.artifactsDir, {
+          type: 'pid',
+          jobId: id,
+          attempt: n,
+          pid,
+          at: new Date().toISOString(),
+        }),
       })
       attempt.endedAt = new Date().toISOString()
       console.log(`[${id}] attempt ${n}: worker done in ${(result.durationMs / 1000).toFixed(0)}s ok=${result.ok} exit=${result.exitCode}`)
@@ -414,6 +471,21 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
       } catch (e) {
         console.log(`[${id}] attempt ${n}: diff capture failed: ${errorMessage(e)}`)
       }
+
+      // T-010: the attempt's completion line — written only when the adapter
+      // RESOLVED (a thrown attempt gets none, so recovery conservatively
+      // treats it as recorded-running and can still kill its recorded pid).
+      // diffBytes is the captured diff's size (0 when capture failed).
+      appendDispatchEvidence(opts.artifactsDir, {
+        type: 'completion',
+        jobId: id,
+        attempt: n,
+        ok: result.ok,
+        timedOut: result.timedOut,
+        exitCode: result.exitCode,
+        diffBytes: diffCaptured ? Buffer.byteLength(diff) : 0,
+        endedAt: attempt.endedAt,
+      })
 
       if (failure && base.attempts.length < opts.maxAttempts) {
         attempt.state = 'failed'

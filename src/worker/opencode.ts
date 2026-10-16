@@ -33,6 +33,10 @@ export class OpenCodeWorker implements WorkerAdapter {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     })
+    // T-010: report the root pid to the engine the moment it exists (before
+    // any hang), so startup reconciliation can find and verify it on disk
+    // after a crash while execute() never resolves.
+    if (child.pid !== undefined) req.onSpawn?.(child.pid)
 
     let timedOut = false
     const timer = setTimeout(() => {
@@ -60,6 +64,7 @@ export class OpenCodeWorker implements WorkerAdapter {
         durationMs: Date.now() - started,
         logPath: req.logPath,
         responseTail: stripAnsi(stdout + stderr).slice(-RESPONSE_TAIL_CHARS),
+        pid: child.pid ?? null,
       }
     })
   }

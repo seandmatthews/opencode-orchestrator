@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, rmdirSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { acquireCheckoutLock, CheckoutLockRefused, releaseCheckoutLock } from './lock.js'
-import { branchForLeaseId } from './workspace/worktree.js'
+import { branchForLeaseId, normPath, registeredWorktrees, sniffRepo } from './workspace/worktree.js'
 
 const usage = `Dispose a run's git worktrees and swarm/* branches; keep all evidence.
 
@@ -70,8 +70,8 @@ function parseArgs(argv: string[]): Options {
   return opts
 }
 
-/** Windows path identity for map keys: forward slashes, case-insensitive. */
-const norm = (p: string): string => p.replaceAll('\\', '/').toLowerCase()
+/** Windows path identity: `normPath` (shared with src/workspace/worktree.ts). */
+const norm = normPath
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true })
@@ -94,37 +94,10 @@ function readReport(runDir: string): RunReportLike | null {
   }
 }
 
-/** path → branch name (null for detached), from `git worktree list --porcelain`. */
-function registeredWorktrees(repo: string): Map<string, string | null> {
-  const map = new Map<string, string | null>()
-  let path: string | null = null
-  for (const line of git(repo, ['worktree', 'list', '--porcelain']).split('\n')) {
-    if (line.startsWith('worktree ')) {
-      path = line.slice('worktree '.length)
-    } else if (line.startsWith('branch ') && path !== null) {
-      map.set(norm(path), line.slice('branch '.length).replace(/^refs\/heads\//, ''))
-    } else if (line === '' && path !== null) {
-      if (!map.has(norm(path))) map.set(norm(path), null)
-      path = null
-    }
-  }
-  if (path !== null && !map.has(norm(path))) map.set(norm(path), null)
-  return map
-}
-
-/**
- * Repo root read out of a worktree's `.git` pointer, used when a run has no
- * report.json (crash mid-run). Format: `gitdir: <repo>/.git/worktrees/<name>`.
- */
-function sniffRepo(worktreePath: string): string | null {
-  try {
-    const pointer = readFileSync(join(worktreePath, '.git'), 'utf8').trim()
-    const gitdir = pointer.match(/^gitdir:\s*(.*)$/)?.[1]
-    return gitdir?.match(/^(.*)[\\/]\.git[\\/]worktrees[\\/][^\\/]+/)?.[1] ?? null
-  } catch {
-    return null
-  }
-}
+// registeredWorktrees (path → branch, from `git worktree list --porcelain`)
+// and sniffRepo (repo root from a worktree's .git pointer) are the read-only
+// inspection helpers shared with src/recover.ts (T-010); they live in
+// src/workspace/worktree.ts.
 
 interface RunResult {
   removed: number
