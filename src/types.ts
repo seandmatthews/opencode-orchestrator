@@ -16,6 +16,16 @@ export interface WorkerExecutionRequest {
   logPath: string
   /** Hard wall-clock limit; the worker process tree is killed at expiry. */
   timeoutMs: number
+  /**
+   * Engine-supplied (T-010): called by an adapter ONCE, right after spawn,
+   * when it knows its root process id. Not the same as `WorkerResult.pid` —
+   * the result only exists at completion, while startup reconciliation must
+   * find the pid on disk after a crash, while `execute()` never resolves.
+   * An adapter that cannot know a root pid never calls this and returns
+   * `pid: null`; recovery treats a dispatch without a recorded pid as
+   * report-not-kill.
+   */
+  onSpawn?: (pid: number) => void
 }
 
 export interface WorkerResult {
@@ -26,6 +36,12 @@ export interface WorkerResult {
   logPath: string
   /** Tail of the worker's stdout (ANSI stripped), for response parsing. */
   responseTail: string
+  /**
+   * The adapter's root process id, for the completion record (T-010); null
+   * when the adapter cannot know one. Adapters that call `onSpawn` return
+   * the same pid here.
+   */
+  pid: number | null
 }
 
 /**
@@ -79,11 +95,12 @@ export interface Gate {
 
 /**
  * Lifecycle of one attempt of one job (spec §6.5). Only 'succeeded'/'failed'
- * have a producer in a finished-run store; 'abandoned' (the spec §15.2:1067 /
- * §29:1874 vocabulary) is added by the startup-reconciliation slice, which is
- * its only producer — not pre-defined here.
+ * have a producer in a finished-run store; 'abandoned' (spec §15.2:1067 /
+ * §29:1874 vocabulary) is written by the startup-reconciliation slice
+ * (T-010's `recordAbandonedAttempts`, src/store/index.ts) for attempts whose
+ * dispatch was recorded but never completed — the only producer it has.
  */
-export type AttemptState = 'running' | 'succeeded' | 'failed'
+export type AttemptState = 'running' | 'succeeded' | 'failed' | 'abandoned'
 
 /**
  * Why an attempt failed. Reuses the elimination-ladder vocabulary
@@ -92,8 +109,12 @@ export type AttemptState = 'running' | 'succeeded' | 'failed'
  * timeout); 'no-op'/'no-gates'/'gates-failed' are candidate verdicts on the
  * ladder, never attempt failures — a worker that succeeded is never re-rolled
  * around a machine verdict (decisions.md: gates decide survival).
+ * 'abandoned' (T-010) documents the vocabulary extension: spec §28:1863 names
+ * ATTEMPT_ABANDONED but no reason vocabulary, so the abandonment failure
+ * record chooses 'abandoned' per the T-008 APPROVAL_REJECTED
+ * choose-and-document precedent.
  */
-export type FailureReason = 'error' | 'worker-failed' | 'no-op' | 'no-gates' | 'gates-failed'
+export type FailureReason = 'error' | 'worker-failed' | 'no-op' | 'no-gates' | 'gates-failed' | 'abandoned'
 
 export interface FailureRecord {
   reason: FailureReason
@@ -115,9 +136,14 @@ export interface RetryPolicy {
 /**
  * Identity of the OS process tree running an attempt — what reconciliation
  * (spec §15.2/§29: stale-PID sweeps) and adapter cancel(§11:847) would need.
- * Same shape the checkout lock records (src/lock.ts). No producer this slice:
- * `WorkerResult` carries none of it and the harness child pid is unreturned,
- * so attempts record it as absent; fields land with T-010/T-011.
+ * Same shape the checkout lock records (src/lock.ts). The in-run producer is
+ * the dispatch evidence (T-010): the runner appends a `pid` line to
+ * <runDir>/dispatch.jsonl via `WorkerExecutionRequest.onSpawn`, and recovery
+ * writes abandonment rows whose `process_identity_json` extends this shape
+ * with the dispatch record's lease/branch ({pid, startedAt, leaseId, branch}).
+ * Attempt rows derived by `ingest` from a finished report still record it
+ * absent (the report carries no pids); `WorkerResult.pid` (T-010) feeds the
+ * completion evidence, not the report.
  */
 export interface ProcessIdentity {
   pid: number
@@ -130,9 +156,10 @@ export interface ProcessIdentity {
  * derives one job per candidate); number is 1-based within the job.
  * startedAt/endedAt are stamped in-run and carried in the report artifact,
  * so the store's ingest stays a pure function of the report (never
- * Date.now()). processIdentity/workerSessionId are absent this slice — no
- * producer; promptVersion is null until prompt versioning exists
- * (§6.7:446/§18:1207).
+ * Date.now()). processIdentity/workerSessionId stay absent from
+ * report-carried attempts — the in-run pid evidence lives in
+ * <runDir>/dispatch.jsonl (T-010), which ingest never reads; promptVersion
+ * is null until prompt versioning exists (§6.7:446/§18:1207).
  */
 export interface Attempt {
   /** `<candidateId>-a<n>` — unique within the run. */
