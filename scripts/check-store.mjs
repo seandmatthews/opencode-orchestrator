@@ -1,16 +1,19 @@
-// Store-ingest self-check (Gate 1.6, fast tier, T-003) — run under tsx:
+// Store-ingest self-check (Gate 1.6, fast tier, T-003 + T-006) — run under tsx:
 //   node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs
 // Pins the durable run records against the vendored real report
 // (scripts/fixtures/report-real.json): exact rows/fields, append-only events
 // across re-ingest, integrity_check, read-only-over-evidence, and a throwing
 // (loud, non-fatal at the CLI) failed-write path — without model tokens.
+// T-006 extends it with the derived job DAG (phases/jobs/job_dependencies)
+// and the pure validators on hand-built synthetic inputs (Gate 0.5's
+// hand-built-input pattern — no pipeline, no model tokens).
 import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
-import { ingest } from '../src/store/index.ts'
+import { SCHEMA_VERSION, cycleRefusal, deriveDag, ingest, unknownDependencyRefusal } from '../src/store/index.ts'
 
 const failures = []
 const t = (name, cond) => {
@@ -70,6 +73,31 @@ try {
     repo: report.repo, baseSha: report.baseSha, goal: report.goal, model: report.model,
   }))
 
+  // ---------- T-006: the derived DAG matches the report's real fan-out ----------
+  t('SCHEMA_VERSION is 2', SCHEMA_VERSION === 2)
+  t('one phase row for the run', count('phases') === 1)
+  const phase = db.prepare('SELECT * FROM phases WHERE run_id = ?').get(report.runId)
+  t("phase_id is 'main'", phase?.phase_id === 'main')
+  t('phase dependencies_json is []', eq(JSON.parse(phase?.dependencies_json), []))
+  t('phase policy columns null (no producer in RunReport)',
+    phase?.completion == null && phase?.early_stop_json == null && phase?.approval_gate_json == null)
+  t('one job row per candidate', count('jobs') === report.candidates.length)
+  for (const c of report.candidates) {
+    const job = db.prepare('SELECT * FROM jobs WHERE run_id = ? AND job_id = ?').get(report.runId, c.id)
+    t(`${c.id}: job_id = candidate id, phase_id = 'main', worker/model/brief copied verbatim`,
+      job?.job_id === c.id && job?.phase_id === 'main'
+      && job?.worker_id === c.workerId && job?.model === c.model && job?.brief === c.brief)
+    t(`${c.id}: dependencies [] and every policy column null (no producer this slice)`,
+      eq(JSON.parse(job?.dependencies_json), [])
+      && job?.role_json == null && job?.workspace_json == null && job?.permissions_json == null
+      && job?.prompt_json == null && job?.context_plan_json == null
+      && job?.input_artifacts_json == null && job?.expected_outputs_json == null
+      && job?.retry_policy_json == null && job?.timeout_policy_json == null
+      && job?.gate_policy_json == null)
+  }
+  t('zero job_dependencies rows (the pipeline is a flat fan-out)', count('job_dependencies') === 0)
+  const jobsBefore = db.prepare('SELECT * FROM jobs WHERE run_id = ? ORDER BY job_id').all(report.runId)
+
   t('integrity_check ok', db.prepare('PRAGMA integrity_check').get()['integrity_check'] === 'ok')
 
   // ---------- ingest #2: state idempotent, events append-only ----------
@@ -82,6 +110,12 @@ try {
   const events2 = db.prepare('SELECT seq, type, at, payload FROM events ORDER BY seq').all()
   t('re-ingest: events appended, prior row untouched',
     events2.length === 2 && eq(events2[0], events1[0]) && events2[1]?.type === 'RUN_CREATED')
+  t('re-ingest: phases unchanged (upsert)',
+    count('phases') === 1 && eq(db.prepare('SELECT * FROM phases WHERE run_id = ?').get(report.runId), phase))
+  t('re-ingest: jobs unchanged (upsert)',
+    count('jobs') === report.candidates.length
+    && eq(db.prepare('SELECT * FROM jobs WHERE run_id = ? ORDER BY job_id').all(report.runId), jobsBefore))
+  t('re-ingest: job_dependencies still zero (edges re-derived)', count('job_dependencies') === 0)
   db.close()
 
   // ---------- event vocabulary on an eliminated candidate ----------
@@ -106,6 +140,26 @@ try {
   t('candidate event at derived from startedAt + worker duration',
     gateFail?.at === expectedAt && eliminated?.at === expectedAt)
   elimDb.close()
+
+  // ---------- T-006: pure validators on hand-built inputs (Gate 0.5 pattern) ----------
+  // The derived DAG is acyclic by construction; the interesting validator
+  // inputs are synthetic, built here by hand — no pipeline, no model tokens.
+  const derived = deriveDag(report)
+  t('deriveDag: main phase, one dependency-free job per candidate, in report order',
+    derived.phaseId === 'main' && derived.jobs.length === report.candidates.length
+    && report.candidates.every((c, i) => derived.jobs[i]?.id === c.id && eq(derived.jobs[i]?.dependencies, [])))
+  t('validators accept the derived flat DAG',
+    unknownDependencyRefusal(derived.jobs) == null && cycleRefusal(derived.jobs) == null)
+  const cyclic = [{ id: 'a', dependencies: ['b'] }, { id: 'b', dependencies: ['c'] }, { id: 'c', dependencies: ['a'] }]
+  const cycRefusal = cycleRefusal(cyclic)
+  t('cycle detection refuses a synthetic 3-cycle and names every job on it',
+    typeof cycRefusal === 'string' && ['a', 'b', 'c'].every((id) => cycRefusal.includes(id)))
+  const selfRefusal = cycleRefusal([{ id: 'solo', dependencies: ['solo'] }])
+  t('cycle detection refuses a self-dependency and names it',
+    typeof selfRefusal === 'string' && selfRefusal.includes('solo'))
+  const unknownRefusal = unknownDependencyRefusal([{ id: 'a', dependencies: ['ghost'] }])
+  t('unknown-reference check refuses and names the offender and the missing id',
+    typeof unknownRefusal === 'string' && unknownRefusal.includes('a') && unknownRefusal.includes('ghost'))
 
   // ---------- evidence is read-only over ----------
   t('fixture report byte-identical after all ingests', sha256(fixturePath) === fixtureShaBefore)

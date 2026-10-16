@@ -1,6 +1,6 @@
 # T-006 — Job DAG: phase/job tables, DAG validation, and a `dag` dump CLI
 
-**Status:** proposed
+**Status:** done 2026-10-16
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 2
 **Depends on:** T-003
@@ -116,33 +116,33 @@ already recorded; it never feeds verdicts, keeping the gates-decide rule intact.
 
 ## Acceptance criteria
 
-- [ ] Ingest of the vendored fixture (`scripts/fixtures/report-real.json`)
+- [x] Ingest of the vendored fixture (`scripts/fixtures/report-real.json`)
       produces `phases`/`jobs` rows matching the report's real fan-out — exactly
       one phase, one job per candidate with `job_id` = candidate id and empty
       dependencies, zero `job_dependencies` rows, policy columns null — pinned
       by the **extended Gate 1.6** (`scripts/check-store.mjs`).
-- [ ] Re-ingest semantics extend to the new tables: a second ingest leaves
+- [x] Re-ingest semantics extend to the new tables: a second ingest leaves
       `phases`/`jobs`/`job_dependencies` idempotent (natural-key upsert, edges
       re-derived) while prior `events` rows are untouched, and
       `PRAGMA integrity_check` returns `ok` — pinned by the **extended Gate
       1.6**.
-- [ ] The pure validators refuse — non-zero result with a clear message naming
+- [x] The pure validators refuse — non-zero result with a clear message naming
       the offense — a synthetic cyclic dependency set (topological-sort cycle
       detection) and a synthetic unknown-dependency reference, and accept the
       derived flat DAG — pinned by the **extended Gate 1.6** on hand-built
       inputs (Gate 0.5's pattern: no pipeline, no model tokens).
-- [ ] `npm run dag -- --run <runId>` against a DB ingested with the fixture
+- [x] `npm run dag -- --run <runId>` against a DB ingested with the fixture
       exits 0 and prints the run's phases, jobs, and dependency edges; `--json`
       emits the same structure as JSON — pinned by the **new Gate 1.7**
       (`scripts/check-dag.mjs` + new VERIFICATION.md section + hook in
       `scripts/verify.mjs` after Gate 1.6 — the T-003 slice-owns-its-gate
       precedent).
-- [ ] Refusals exit non-zero and print no DAG body: unknown runId, missing DB
+- [x] Refusals exit non-zero and print no DAG body: unknown runId, missing DB
       file (and the dump must not create an empty DB as a side effect), missing
       `--run` — pinned by **Gate 1.7**.
-- [ ] The dump never writes: the DB file is byte-identical after a dump (hash
+- [x] The dump never writes: the DB file is byte-identical after a dump (hash
       before/after) — pinned by **Gate 1.7**.
-- [ ] No behavior change to the pipeline: `src/runner.ts`, adapters, gate code,
+- [x] No behavior change to the pipeline: `src/runner.ts`, adapters, gate code,
       workspace handling, and the `RunReport` shape are untouched, and
       `npm run verify` (Gates 0 / 1 / 0.5 / 1.5 / 1.6) stays ALL GREEN, proving
       clean/lock/integrate semantics unaffected — pinned by **`npm run verify`**.
@@ -150,9 +150,69 @@ already recorded; it never feeds verdicts, keeping the gates-decide rule intact.
       `node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs` →
       "check-store: ALL GREEN", exit 0, only the documented node:sqlite
       ExperimentalWarning on stderr — Known issues #7) and must stay green after.
-- [ ] VERIFICATION.md carries the extended Gate 1.6 + new Gate 1.7 sections, and
+- [x] VERIFICATION.md carries the extended Gate 1.6 + new Gate 1.7 sections, and
       the ticket status + index row move in the same change-set (AGENTS.md #6;
       tickets README rules).
+
+## Landed
+
+2026-10-16, in one change-set. No deviations from the ticket's What.
+
+- `src/store/index.ts` — `SCHEMA_VERSION` 1 → 2; three new tables appended to
+  `SCHEMA_SQL` with `CREATE TABLE IF NOT EXISTS` exactly as specified
+  (`phases` PK `(run_id, phase_id)`; `jobs` PK `(run_id, job_id)` with the
+  seventeen columns from the ticket; `job_dependencies` PK on all three), so an
+  existing v1 `refinery.db` gains them on the next ingest. `ingest` derives the
+  DAG via the new exported pure function `deriveDag(report)` and runs the two
+  new exported pure validators — `unknownDependencyRefusal` (naming offender
+  and missing id) then `cycleRefusal` (Kahn's topological sort; the refusal
+  walks the unconsumed leftovers to name the concrete cycle) — before any DB
+  side effect. New state rows upsert by natural key inside the existing
+  transaction (`upsertPhase`, `upsertJob`: `phase_id = 'main'`, `job_id` =
+  candidate id, `worker_id`/`model`/`brief` verbatim, `dependencies_json`
+  `[]`, every policy column null); `job_dependencies` is re-derived
+  (delete + insert) per run; `events` untouched and append-only. Zero new
+  dependencies — `node:sqlite` only.
+- `src/dag.ts` — new read-only dump, the clean/integrate standalone-entry
+  pattern: `npm run dag -- --run <runId> [--db <path>] [--json]`; `--db`
+  defaults to the same `C:\swarm\refinery.db` literal as `src/cli.ts`. Refuses
+  (stderr, exit 1, no DAG body) before opening anything: missing `--run`,
+  missing DB file (`existsSync` precedes the open, so no empty DB can appear),
+  runId with no rows. The DB opens with `node:sqlite`'s `readOnly: true`
+  (probed on this machine's Node v22.23.1 before writing the file: reads OK,
+  a write throws `attempt to write a readonly database`, a missing file throws
+  and is not created). Text mode prints phases/jobs/edges; `--json` emits the
+  same `DagDump` structure as JSON.
+- `package.json` — the one new script `"dag": "tsx src/dag.ts"`.
+- `scripts/check-store.mjs` — extended Gate 1.6 with 19 new assertions: DAG
+  rows vs the fixture's real fan-out incl. all policy columns null,
+  `SCHEMA_VERSION === 2`, re-ingest idempotency of all three new tables, and
+  the validators on hand-built synthetic inputs (3-cycle, self-dependency,
+  unknown reference, derived flat DAG accepted). The gate printed 55 `ok`
+  lines in the run below.
+- `scripts/check-dag.mjs` (new) + Gate 1.7 hook in `scripts/verify.mjs` after
+  Gate 1.6 — 22 assertions: text dump sections/content, `--json` exact
+  structure, all three refusals (non-zero, empty stdout, names the offense,
+  no empty DB created), DB byte-identical after dumps (sha256), and a
+  `readOnly`-opened handle refusing writes (guards the open option against
+  node:sqlite churn, Known issues #7).
+- VERIFICATION.md — Gate 1.6 section rewritten for schema v2 with the derived-
+  DAG and validator bullets; new Gate 1.7 section. Ticket status + index row in
+  the same change-set.
+
+Measured gates (this lane, Node v22.23.1): Gate 0 exit 0; Gate 1 exit 0
+(`build ok` + `tests ok`, fixture clean); Gate 0.5 ALL GREEN (17 ok);
+extended Gate 1.6 ALL GREEN (57 ok + `check-store: ALL GREEN`, exit 0, only
+the documented node:sqlite ExperimentalWarning — Known issues #7); Gate 1.7
+ALL GREEN (22 ok + `check-dag: ALL GREEN`, exit 0); `npm run verify` (fast
+tier, Gates 0 / 1 / 0.5 / 1.5 / 1.6 / 1.7) → `verify (fast) complete: ALL
+GREEN`, exit 0. A manual `npm run dag -- --run 20261011022419 --db <temp>`
+against the fixture-ingested DB printed the phase, both jobs, and
+`edges (0): (none)`; `--json` emitted the same structure. Gate 2 not run, per
+the ticket's Verification section: this slice touches none of VERIFICATION.md's
+Gate 2 triggers (`src/runner.ts`, adapters, gate code, workspace handling,
+report shape all untouched — `git diff` on the lane shows only `src/store/index.ts`,
+`src/dag.ts`, `package.json`, `scripts/`, `VERIFICATION.md`, ticket docs).
 
 ## Verification
 
