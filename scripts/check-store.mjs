@@ -14,14 +14,18 @@
 // extends it with a schedule-carrying DAG variant: the REAL multi-phase
 // structure in phases/jobs/job_dependencies, the derived schedule events
 // (JOB_READY / JOB_SUCCEEDED / JOB_FAILED / PHASE_COMPLETED) at
-// report-carried stamps, and re-ingest idempotency.
+// report-carried stamps, and re-ingest idempotency. T-016 extends it with
+// the filesystem artifact store (schema v5): the artifacts + probe_runs
+// rows, hash-at-ingest pinned on a controlled sandbox variant, and the
+// derived ARTIFACT_CREATED block at report-carried stamps — re-ingest stays
+// idempotent over state rows while events append.
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
-import { SCHEMA_VERSION, cycleRefusal, deriveDag, ingest, unknownDependencyRefusal } from '../src/store/index.ts'
+import { SCHEMA_VERSION, artifactId, cycleRefusal, deriveDag, ingest, unknownDependencyRefusal } from '../src/store/index.ts'
 
 const failures = []
 const t = (name, cond) => {
@@ -76,16 +80,95 @@ try {
   }
 
   const events1 = db.prepare('SELECT seq, type, at, payload FROM events ORDER BY seq').all()
-  t('all-pass fixture emits exactly RUN_CREATED', events1.length === 1 && events1[0]?.type === 'RUN_CREATED')
   t('RUN_CREATED at derived from startedAt', events1[0]?.at === report.startedAt)
   t('RUN_CREATED payload round-trips', eq(JSON.parse(events1[0]?.payload), {
     repo: report.repo, baseSha: report.baseSha, goal: report.goal, model: report.model,
   }))
 
+  // ---------- T-016: the artifacts rows + the derived ARTIFACT_CREATED block ----------
+  // One row per report-named path. The fixture predates attempts and probes,
+  // so the derivation is exactly: report.json (via the reportPathOf
+  // recovery), the planner raw output, and per candidate the diff + review
+  // raw output — 6 rows, candidate-scoped with attempt_number null. Exact
+  // hash values are deliberately NOT pinned on this fixture: its real
+  // run-dir files may or may not exist on a given machine (the sandbox
+  // variant below pins exact values on controlled files).
+  const artifactRows = db.prepare('SELECT * FROM artifacts WHERE run_id = ? ORDER BY artifact_id').all(report.runId)
+  t('exactly one artifacts row per report-named path (6: report.json + planner raw + per candidate diff + review raw)',
+    artifactRows.length === 6)
+  t('artifacts paths verbatim, kind/job/attempt as derived (attempt null: the fixture predates attempts)',
+    eq(artifactRows.map((r) => [r.path, r.kind, r.job_id, r.attempt_number]).sort((a, b) => (a[0] < b[0] ? -1 : 1)), [
+      ['C:\\swarm\\verify\\20261011022419\\c01\\diff.patch', 'diff', 'c01', null],
+      ['C:\\swarm\\verify\\20261011022419\\c01\\review-raw.txt', 'log', 'c01', null],
+      ['C:\\swarm\\verify\\20261011022419\\c02\\diff.patch', 'diff', 'c02', null],
+      ['C:\\swarm\\verify\\20261011022419\\c02\\review-raw.txt', 'log', 'c02', null],
+      ['C:\\swarm\\verify\\20261011022419\\planner-raw.txt', 'log', null, null],
+      ['C:\\swarm\\verify\\20261011022419\\report.json', 'report', null, null],
+    ]))
+  t('the fixture predates probes: zero probe_runs rows', count('probe_runs') === 0)
+  // The exact id scheme, pinned twice: once by fixed-input literals over the
+  // exported function, once by the full literal id of a known fixture row
+  // (breaking any tautology with the import).
+  t('artifactId scheme pinned: run-level scope literal',
+    artifactId(null, null, 'C:\\fixed\\report.json') === 'run/report.json-214a82cf9c7c2793')
+  t('artifactId scheme pinned: attempt-scoped scope literal',
+    artifactId('c01', 2, 'X:\\y\\diff.patch') === 'j:c01@a2/diff.patch-d70d8dd8fa28ee1b')
+  t('artifactId scheme pinned: candidate scope without a recorded attempt literal',
+    artifactId('c02', null, 'C:\\r\\c02\\diff.patch') === 'j:c02/diff.patch-4a4fddce720a60b1')
+  t('report.json artifact_id is the pinned full literal for its fixture path',
+    artifactRows.some((r) => r.path === 'C:\\swarm\\verify\\20261011022419\\report.json'
+      && r.artifact_id === 'run/report.json-68bcbb91f2647d56'))
+
+  const c01FinishAt = new Date(Date.parse(report.startedAt) + report.candidates[0].workerDurationMs).toISOString()
+  const c02FinishAt = new Date(Date.parse(report.startedAt) + report.candidates[1].workerDurationMs).toISOString()
+  t('all-pass fixture emits RUN_CREATED then one ARTIFACT_CREATED per artifact row (§28:1854, post-hoc)',
+    events1.length === 7 && events1[0]?.type === 'RUN_CREATED'
+    && events1.slice(1).every((e) => e.type === 'ARTIFACT_CREATED'))
+  t('ARTIFACT_CREATED block in derivation order, paths verbatim',
+    eq(events1.slice(1).map((e) => JSON.parse(e.payload).path), [
+      'C:\\swarm\\verify\\20261011022419\\report.json',
+      'C:\\swarm\\verify\\20261011022419\\planner-raw.txt',
+      'C:\\swarm\\verify\\20261011022419\\c01\\diff.patch',
+      'C:\\swarm\\verify\\20261011022419\\c01\\review-raw.txt',
+      'C:\\swarm\\verify\\20261011022419\\c02\\diff.patch',
+      'C:\\swarm\\verify\\20261011022419\\c02\\review-raw.txt',
+    ]))
+  t('run-level ARTIFACT_CREATED at finishedAt; candidate-scoped at the shared finish-stamp derivation (never Date.now())',
+    events1[1]?.at === report.finishedAt && events1[2]?.at === report.finishedAt
+    && events1[3]?.at === c01FinishAt && events1[4]?.at === c01FinishAt
+    && events1[5]?.at === c02FinishAt && events1[6]?.at === c02FinishAt)
+  t('ARTIFACT_CREATED payloads name artifactId/path/kind/jobId/attemptNumber',
+    eq(JSON.parse(events1[1]?.payload), {
+      artifactId: 'run/report.json-68bcbb91f2647d56',
+      path: 'C:\\swarm\\verify\\20261011022419\\report.json',
+      kind: 'report', jobId: null, attemptNumber: null,
+    })
+    && eq(JSON.parse(events1[3]?.payload), {
+      artifactId: artifactId('c01', null, 'C:\\swarm\\verify\\20261011022419\\c01\\diff.patch'),
+      path: 'C:\\swarm\\verify\\20261011022419\\c01\\diff.patch',
+      kind: 'diff', jobId: 'c01', attemptNumber: null,
+    }))
+
   // ---------- T-006: the derived DAG matches the report's real fan-out ----------
-  // Version bumped 3 -> 4 by T-008 (the approval_gates slice); each schema
+  // Version bumped 4 -> 5 by T-016 (the artifact-store slice); each schema
   // slice moves this pinned assertion in its own change-set.
-  t('SCHEMA_VERSION is 4', SCHEMA_VERSION === 4)
+  t('SCHEMA_VERSION is 5', SCHEMA_VERSION === 5)
+  // T-016: the table census — exactly the prior 9 tables + artifacts +
+  // probe_runs. (Internal sqlite_* tables — sqlite_sequence exists because
+  // `events` uses AUTOINCREMENT — are excluded from the census.)
+  const tableNames = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+  ).all().map((r) => r.name)
+  t('fresh ingest materializes exactly 11 tables (the prior 9 + artifacts + probe_runs)',
+    tableNames.length === 11
+    && eq(tableNames, ['approval_gates', 'artifacts', 'attempts', 'candidates', 'events',
+      'gate_results', 'job_dependencies', 'jobs', 'phases', 'probe_runs', 'runs']))
+  t('artifacts columns are exactly the producer-narrowed set (media_type/lineage/metadata/retention_class omitted, not pre-defined)',
+    eq(db.prepare('PRAGMA table_info(artifacts)').all().map((r) => r.name),
+      ['run_id', 'artifact_id', 'kind', 'job_id', 'attempt_number', 'path', 'size_bytes', 'content_hash']))
+  t('probe_runs columns are exactly the ProbeRunSummary shape (src/types.ts)',
+    eq(db.prepare('PRAGMA table_info(probe_runs)').all().map((r) => r.name),
+      ['run_id', 'job_id', 'probe_id', 'scenario_id', 'success', 'duration_ms', 'bundle_path']))
   t('one phase row for the run', count('phases') === 1)
   const phase = db.prepare('SELECT * FROM phases WHERE run_id = ?').get(report.runId)
   t("phase_id is 'main'", phase?.phase_id === 'main')
@@ -119,14 +202,19 @@ try {
   const runAfter = db.prepare('SELECT * FROM runs WHERE run_id = ?').get(report.runId)
   t('re-ingest: run row values unchanged (upsert)', eq(runAfter, run))
   const events2 = db.prepare('SELECT seq, type, at, payload FROM events ORDER BY seq').all()
-  t('re-ingest: events appended, prior row untouched',
-    events2.length === 2 && eq(events2[0], events1[0]) && events2[1]?.type === 'RUN_CREATED')
+  t('re-ingest: events appended (a fresh deterministic block), prior rows untouched',
+    events2.length === events1.length * 2
+    && eq(events2.slice(0, events1.length), events1)
+    && eq(events2.slice(events1.length).map((e) => [e.type, e.at, e.payload]), events1.map((e) => [e.type, e.at, e.payload])))
   t('re-ingest: phases unchanged (upsert)',
     count('phases') === 1 && eq(db.prepare('SELECT * FROM phases WHERE run_id = ?').get(report.runId), phase))
   t('re-ingest: jobs unchanged (upsert)',
     count('jobs') === report.candidates.length
     && eq(db.prepare('SELECT * FROM jobs WHERE run_id = ? ORDER BY job_id').all(report.runId), jobsBefore))
   t('re-ingest: job_dependencies still zero (edges re-derived)', count('job_dependencies') === 0)
+  t('re-ingest: artifacts unchanged (upsert; hashes recompute from the files, which are immutable-by-convention)',
+    eq(db.prepare('SELECT * FROM artifacts WHERE run_id = ? ORDER BY artifact_id').all(report.runId), artifactRows))
+  t('re-ingest: probe_runs still zero', count('probe_runs') === 0)
   db.close()
 
   // ---------- event vocabulary on an eliminated candidate ----------
@@ -139,8 +227,9 @@ try {
   ingest(elim, elimDbPath)
   const elimDb = new DatabaseSync(elimDbPath)
   const elimEvents = elimDb.prepare('SELECT type, at, payload FROM events ORDER BY seq').all()
-  t('elimination emits RUN_CREATED, GATE_FAILED, CANDIDATE_ELIMINATED in order',
-    eq(elimEvents.map((e) => e.type), ['RUN_CREATED', 'GATE_FAILED', 'CANDIDATE_ELIMINATED']))
+  t('elimination emits RUN_CREATED, GATE_FAILED, CANDIDATE_ELIMINATED, then the artifact block',
+    eq(elimEvents.slice(0, 3).map((e) => e.type), ['RUN_CREATED', 'GATE_FAILED', 'CANDIDATE_ELIMINATED'])
+    && elimEvents.length === 9 && elimEvents.slice(3).every((e) => e.type === 'ARTIFACT_CREATED'))
   const gateFail = elimEvents.find((e) => e.type === 'GATE_FAILED')
   t('GATE_FAILED payload names candidate and gate',
     eq(JSON.parse(gateFail?.payload), { candidateId: victim.id, gate: victim.gates[0].name, exitCode: 1 }))
@@ -201,12 +290,32 @@ try {
     retriedDb.prepare('SELECT COUNT(*) AS n FROM attempts WHERE job_id = ?').get(retried.candidates[1].id).n === 0)
   const retriedEvents = retriedDb.prepare('SELECT type, at, payload FROM events ORDER BY seq').all()
   t('retried variant: exactly one ATTEMPT_STARTED per attempt, in order, after RUN_CREATED, at the attempt stamps',
-    eq(retriedEvents.map((e) => e.type), ['RUN_CREATED', 'ATTEMPT_STARTED', 'ATTEMPT_STARTED'])
+    eq(retriedEvents.slice(0, 3).map((e) => e.type), ['RUN_CREATED', 'ATTEMPT_STARTED', 'ATTEMPT_STARTED'])
     && retriedEvents[1]?.at === attempt1.startedAt && retriedEvents[2]?.at === attempt2.startedAt)
   t('retried variant: ATTEMPT_STARTED payloads name the job, attempt id, and number',
     eq(JSON.parse(retriedEvents[1]?.payload), { jobId: rc.id, attemptId: attempt1.id, attemptNumber: 1 })
     && eq(JSON.parse(retriedEvents[2]?.payload), { jobId: rc.id, attemptId: attempt2.id, attemptNumber: 2 }))
+  // T-016 on the retried variant: attempt-scoped rows carry their own
+  // attempt number; the candidate's diffPath and review raw attribute the
+  // FINAL attempt (src/types.ts: top-level fields are the FINAL attempt's
+  // values) — so c01\diff.patch is TWO rows (attempt 1's outputArtifacts vs
+  // the final attempt's diffPath), while c02 (no attempts array) stays
+  // attempt-null. 10 rows: 2 run-level + 2 + 4 + 2.
+  const retriedArtifacts = retriedDb.prepare('SELECT * FROM artifacts WHERE run_id = ? ORDER BY artifact_id').all(retried.runId)
+  t('retried variant: 10 artifact rows — outputArtifacts are attempt-scoped, diffPath/review attribute the FINAL attempt, c02 stays attempt-null',
+    retriedArtifacts.length === 10
+    && retriedArtifacts.filter((r) => r.job_id === null && r.attempt_number === null).length === 2
+    && retriedArtifacts.filter((r) => r.job_id === 'c01' && r.attempt_number === 1).length === 2
+    && retriedArtifacts.filter((r) => r.job_id === 'c01' && r.attempt_number === 2).length === 4
+    && retriedArtifacts.filter((r) => r.job_id === 'c02' && r.attempt_number === null).length === 2
+    && retriedArtifacts.filter((r) => r.path === 'C:\\swarm\\verify\\20261011022419\\c01\\diff.patch').length === 2)
+  t('retried variant: ARTIFACT_CREATED block after the attempt events, at report-carried stamps (final attempt endedAt for c01; the ladder derivation for c02; finishedAt for run-level)',
+    retriedEvents.length === 13 && retriedEvents.slice(3).every((e) => e.type === 'ARTIFACT_CREATED')
+    && retriedEvents[3]?.at === retried.finishedAt && retriedEvents[4]?.at === retried.finishedAt
+    && retriedEvents.slice(5, 11).every((e) => e.at === attempt2.endedAt)
+    && retriedEvents.slice(11).every((e) => e.at === new Date(Date.parse(retried.startedAt) + retried.candidates[1].workerDurationMs).toISOString()))
   const attemptRowsBefore = retriedDb.prepare('SELECT * FROM attempts WHERE run_id = ? ORDER BY attempt_number').all(retried.runId)
+  const retriedArtifactsBefore = retriedDb.prepare('SELECT * FROM artifacts WHERE run_id = ? ORDER BY artifact_id').all(retried.runId)
   const retriedEventsBefore = retriedDb.prepare('SELECT seq, type, at, payload FROM events ORDER BY seq').all()
   retriedDb.close()
 
@@ -215,12 +324,13 @@ try {
   const retriedDb2 = new DatabaseSync(retriedDbPath)
   t('retried re-ingest: attempt rows unchanged (upsert by natural key)',
     eq(retriedDb2.prepare('SELECT * FROM attempts WHERE run_id = ? ORDER BY attempt_number').all(retried.runId), attemptRowsBefore))
+  t('retried re-ingest: artifacts unchanged (upsert by natural key; hashes recompute identically)',
+    eq(retriedDb2.prepare('SELECT * FROM artifacts WHERE run_id = ? ORDER BY artifact_id').all(retried.runId), retriedArtifactsBefore))
   const retriedEventsAfter = retriedDb2.prepare('SELECT seq, type, at, payload FROM events ORDER BY seq').all()
   t('retried re-ingest: events appended (a fresh deterministic block), prior rows untouched',
     retriedEventsAfter.length === retriedEventsBefore.length * 2
     && eq(retriedEventsAfter.slice(0, retriedEventsBefore.length), retriedEventsBefore)
-    && eq(retriedEventsAfter.slice(retriedEventsBefore.length).map((e) => e.type),
-      ['RUN_CREATED', 'ATTEMPT_STARTED', 'ATTEMPT_STARTED']))
+    && eq(retriedEventsAfter.slice(retriedEventsBefore.length).map((e) => e.type), retriedEventsBefore.map((e) => e.type)))
   t('retried re-ingest: integrity_check ok', retriedDb2.prepare('PRAGMA integrity_check').get()['integrity_check'] === 'ok')
   retriedDb2.close()
 
@@ -270,11 +380,12 @@ try {
     dagEdges.length === 1 && dagEdges[0]?.job_id === 'c02' && dagEdges[0]?.depends_on_job_id === 'c01')
 
   const dagEvents = dagDb.prepare('SELECT seq, type, at, payload FROM events ORDER BY seq').all()
-  t('scheduled variant: per-candidate block first, then the schedule block, in schedule order',
-    eq(dagEvents.map((e) => e.type), [
+  t('scheduled variant: per-candidate block first, then the schedule block in schedule order, then the artifact block',
+    eq(dagEvents.slice(0, 8).map((e) => e.type), [
       'RUN_CREATED', 'GATE_FAILED', 'CANDIDATE_ELIMINATED',
       'JOB_READY', 'JOB_SUCCEEDED', 'JOB_READY', 'JOB_FAILED', 'PHASE_COMPLETED',
-    ]))
+    ])
+    && dagEvents.length === 14 && dagEvents.slice(8).every((e) => e.type === 'ARTIFACT_CREATED'))
   const startedAt = dag.startedAt
   const c01At = new Date(Date.parse(startedAt) + dag.candidates[0].workerDurationMs).toISOString()
   const c02At = new Date(Date.parse(startedAt) + dagVictim.workerDurationMs).toISOString()
@@ -312,6 +423,164 @@ try {
       dagEventsBefore.map((e) => [e.type, e.at, e.payload])))
   t('scheduled re-ingest: integrity_check ok', dagDb2.prepare('PRAGMA integrity_check').get()['integrity_check'] === 'ok')
   dagDb2.close()
+
+  // ---------- T-016: probes variant — probe_runs rows + bundle artifacts ----------
+  // Hand-built (the elim-variant pattern): c01 gains a one-attempt history
+  // and two probe summaries pointing at sandbox-local bundle files written
+  // here; c02 keeps the fixture shape. Pins the probe_runs rows
+  // field-for-field (ProbeRunSummary, src/types.ts), the matching
+  // probe-bundle artifacts rows (the bundle is the addressable evidence
+  // unit — its internal .log files get no row), the final-attempt
+  // attribution of the candidate-scoped rows, and exact sandbox-local hash
+  // values.
+  const probed = structuredClone(report)
+  const pc = probed.candidates[0]
+  const pBundleDir = join(sandbox, 'probe-bundles')
+  mkdirSync(pBundleDir, { recursive: true })
+  const bundle1Path = join(pBundleDir, 'p1.json')
+  const bundle2Path = join(pBundleDir, 'p2.json')
+  const bundle1Content = JSON.stringify({ probeId: 'p1', scenarioId: 'p1', success: true, artifacts: [], measurements: [], gateResults: [] }, null, 2)
+  const bundle2Content = JSON.stringify({ probeId: 'p2', scenarioId: 'p2', success: false, artifacts: [], measurements: [], gateResults: [], error: 'command exited 3' }, null, 2)
+  writeFileSync(bundle1Path, bundle1Content)
+  writeFileSync(bundle2Path, bundle2Content)
+  pc.attempts = [{
+    id: `${pc.id}-a1`, jobId: pc.id, number: 1, state: 'succeeded',
+    startedAt: '2026-10-11T02:24:20.500Z', endedAt: '2026-10-11T02:24:53.000Z',
+    inputContextHash: hashA, promptVersion: null,
+    outputArtifacts: ['C:\\swarm\\verify\\20261011022419\\c01\\worker.log'],
+  }]
+  pc.probes = [
+    { probeId: 'p1', scenarioId: 'p1', success: true, durationMs: 1234, bundlePath: bundle1Path },
+    { probeId: 'p2', scenarioId: 'p2', success: false, durationMs: 4321, bundlePath: bundle2Path },
+  ]
+  const probedDbPath = join(sandbox, 'probed.db')
+  ingest(probed, probedDbPath)
+  const probedDb = new DatabaseSync(probedDbPath)
+  t('probes variant: one probe_runs row per summary',
+    probedDb.prepare('SELECT COUNT(*) AS n FROM probe_runs').get().n === 2)
+  for (const p of pc.probes) {
+    const row = probedDb.prepare('SELECT * FROM probe_runs WHERE run_id = ? AND job_id = ? AND probe_id = ?')
+      .get(probed.runId, pc.id, p.probeId)
+    t(`probes variant: probe_runs row for ${p.probeId} matches the summary field-for-field (success as 1|0)`,
+      row?.scenario_id === p.scenarioId && row?.success === (p.success ? 1 : 0)
+      && row?.duration_ms === p.durationMs && row?.bundle_path === p.bundlePath)
+    const bundleRow = probedDb.prepare('SELECT * FROM artifacts WHERE run_id = ? AND job_id = ? AND path = ?')
+      .get(probed.runId, pc.id, p.bundlePath)
+    const expectedBundle = p.probeId === 'p1' ? bundle1Content : bundle2Content
+    t(`probes variant: ${p.probeId} bundle has a matching artifacts row (kind report, FINAL attempt, exact sandbox hash)`,
+      bundleRow?.kind === 'report' && bundleRow?.attempt_number === 1
+      && bundleRow?.size_bytes === Buffer.byteLength(expectedBundle)
+      && bundleRow?.content_hash === createHash('sha256').update(expectedBundle).digest('hex'))
+  }
+  const probedArtifacts = probedDb.prepare('SELECT * FROM artifacts WHERE run_id = ? ORDER BY artifact_id').all(probed.runId)
+  t('probes variant: 9 artifact rows (6 fixture + attempt worker.log + 2 bundles); diffPath and review attribute the FINAL attempt (1), c02 stays attempt-null',
+    probedArtifacts.length === 9
+    && probedArtifacts.filter((r) => r.path === 'C:\\swarm\\verify\\20261011022419\\c01\\diff.patch'
+      && r.attempt_number === 1).length === 1
+    && probedArtifacts.filter((r) => r.path === 'C:\\swarm\\verify\\20261011022419\\c01\\review-raw.txt'
+      && r.attempt_number === 1).length === 1
+    && probedArtifacts.filter((r) => r.job_id === 'c02' && r.attempt_number === null).length === 2
+    && probedArtifacts.filter((r) => r.job_id === null && r.attempt_number === null).length === 2)
+  t('probes variant: no .log artifact row inside the bundles (the bundle is the addressable unit)',
+    probedArtifacts.every((r) => !r.path.includes('probes') || r.path.endsWith('.json')))
+  t('probes variant: integrity_check ok', probedDb.prepare('PRAGMA integrity_check').get()['integrity_check'] === 'ok')
+  probedDb.close()
+
+  // ---------- T-016: hash-at-ingest, pinned on a controlled sandbox variant ----------
+  // A hand-built report whose named evidence files live in the sandbox with
+  // controlled content; c02's diff is named but never written (the
+  // missing-file case). Exact sizes/hashes are pinned HERE only.
+  const hashDir = join(sandbox, 'hashrun')
+  mkdirSync(join(hashDir, 'c01'), { recursive: true })
+  mkdirSync(join(hashDir, 'c02'), { recursive: true })
+  const hashFiles = {
+    planner: { path: join(hashDir, 'planner-raw.txt'), content: '["brief one","brief two"]\n' },
+    workerLog: { path: join(hashDir, 'c01', 'worker.log'), content: 'worker log line one\nworker log line two\n' },
+    diff: { path: join(hashDir, 'c01', 'diff.patch'), content: 'diff --git a/calc.js b/calc.js\n--- a/calc.js\n+++ b/calc.js\n@@ -1 +1 @@\n-old\n+new\n' },
+    reviewRaw: { path: join(hashDir, 'c01', 'review-raw.txt'), content: '{"observations":[]}\n' },
+  }
+  const hashMissingDiff = join(hashDir, 'c02', 'diff.patch')
+  const hashReport = {
+    runId: '20261016000001',
+    repo: 'C:\\swarm\\demo-target',
+    baseSha: '4eabbb245b7f876b04fd4828dd729c7c624ddbe3',
+    goal: 'hash-at-ingest sandbox',
+    model: 'zai-coding-plan/glm-5.3-flash',
+    planner: { model: 'zai-coding-plan/glm-5.3', ok: true, attempts: 1, durationMs: 5, briefs: ['b1'], fallbackUsed: false, rawOutputPath: hashFiles.planner.path },
+    startedAt: '2026-10-16T10:00:00.000Z',
+    finishedAt: '2026-10-16T10:01:00.000Z',
+    candidates: [
+      {
+        id: 'c01', workerId: 'opencode', model: 'zai-coding-plan/glm-5.3-flash', brief: 'b1',
+        workspacePath: null, workerOk: true, workerTimedOut: false, workerDurationMs: 1000,
+        diffPath: hashFiles.diff.path, diffBytes: Buffer.byteLength(hashFiles.diff.content),
+        gates: [{ name: 'build', passed: true, exitCode: 0, durationMs: 10, outputTail: 'ok' }],
+        passedAllGates: true,
+        attempts: [{
+          id: 'c01-a1', jobId: 'c01', number: 1, state: 'succeeded',
+          startedAt: '2026-10-16T10:00:01.000Z', endedAt: '2026-10-16T10:00:02.000Z',
+          inputContextHash: hashA, promptVersion: null,
+          outputArtifacts: [hashFiles.workerLog.path, hashFiles.diff.path],
+        }],
+        review: { ok: true, attempts: 1, model: 'zai-coding-plan/glm-5.3', observations: [], rawOutputPath: hashFiles.reviewRaw.path },
+      },
+      {
+        id: 'c02', workerId: 'opencode', model: 'zai-coding-plan/glm-5.3-flash', brief: 'b2',
+        workspacePath: null, workerOk: true, workerTimedOut: false, workerDurationMs: 4567,
+        diffPath: hashMissingDiff, diffBytes: 12,
+        gates: [], passedAllGates: false,
+        attempts: [],
+      },
+    ],
+  }
+  const hashReportPath = join(hashDir, 'report.json')
+  writeFileSync(hashReportPath, JSON.stringify(hashReport, null, 2))
+  for (const f of Object.values(hashFiles)) writeFileSync(f.path, f.content)
+  const hashEvidenceShaBefore = Object.fromEntries([
+    ...Object.values(hashFiles).map((f) => [f.path, sha256(f.path)]),
+    [hashReportPath, sha256(hashReportPath)],
+  ])
+  const hashDbPath = join(sandbox, 'hash.db')
+  ingest(hashReport, hashDbPath)
+  const hashDb = new DatabaseSync(hashDbPath)
+  const hashRows = hashDb.prepare('SELECT * FROM artifacts WHERE run_id = ? ORDER BY artifact_id').all(hashReport.runId)
+  t('hash sandbox: 6 rows — report.json, planner raw, worker.log, the deduped diff (named by diffPath AND outputArtifacts), review raw, c02 missing diff',
+    hashRows.length === 6
+    && hashRows.filter((r) => r.path === hashFiles.diff.path).length === 1)
+  for (const [label, f] of [['report.json', { path: hashReportPath }], ...Object.entries(hashFiles)]) {
+    const row = hashDb.prepare('SELECT * FROM artifacts WHERE run_id = ? AND path = ?').get(hashReport.runId, f.path)
+    t(`hash sandbox: ${label} size/hash equal the controlled content`,
+      row?.size_bytes === Buffer.byteLength(readFileSync(f.path))
+      && row?.content_hash === sha256(f.path))
+  }
+  t('hash sandbox: a report-named path with no file on disk records NULL for both — never fabricated (AGENTS.md #7)',
+    hashRows.some((r) => r.path === hashMissingDiff && r.size_bytes === null && r.content_hash === null))
+  t('hash sandbox: read-only over evidence — every controlled file byte-identical after ingestion',
+    Object.entries(hashEvidenceShaBefore).every(([p, h]) => sha256(p) === h))
+  const hashRowsBefore = hashRows
+  const hashEvents = hashDb.prepare('SELECT type, at, payload FROM events ORDER BY seq').all()
+  t('hash sandbox: RUN_CREATED, ATTEMPT_STARTED (c01 carries an attempt), CANDIDATE_ELIMINATED (c02 has no gates), then the artifact block',
+    hashEvents.length === 9 && hashEvents[0]?.type === 'RUN_CREATED'
+    && hashEvents[1]?.type === 'ATTEMPT_STARTED' && hashEvents[2]?.type === 'CANDIDATE_ELIMINATED'
+    && hashEvents.slice(3).every((e) => e.type === 'ARTIFACT_CREATED'))
+  t('hash sandbox: ARTIFACT_CREATED at the shared finish-stamp derivation — finishedAt for run-level; the final attempt endedAt (10:00:02, NOT the 10:00:01 ladder derivation) for c01; the ladder derivation for attempt-less c02',
+    hashEvents[3]?.at === hashReport.finishedAt && hashEvents[4]?.at === hashReport.finishedAt
+    && hashEvents.slice(5, 8).every((e) => e.at === '2026-10-16T10:00:02.000Z')
+    && hashEvents[8]?.at === new Date(Date.parse(hashReport.startedAt) + 4567).toISOString())
+  t('hash sandbox: ARTIFACT_CREATED payload for the missing-file row still records the path verbatim (hash absent, never invented)',
+    eq(JSON.parse(hashEvents[8]?.payload), {
+      artifactId: artifactId('c02', null, hashMissingDiff),
+      path: hashMissingDiff,
+      kind: 'diff', jobId: 'c02', attemptNumber: null,
+    }))
+  ingest(hashReport, hashDbPath)
+  t('hash sandbox: re-ingest leaves every artifacts row byte-identical (ids stable, hashes recompute identically)',
+    eq(hashDb.prepare('SELECT * FROM artifacts WHERE run_id = ? ORDER BY artifact_id').all(hashReport.runId), hashRowsBefore))
+  t('hash sandbox: re-ingest appends a fresh deterministic block (events double, content identical)',
+    eq(hashDb.prepare('SELECT type, at, payload FROM events ORDER BY seq').all().slice(9).map((e) => [e.type, e.at, e.payload]),
+      hashEvents.map((e) => [e.type, e.at, e.payload])))
+  t('hash sandbox: integrity_check ok', hashDb.prepare('PRAGMA integrity_check').get()['integrity_check'] === 'ok')
+  hashDb.close()
 
   // ---------- T-006: pure validators on hand-built inputs (Gate 0.5 pattern) ----------
   // The derived DAG is acyclic by construction; the interesting validator

@@ -535,6 +535,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.16: artifact store persistence + tamper evidence (T-016) ----------
+section('Gate 1.16 — artifact store persistence + tamper evidence (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-artifacts.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'artifact store self-check exit 0')
+} catch (e) {
+  fail(`artifact store self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

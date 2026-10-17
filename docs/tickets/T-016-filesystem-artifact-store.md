@@ -1,6 +1,6 @@
 # T-016 — Filesystem artifact store: artifacts + probe_runs records, hash-at-ingest, re-verification (spec §34:2028)
 
-**Status:** proposed
+**Status:** done 2026-10-17
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 2
 **Depends on:** — (builds on landed slices: T-003/T-006/T-007/T-008 store, T-015 probe summaries)
@@ -127,53 +127,151 @@ exit 0 (only the documented node:sqlite ExperimentalWarning).
 
 ## Acceptance criteria
 
-- [ ] `SCHEMA_VERSION` is 5 and a fresh ingest materializes exactly 11 tables (the
+- [x] `SCHEMA_VERSION` is 5 and a fresh ingest materializes exactly 11 tables (the
       prior 9 + `artifacts` + `probe_runs`); an existing v4 `refinery.db` gains both on
       next use with no migration machinery — pinned by the moved schema assertion and a
       table census in extended Gate 1.6 (`scripts/check-store.mjs:88` moves in this
       change-set, per its own comment).
-- [ ] Extended Gate 1.6, main fixture: ingesting `scripts/fixtures/report-real.json`
+- [x] Extended Gate 1.6, main fixture: ingesting `scripts/fixtures/report-real.json`
       derives one `artifacts` row per report-named path with exact deterministic counts
       (planner raw; per candidate: diff + deduped `outputArtifacts` + review raw when
       present; `report.json` itself), paths verbatim; **zero `probe_runs` rows** (the
       fixture predates probes, `VERIFICATION.md:160-161`); no `media_type`/`lineage`/
       `retention_class` columns exist.
-- [ ] Extended Gate 1.6, probes variant (the elim-variant pattern,
+- [x] Extended Gate 1.6, probes variant (the elim-variant pattern,
       `scripts/check-store.mjs:132-143`): a hand-built fixture carrying `probes[]` with
       sandbox-local bundle files derives one `probe_runs` row per summary
       (run_id/job_id/probe_id/scenario_id/success/duration_ms/bundle_path verbatim,
       `src/types.ts:279-285`) plus a matching probe-bundle `artifacts` row.
-- [ ] Hash-at-ingest pinned by extended Gate 1.6 sandbox variant: `size_bytes`/
+- [x] Hash-at-ingest pinned by extended Gate 1.6 sandbox variant: `size_bytes`/
       `content_hash` equal the `stat`/sha256 of controlled file content; a report-named
       path with no file on disk records NULL for both (never fabricated); the source
       fixture is byte-identical after ingestion (read-only over evidence — the
       `VERIFICATION.md:212-213` pin holds even while hashing). Exact hash values are
       pinned **only** on sandbox variants (the main fixture's real run-dir files may or
       may not exist on a given machine).
-- [ ] `ARTIFACT_CREATED` events: extended Gate 1.6 asserts the post-hoc block (one per
+- [x] `ARTIFACT_CREATED` events: extended Gate 1.6 asserts the post-hoc block (one per
       artifacts row) with every `at` derived from report stamps — never `Date.now()` —
       and re-ingest leaves state idempotent while events append a fresh deterministic
       block; `PRAGMA integrity_check` returns `ok`.
-- [ ] **New Gate 1.16** (tamper-evidence, fast tier, hooked into `scripts/verify.mjs`
+- [x] **New Gate 1.16** (tamper-evidence, fast tier, hooked into `scripts/verify.mjs`
       before the fast-tier finish): against a sandbox run — re-verification of intact
       files reports all `verified`; flipping one file's bytes is detected as `mutated`;
       deleting one reports `missing`; a null-hash row reports `unverified`, not
       `mutated`. No existing gate pins this (Gate 1.15 pins bundle writing, not store
       persistence, `VERIFICATION.md:1042-1052`; Gate 2 spends model tokens).
-- [ ] Gate 1.5 stays green structurally — DB rows do not affect clean, and the artifact
+- [x] Gate 1.5 stays green structurally — DB rows do not affect clean, and the artifact
       *files* under run dirs are already evidence-preserved
       (`VERIFICATION.md:217-220`).
-- [ ] Gate 0 green (`tsc --noEmit`) over the changed `src/store/index.ts` and scripts.
-- [ ] Gate 2 **not owed**, recorded here: the change-set touches only
+- [x] Gate 0 green (`tsc --noEmit`) over the changed `src/store/index.ts` and scripts.
+- [x] Gate 2 **not owed**, recorded here: the change-set touches only
       `src/store/index.ts`, `scripts/check-store.mjs`, the new Gate 1.16 script, the
       `scripts/verify.mjs` hook, `VERIFICATION.md`, and docs — no `src/runner.ts`, no
       adapter, no gate code, no workspace handling, no report-shape change (the
       T-006/T-008 trigger analysis). Recording hashes at capture time instead would be
       a different ticket owing its own Gate 2 run.
-- [ ] `VERIFICATION.md` extended in the same change-set: the Gate 1.6 additions, the
+- [x] `VERIFICATION.md` extended in the same change-set: the Gate 1.6 additions, the
       new Gate 1.16 section, the schema-v5 statements, and the carve sentence at
       `VERIFICATION.md:964-966` updated to reflect that `artifacts`/`probe_runs` landed
       (anchor resolution and the context tables stay carved).
+
+## Landed
+
+2026-10-17, lane branch `ticket/T-016-filesystem-artifact-store`.
+
+What changed:
+
+- **`src/store/index.ts`** — schema v4 → v5: `SCHEMA_VERSION = 5`; two new
+  `CREATE TABLE IF NOT EXISTS` tables — `artifacts` (`run_id`,
+  `artifact_id`, `kind`, `job_id` nullable, `attempt_number` nullable,
+  `path`, `size_bytes` nullable, `content_hash` nullable; PK
+  `(run_id, artifact_id)`) and `probe_runs` (`run_id`, `job_id`,
+  `probe_id`, `scenario_id`, `success`, `duration_ms`, `bundle_path`; PK
+  `(run_id, job_id, probe_id)`, field-for-field `ProbeRunSummary`) — the
+  §6.8 columns without a producer (`media_type`/`lineage`/`metadata`/
+  `retention_class`) omitted, not pre-defined; §6.8's `producerAttemptId`
+  narrowed to the `(job_id, attempt_number)` pair. The module header gains
+  the third documented scoping case: ingest is deterministic as a function
+  of *(report, the evidence files it names)* — hash-at-ingest stat+sha256
+  READS evidence (1 MiB streaming, never writes), records NULL on
+  missing/unreadable files, and the wall clock still never enters a stamp.
+  New exports: `ArtifactKind`/`artifactKindOf` (path-derived — `.patch` →
+  `diff`, `.json` → `report`, else `log`; one rule, stable no matter which
+  report field derived the row), `artifactId` (deterministic producer-triple
+  id `<scope>/<basename>-<sha256[:16]>` with `run` / `j:<id>` /
+  `j:<id>@a<n>` scopes, the `:`/`@` punctuation collision-free against the
+  `[a-z0-9-]` job-id charset), and `verifyRunArtifacts` +
+  `ArtifactVerification` (the §29:1877 re-verification primitive:
+  verified/mutated/missing/unverified, readOnly DB open, read-only over
+  evidence; deliberately no CLI this slice). `ingest` derives one
+  `artifacts` row per report-named path (report.json via the promoted
+  reportPathOf heuristic, planner raw, per candidate: diffPath + every
+  attempts[].outputArtifacts path + review raw + probes[].bundlePath; dedup
+  by `(candidateId, attempt, path)`), upserts `artifacts`/`probe_runs`, and
+  appends the derived `ARTIFACT_CREATED` block (§28:1854) after every
+  existing derived block — one event per artifacts row, `at` = `finishedAt`
+  (run-level) or the shared job finish-stamp derivation (candidate-scoped),
+  never `Date.now()`.
+
+- **`scripts/check-store.mjs` (extended Gate 1.6)** — the pinned schema
+  assertion moves to `SCHEMA_VERSION is 5` (per its own comment rule); a
+  table census (exactly 11 tables, internal `sqlite_*` excluded); exact
+  column sets for both new tables; the main fixture's 6 artifact rows with
+  verbatim paths/kinds, null attempt numbers, zero `probe_runs` rows, and
+  the full pinned `report.json` id literal; `artifactId` fixed-input
+  literals (all three scopes); the retried variant's attempt attribution
+  (outputArtifacts attempt-scoped, diffPath/review FINAL-attempt — one path
+  under two producers is two rows, inside one producer triple one deduped
+  row); a probes variant (probe_runs field-for-field + sandbox-local bundle
+  artifacts rows with exact hashes, no bundle-internal `.log` rows); a hash
+  sandbox variant (exact sizes/hashes over controlled content, NULL/NULL
+  for the never-written path, evidence byte-identical after ingest,
+  re-ingest byte-identical rows, `ARTIFACT_CREATED` stamps with the final
+  attempt's `endedAt` winning over the ladder derivation); the
+  `ARTIFACT_CREATED` block's position/order/payloads on every variant;
+  re-ingest idempotent over ALL state rows while events append.
+
+- **`scripts/check-artifacts.mjs` (new Gate 1.16)** + the hook in
+  `scripts/verify.mjs` before the fast-tier finish — tamper evidence
+  against a sandbox run: intact files all `verified`; flipping one file's
+  bytes → `mutated` (no other row disturbed); deleting one → `missing`; a
+  null-hash row → `unverified`, never `mutated`, still `unverified` once
+  its file appears; verification read-only over both sides (DB sha256
+  unchanged, evidence only read); unknown run → empty result.
+
+- **`VERIFICATION.md`** — Gate 1.6 section extended (schema v5 table list,
+  the T-016 bullets), the new Gate 1.16 section, Gate 1.15's
+  probe-persistence carve updated (landed, schema v5), and Gate 1.14's
+  carve sentence updated (`artifacts`/`probe_runs` landed; anchor
+  resolution and `artifact_lineage`/`context_plans`/`context_packets` stay
+  carved).
+
+- **`docs/tickets/`** — this ticket flipped to done with the boxes checked,
+  index row updated, in the same change-set.
+
+Measured gates (this lane, this change-set):
+
+- Gate 0 `npm run typecheck` → exit 0.
+- Gate 1.6 extended, `node node_modules/tsx/dist/cli.mjs
+  scripts/check-store.mjs` → `check-store: ALL GREEN`, exit 0, 121 ok
+  assertions (only the documented node:sqlite ExperimentalWarning).
+- Gate 1.16 new, `node node_modules/tsx/dist/cli.mjs
+  scripts/check-artifacts.mjs` → `check-artifacts: ALL GREEN`, exit 0, 15
+  assertions.
+- Full fast tier, `node scripts/verify.mjs fast` → exit 0,
+  `verify (fast) complete: ALL GREEN` — 138 s wall, 820 ok lines, every
+  section (Gate 0, 1, 0.5, 1.5 ×3, 1.6–1.16) green; Gate 1.5 exercised and
+  stays green (DB rows do not affect clean).
+- Gate 2 **not owed** (recorded per the trigger analysis in What): the
+  change-set touches only `src/store/index.ts`, `scripts/check-store.mjs`,
+  the new `scripts/check-artifacts.mjs`, the `scripts/verify.mjs` hook,
+  `VERIFICATION.md`, and docs — no `src/runner.ts`, no adapter, no gate
+  code, no workspace handling, no report-shape change. Gate 3 n/a (no
+  adapter).
+
+Deviations: none from the ticket text. The exact `artifact_id` scheme, the
+path-derived `kind` rule, and the event payload shape are the choices the
+ticket left to the implementer; each is pinned exactly by Gate 1.6.
 
 ## Verification
 
