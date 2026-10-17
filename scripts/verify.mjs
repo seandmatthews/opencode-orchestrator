@@ -515,6 +515,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.14: shard distillation core (T-013) ----------
+section('Gate 1.14 — shard distillation core (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-distillation.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'distillation self-check exit 0')
+} catch (e) {
+  fail(`distillation self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

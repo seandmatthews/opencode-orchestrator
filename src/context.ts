@@ -1,5 +1,6 @@
-// Context system core (T-012) — first slice of Milestone 2 (spec §34:2035-2047
-// minus shard distillation and source lineage, which are carved off).
+// Context system core (T-012; shard distillation core added by T-013) —
+// Milestone-2 slices of spec §34:2035-2047. Packet-level source lineage and
+// the pipeline distiller stage remain carved off (T-013's Does-NOT list).
 //
 // A pure module: no I/O at the core, no model knowledge, zero npm
 // dependencies (node:crypto sha256 only — decisions.md: TypeScript on Node
@@ -12,7 +13,8 @@
 //
 // Vocabulary, chosen here and documented (the T-007 choose-and-document
 // move — spec §7.1:500-512 uses ArtifactQuery / SelectionRule /
-// SourceReferencePolicy as field types and never defines them):
+// SourceReferencePolicy / DistillationPlan as field types and never defines
+// them):
 //
 // - `ArtifactQuery` — a conjunction of optional fields mapping 1:1 onto the
 //   §7.6:593-605 selector vocabulary (by type / candidate / phase / producer
@@ -53,7 +55,11 @@
 // Layer 2 takes primary-rule matches in plan order; Layer 3 is the
 // pass-through: every remaining artifact carrying non-empty `sourceRefs`
 // (nothing distills this slice — the entries are inputs; a sourceRefs
-// carrier is Layer-3 class and is never visible to L2/L4 selection rules);
+// carrier is Layer-3 class and is never visible to L2/L4 selection rules).
+// When the plan carries a `distillation` block, every Layer-3-class record
+// the builder sees must be declared in `expectedArtifactIds`, or the build
+// is refused — §7.5 rule 1 enforced at the plan level (opt-in: a plan
+// without the block keeps the plain pass-through);
 // Layer 4 takes supporting-rule matches. Every layer after Layer 1 includes
 // a candidate only while budget remains: an inclusion that would overflow
 // `maxInputTokens` is skipped (manifest `excluded-by-budget`) and the
@@ -120,13 +126,24 @@ export interface SelectionRule {
  * refs on Layer-3 entries). */
 export type SourceReferencePolicy = 'artifact-ref'
 
-/** §7.1:500-512 minus `distillation`: a plan carrying a `distillation`
- * block is refused at parse (not silently ignored) until the §7.3-7.5
- * slice defines builder semantics for it. */
+/** §7.1:507's `distillation?: DistillationPlan` — the type the spec uses
+ * but never defines; chosen here and documented (the T-012
+ * choose-and-document move). The block opts a plan into the
+ * declared-entries contract: every Layer-3-class record the builder sees
+ * must be declared here, or the build is refused — §7.5 rule 1 enforced at
+ * the plan level. A plan without the block keeps the T-012 pass-through
+ * semantics unchanged (opt-in strictness, pinned by Gate 1.13's untouched
+ * Layer-3 fixtures, which ride plans without a block). */
+export interface DistillationPlan {
+  expectedArtifactIds: string[]
+}
+
+/** §7.1:500-512 in full. */
 export interface ContextPlan {
   maxInputTokens: number
   mandatory: ArtifactQuery[]
   selectable: SelectionRule[]
+  distillation?: DistillationPlan
   sourceReferencePolicy: SourceReferencePolicy
   exclusions?: ArtifactQuery[]
 }
@@ -253,7 +270,7 @@ export function fingerprintHashOf(model: string, planHash: string, selected: { i
 // ---------------------------------------------------------------------------
 
 const SELECTOR_FIELDS = ['type', 'candidate', 'phase', 'producerRole', 'gateStatus', 'lineageContains', 'newerThan', 'olderThan', 'ids', 'tagged'] as const
-const PLAN_FIELDS = ['maxInputTokens', 'mandatory', 'selectable', 'sourceReferencePolicy', 'exclusions'] as const
+const PLAN_FIELDS = ['maxInputTokens', 'mandatory', 'selectable', 'distillation', 'sourceReferencePolicy', 'exclusions'] as const
 const RULE_FIELDS = ['layer', 'query', 'orderBy', 'limit'] as const
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -354,9 +371,10 @@ function parseSelectionRule(raw: unknown, index: number): SelectionRule {
 }
 
 /** Parses and normalizes an unknown value into a ContextPlan. Refusals
- * (ContextRefusal) name the offense: unknown plan fields, a present
- * `distillation` block (not consumed until the §7.3-7.5 slice — refused,
- * never silently ignored), `maxInputTokens ≤ 0` or non-integer, a missing
+ * (ContextRefusal) name the offense: unknown plan fields, an invalid
+ * `distillation` block (a present block is parsed — never silently ignored;
+ * an invalid one is refused with block-level detail via
+ * `parseDistillationPlan`), `maxInputTokens ≤ 0` or non-integer, a missing
  * or non-'artifact-ref' sourceReferencePolicy, and any selector outside
  * the §7.6:593-605 vocabulary. */
 export function parseContextPlan(raw: unknown): ContextPlan {
@@ -364,9 +382,6 @@ export function parseContextPlan(raw: unknown): ContextPlan {
   const plan = raw as Record<string, unknown>
   for (const key of Object.keys(plan)) {
     if (!(PLAN_FIELDS as readonly string[]).includes(key)) {
-      if (key === 'distillation') {
-        refuse('context plan: unknown plan field "distillation" — refused until the §7.3-7.5 slice defines distillation builder semantics (never silently ignored)')
-      }
       refuse(`context plan: unknown plan field "${key}"`)
     }
   }
@@ -388,11 +403,183 @@ export function parseContextPlan(raw: unknown): ContextPlan {
     selectable,
     sourceReferencePolicy: 'artifact-ref',
   }
+  if (plan.distillation !== undefined) {
+    out.distillation = parseDistillationPlan(plan.distillation, 'context plan: "distillation" block')
+  }
   if (plan.exclusions !== undefined) {
     const exclusions = parseQueryArray(plan.exclusions, 'exclusions')
     out.exclusions = exclusions
   }
   return out
+}
+
+const DISTILLATION_PLAN_FIELDS = ['expectedArtifactIds'] as const
+
+/** Parses one `distillation` block (§7.1:507) into a `DistillationPlan`.
+ * Refuses (ContextRefusal, naming the offense): non-object blocks, unknown
+ * sub-fields (refuse-don't-ignore — the T-009 unknown-field posture), and
+ * an `expectedArtifactIds` that is not a non-empty array of distinct
+ * non-empty strings. */
+export function parseDistillationPlan(raw: unknown, label = 'distillation plan'): DistillationPlan {
+  if (!isPlainObject(raw)) refuse(`${label}: must be a JSON object`)
+  const block = raw as Record<string, unknown>
+  for (const key of Object.keys(block)) {
+    if (!(DISTILLATION_PLAN_FIELDS as readonly string[]).includes(key)) {
+      refuse(`${label}: unknown field "${key}"`)
+    }
+  }
+  const ids = block.expectedArtifactIds
+  if (!Array.isArray(ids) || ids.length === 0 || ids.some((i) => typeof i !== 'string' || i.length === 0)) {
+    refuse(`${label}: "expectedArtifactIds" must be a non-empty array of non-empty strings`)
+  }
+  const dup = (ids as string[]).find((id, i) => (ids as string[]).indexOf(id) !== i)
+  if (dup !== undefined) refuse(`${label}: duplicate entry "${dup}" in "expectedArtifactIds"`)
+  return { expectedArtifactIds: [...(ids as string[])] }
+}
+
+// ---------------------------------------------------------------------------
+// Distillation reports — §23.2:1358-1381, §7.5 rule 1 at the record level
+// ---------------------------------------------------------------------------
+
+/** One distilled claim — the camelCase normalization of §23.2:1367-1378's
+ * snake_case wire shape (`source_refs` → `sourceRefs`,
+ * `disagreement_refs` → `disagreementRefs`). `sourceRefs` carries the
+ * §7.4:567-576 `artifact:<id>#<anchor>` form exclusively. */
+export interface DistilledClaim {
+  id: string
+  statement: string
+  sourceRefs: string[]
+  disagreementRefs?: string[]
+}
+
+/** §23.2:1358-1381's distillation-report record — the contract a future
+ * pipeline distiller role's output must pass (`parseDistillationReport`,
+ * §7.5 rule 1 at the record level). `sourceArtifacts` is the report's
+ * declared input set; every ref on every claim — `sourceRefs` and
+ * `disagreementRefs` alike, a recorded disagreement also being a citation
+ * into the input set — must carry the §7.4 prefixed form and resolve into
+ * it. Anchors are opaque: format + declared-input-set resolution only (no
+ * artifact store exists to resolve anchors against, §34:2028); real anchor
+ * resolution is carved with the store. */
+export interface DistillationReport {
+  sourceArtifacts: string[]
+  claims: DistilledClaim[]
+}
+
+const REPORT_FIELDS = ['source_artifacts', 'claims'] as const
+const CLAIM_FIELDS = ['id', 'statement', 'source_refs', 'disagreement_refs'] as const
+
+/** Validates one §7.4-prefixed source ref: exactly
+ * `artifact:<id>#<anchor>` — starts `artifact:`, exactly one `#`, non-empty
+ * id and anchor. Bare `<id>#<anchor>` (§23.2:1371-1377's spelling) is
+ * refused: this slice standardizes on the prefixed §7.4:565-578 form
+ * (consistency with every T-012-pinned fixture and the
+ * `sourceReferencePolicy: 'artifact-ref'` mode) — the documented spec
+ * divergence. Returns the ref unchanged (validation only; anchors are
+ * opaque). */
+function parseSourceRef(raw: unknown, label: string): string {
+  if (typeof raw !== 'string' || raw.length === 0) {
+    refuse(`${label}: must be a non-empty "artifact:<id>#<anchor>" string (got ${JSON.stringify(raw)})`)
+  }
+  const ref = raw as string
+  if (!ref.startsWith('artifact:')) {
+    refuse(`${label}: ${JSON.stringify(ref)} must be "artifact:<id>#<anchor>" — refs carry the §7.4:567-576 "artifact:" prefix (the bare "id#anchor" spelling is refused)`)
+  }
+  const rest = ref.slice('artifact:'.length)
+  const first = rest.indexOf('#')
+  if (first === -1 || first !== rest.lastIndexOf('#')) {
+    refuse(`${label}: ${JSON.stringify(ref)} must contain exactly one "#" separating artifact id and anchor`)
+  }
+  if (first === 0 || first === rest.length - 1) {
+    refuse(`${label}: ${JSON.stringify(ref)} must carry a non-empty artifact id and a non-empty anchor`)
+  }
+  return ref
+}
+
+/** The artifact-id half of a validated `artifact:<id>#<anchor>` ref. */
+function refArtifactId(ref: string): string {
+  return ref.slice('artifact:'.length, ref.indexOf('#'))
+}
+
+/** Validates a §23.2:1358-1381 distillation report (the raw wire shape —
+ * snake_case) into a `DistillationReport`, the enforcement point §7.5
+ * rule 1 ("distillation artifacts cite source artifacts") has at the
+ * record level. Refusals (ContextRefusal) name the offense: unknown
+ * fields at either level (naming the field, and the claim id where one
+ * exists), `source_artifacts` not a non-empty array of non-empty strings,
+ * a claim whose `id` is missing or not a non-empty string or duplicates
+ * another claim's id, an empty `statement`, a missing/empty
+ * `source_refs`, a malformed ref (anything not exactly
+ * `artifact:<id>#<anchor>` — the bare §23.2 spelling included), and any
+ * `source_refs`/`disagreement_refs` entry whose `<id>` is not in the
+ * report's declared `source_artifacts` (refused naming the claim id).
+ * `claims: []` is valid — a distiller that found nothing worth claiming
+ * still produces the record (documented choice). `disagreement_refs` is
+ * optional but, when present, validated and resolved exactly like
+ * `source_refs`. Anchors are never resolved (no store, §34:2028). */
+export function parseDistillationReport(raw: unknown): DistillationReport {
+  if (!isPlainObject(raw)) refuse('distillation report: must be a JSON object')
+  const report = raw as Record<string, unknown>
+  for (const key of Object.keys(report)) {
+    if (!(REPORT_FIELDS as readonly string[]).includes(key)) {
+      refuse(`distillation report: unknown field "${key}"`)
+    }
+  }
+  const declared = report.source_artifacts
+  if (!Array.isArray(declared) || declared.length === 0 || declared.some((a) => typeof a !== 'string' || a.length === 0)) {
+    refuse('distillation report: "source_artifacts" must be a non-empty array of non-empty strings (the declared input set)')
+  }
+  const declaredSet = new Set<string>(declared as string[])
+  if (!Array.isArray(report.claims)) refuse('distillation report: "claims" must be an array')
+  const seenIds = new Set<string>()
+  const claims: DistilledClaim[] = (report.claims as unknown[]).map((rawClaim, index) => {
+    const at = `distillation report: claims[${index}]`
+    if (!isPlainObject(rawClaim)) refuse(`${at}: must be a JSON object`)
+    const claim = rawClaim as Record<string, unknown>
+    if (typeof claim.id !== 'string' || claim.id.length === 0) {
+      refuse(`${at}: "id" must be a non-empty string`)
+    }
+    const who = `${at} (claim "${claim.id}")`
+    if (seenIds.has(claim.id)) refuse(`${who}: duplicate claim id — claim ids are unique across the report`)
+    seenIds.add(claim.id)
+    for (const key of Object.keys(claim)) {
+      if (!(CLAIM_FIELDS as readonly string[]).includes(key)) {
+        refuse(`${who}: unknown field "${key}"`)
+      }
+    }
+    if (typeof claim.statement !== 'string' || claim.statement.length === 0) {
+      refuse(`${who}: "statement" must be a non-empty string`)
+    }
+    if (!Array.isArray(claim.source_refs) || claim.source_refs.length === 0) {
+      refuse(`${who}: "source_refs" must be a non-empty array (§7.5 rule 1: distillation artifacts cite source artifacts)`)
+    }
+    const sourceRefs = (claim.source_refs as unknown[]).map((ref, i) => {
+      const parsed = parseSourceRef(ref, `${who} source_refs[${i}]`)
+      const id = refArtifactId(parsed)
+      if (!declaredSet.has(id)) {
+        refuse(`${who}: source_refs[${i}] ${JSON.stringify(parsed)} cites artifact id "${id}" which is not in the report's declared source_artifacts`)
+      }
+      return parsed
+    })
+    let disagreementRefs: string[] | undefined
+    if (claim.disagreement_refs !== undefined) {
+      if (!Array.isArray(claim.disagreement_refs) || claim.disagreement_refs.length === 0) {
+        refuse(`${who}: "disagreement_refs", when present, must be a non-empty array`)
+      }
+      disagreementRefs = (claim.disagreement_refs as unknown[]).map((ref, i) => {
+        const parsed = parseSourceRef(ref, `${who} disagreement_refs[${i}]`)
+        const id = refArtifactId(parsed)
+        if (!declaredSet.has(id)) {
+          refuse(`${who}: disagreement_refs[${i}] ${JSON.stringify(parsed)} cites artifact id "${id}" which is not in the report's declared source_artifacts`)
+        }
+        return parsed
+      })
+    }
+    const out: DistilledClaim = { id: claim.id, statement: claim.statement, sourceRefs }
+    if (disagreementRefs !== undefined) out.disagreementRefs = disagreementRefs
+    return out
+  })
+  return { sourceArtifacts: [...(declared as string[])], claims }
 }
 
 // ---------------------------------------------------------------------------
@@ -458,9 +645,11 @@ function isDistilled(record: ArtifactRecord): boolean {
 
 /** Builds the packet. Throws ContextRefusal when the mandatory layer alone
  * exceeds maxInputTokens (unsatisfiable — §7.2:516-518 Layer 1 is never
- * trimmed, so there is nothing to cut) or when the input carries duplicate
- * artifact ids (the manifest could not list every input exactly once).
- * See the module header for the layer-assignment and budget rules. */
+ * trimmed, so there is nothing to cut), when the input carries duplicate
+ * artifact ids (the manifest could not list every input exactly once), or —
+ * when the plan carries a `distillation` block — when a Layer-3-class
+ * record arrives that the block does not declare (§7.5 rule 1 at the plan
+ * level). See the module header for the layer-assignment and budget rules. */
 export function buildContextPacket(
   plan: ContextPlan,
   artifacts: readonly ArtifactRecord[],
@@ -525,9 +714,25 @@ export function buildContextPacket(
   }
 
   // Layer 3 — distilled pass-through (nothing distills; the entries are
-  // inputs), canon order, budget-respecting.
+  // inputs), canon order, budget-respecting. When the plan carries a
+  // `distillation` block, every Layer-3-class record this scan sees must be
+  // declared in `expectedArtifactIds` — §7.5 rule 1 at the plan level. The
+  // declaration check precedes the budget test inside `include`, so a
+  // record that would have been excluded-by-budget is refused all the same:
+  // budget-luck never hides a provenance violation (nothing silent,
+  // §7.2:544). Declared-but-absent ids are not a refusal — the builder
+  // refuses what arrived untraceable, not what didn't arrive; the manifest
+  // and ledger record the truth. Plan `exclusions` still remove first
+  // (§7.2:544): a plan-excluded record never reaches selection.
   for (const record of pool) {
-    if (!layerOf.has(record.id) && isDistilled(record)) include(record, 3)
+    if (!isDistilled(record)) continue
+    if (plan.distillation !== undefined && !plan.distillation.expectedArtifactIds.includes(record.id)) {
+      refuse(
+        `untraceable distilled entry "${record.id}" — the plan's distillation.expectedArtifactIds does not declare it (§7.5 rule 1: no untraceable summary chains)`,
+      )
+    }
+    if (layerOf.has(record.id)) continue
+    include(record, 3)
   }
 
   // Layer 4 — supporting rules in plan order, under the budget-remainder

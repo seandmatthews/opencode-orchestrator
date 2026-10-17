@@ -97,7 +97,8 @@ try {
   const parsedA = parseContextPlan(PLAN_A)
   t('a valid plan parses with its fields intact', parsedA.maxInputTokens === 300 && parsedA.mandatory.length === 2 && parsedA.selectable.length === 3 && parsedA.sourceReferencePolicy === 'artifact-ref' && parsedA.exclusions?.length === 1)
   t('unknown plan field refused, naming it', throwsRefusal(() => parseContextPlan({ ...PLAN_A, relevance: 'ai' }), /relevance/))
-  t('a present distillation block is refused, not silently ignored', throwsRefusal(() => parseContextPlan({ ...PLAN_A, distillation: { shards: 5 } }), /distillation/))
+  t('a plan carrying a valid distillation block parses with all fields intact (T-013 lifted the refusal)', (() => { const p = parseContextPlan({ ...PLAN_A, distillation: { expectedArtifactIds: ['distilled-research'] } }); return p.distillation !== undefined && eq(p.distillation.expectedArtifactIds, ['distilled-research']) && p.maxInputTokens === 300 && p.mandatory.length === 2 && p.selectable.length === 3 && p.sourceReferencePolicy === 'artifact-ref' && p.exclusions?.length === 1 })())
+  t('an unknown sub-field inside the distillation block is still refused naming it', throwsRefusal(() => parseContextPlan({ ...PLAN_A, distillation: { expectedArtifactIds: ['distilled-research'], shards: 5 } }), /shards/))
   t('maxInputTokens 0 refused', throwsRefusal(() => parseContextPlan({ ...PLAN_A, maxInputTokens: 0 }), /maxInputTokens/))
   t('negative maxInputTokens refused', throwsRefusal(() => parseContextPlan({ ...PLAN_A, maxInputTokens: -5 }), /maxInputTokens/))
   t('selector outside the §7.6 vocabulary refused, naming it', throwsRefusal(() => parseContextPlan({ ...PLAN_A, mandatory: [{ relevance: 'ai' }] }), /relevance/))
@@ -332,9 +333,21 @@ try {
   const unknownFieldPlan = join(sandbox, 'plan-unknown.json')
   writeFileSync(unknownFieldPlan, JSON.stringify({ ...PLAN_A, relevance: 'ai' }))
   refusal('plan with an unknown field', ['--plan', unknownFieldPlan, '--packet', packetPath], /relevance/)
-  const distillationPlan = join(sandbox, 'plan-distillation.json')
-  writeFileSync(distillationPlan, JSON.stringify({ ...PLAN_A, distillation: { shards: 5 } }))
-  refusal('plan carrying a distillation block', ['--plan', distillationPlan, '--packet', packetPath], /distillation/)
+  // T-013 flipped the time-boxed refusal: the CLI parses via parseContextPlan
+  // and recomputes planHashOf, so a plan carrying a VALID distillation block
+  // (with a packet built from that parsed plan) inspects exit 0, and an
+  // invalid block still exits non-zero with no body.
+  const distPlanRaw = { ...PLAN_A, distillation: { expectedArtifactIds: ['distilled-research'] } }
+  const distPacket = buildContextPacket(parseContextPlan(distPlanRaw), ARTIFACTS, { model: MODEL, jobId: 'c01' })
+  const distPlanPath = join(sandbox, 'plan-distillation.json')
+  const distPacketPath = join(sandbox, 'packet-distillation.json')
+  writeFileSync(distPlanPath, JSON.stringify(distPlanRaw))
+  writeFileSync(distPacketPath, JSON.stringify(distPacket, null, 2))
+  const distOk = runCli(['--plan', distPlanPath, '--packet', distPacketPath])
+  t('plan carrying a valid distillation block: a packet built from it inspects exit 0', distOk.code === 0 && /distilled included \(1\):/.test(distOk.stdout) && /distilled: 25 tokens/.test(distOk.stdout))
+  const invalidDistPlanPath = join(sandbox, 'plan-distillation-invalid.json')
+  writeFileSync(invalidDistPlanPath, JSON.stringify({ ...PLAN_A, distillation: { expectedArtifactIds: [] } }))
+  refusal('plan carrying an invalid distillation block', ['--plan', invalidDistPlanPath, '--packet', packetPath], /distillation/)
   const zeroCapPlan = join(sandbox, 'plan-zerocap.json')
   writeFileSync(zeroCapPlan, JSON.stringify({ ...PLAN_A, maxInputTokens: 0 }))
   refusal('plan with maxInputTokens 0', ['--plan', zeroCapPlan, '--packet', packetPath], /maxInputTokens/)
