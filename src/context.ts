@@ -1,6 +1,8 @@
-// Context system core (T-012; shard distillation core added by T-013) —
-// Milestone-2 slices of spec §34:2035-2047. Packet-level source lineage and
-// the pipeline distiller stage remain carved off (T-013's Does-NOT list).
+// Context system core (T-012; shard distillation core added by T-013;
+// packet-level source lineage added by T-014) — Milestone-2 slices of spec
+// §34:2035-2047 at the contract level. The pipeline distiller stage — the
+// producer that would build strict-mode packets inside real runs — remains
+// carved (the T-012/T-013/T-014 Does-NOT lists).
 //
 // A pure module: no I/O at the core, no model knowledge, zero npm
 // dependencies (node:crypto sha256 only — decisions.md: TypeScript on Node
@@ -59,7 +61,25 @@
 // When the plan carries a `distillation` block, every Layer-3-class record
 // the builder sees must be declared in `expectedArtifactIds`, or the build
 // is refused — §7.5 rule 1 enforced at the plan level (opt-in: a plan
-// without the block keeps the plain pass-through);
+// without the block keeps the plain pass-through). Under the block the
+// builder additionally enforces §7.4:565-578 / §7.5:580-587 rules 2-3 at
+// the packet level (T-014): every Layer-3-class record's `sourceRefs` must
+// carry the `artifact:<id>#<anchor>` form and resolve into the build's
+// input set (every disposition, not just inclusions — an id outside the
+// input set expands to nothing, so the claim is untraceable), and each
+// included Layer-3 entry records its per-ref resolution against the
+// build's own manifest so the §7.5 chain stays walkable through
+// exclusions. Anchors stay opaque — no store to resolve into (§34:2028).
+//
+// **Locked decision (T-014, closing the question T-013:39-42 handed here):
+// lineage enforcement stays keyed to the `distillation` block — the
+// default path enforces nothing.** A blockless plan has no declared-input
+// contract to enforce against (`expectedArtifactIds` is the block's own
+// field), tightening would flip previously-valid inputs (Gate 1.13's
+// blockless fixtures ride dead-ref pass-through by design), and no
+// pipeline builds strict packets yet, so default-on buys nothing today.
+// A future change-set may tighten and must do so by explicitly flipping
+// those gate fixtures — a decision to be made, not an omission.
 // Layer 4 takes supporting-rule matches. Every layer after Layer 1 includes
 // a candidate only while budget remains: an inclusion that would overflow
 // `maxInputTokens` is skipped (manifest `excluded-by-budget`) and the
@@ -171,7 +191,21 @@ export interface ArtifactRecord {
 
 export type ContextLayer = 1 | 2 | 3 | 4
 
-/** A per-layer included entry. `sourceRefs` only on Layer 3. */
+/** The resolution of one `sourceRefs` entry against the build's own
+ * manifest (T-014) — `ref` is the full §7.4 ref (anchors stay opaque),
+ * `disposition` is the target artifact's manifest disposition in that
+ * build. Recorded only on Layer-3 entries built under the
+ * `distillation` block, one per `sourceRefs` entry, so a §7.5 chain stays
+ * walkable through exclusions instead of hiding them. */
+export interface SourceRefResolution {
+  ref: string
+  disposition: 'included' | 'excluded-by-plan' | 'excluded-by-budget'
+}
+
+/** A per-layer included entry. `sourceRefs` only on Layer 3;
+ * `sourceRefResolutions` only on Layer-3 entries built under the
+ * `distillation` block (strict mode) — rides the entry, never the
+ * fingerprint (§7.7 selected stays `{id, contentHash}`). */
 export interface ArtifactRef {
   id: string
   type: string
@@ -180,6 +214,7 @@ export interface ArtifactRef {
   layer: ContextLayer
   estimatedTokens: number
   sourceRefs?: string[]
+  sourceRefResolutions?: SourceRefResolution[]
 }
 
 /** Manifest disposition vocabulary — exactly two exclusion reasons,
@@ -469,15 +504,19 @@ export interface DistillationReport {
 const REPORT_FIELDS = ['source_artifacts', 'claims'] as const
 const CLAIM_FIELDS = ['id', 'statement', 'source_refs', 'disagreement_refs'] as const
 
-/** Validates one §7.4-prefixed source ref: exactly
- * `artifact:<id>#<anchor>` — starts `artifact:`, exactly one `#`, non-empty
- * id and anchor. Bare `<id>#<anchor>` (§23.2:1371-1377's spelling) is
- * refused: this slice standardizes on the prefixed §7.4:565-578 form
- * (consistency with every T-012-pinned fixture and the
- * `sourceReferencePolicy: 'artifact-ref'` mode) — the documented spec
- * divergence. Returns the ref unchanged (validation only; anchors are
- * opaque). */
-function parseSourceRef(raw: unknown, label: string): string {
+/** The single §7.4-prefixed source-ref predicate (T-013's definition,
+ * factored out for reuse — never a second divergent copy):
+ * `parseDistillationReport` (record level), the builder's strict
+ * lineage check (packet level, T-014), and the inspector's strict
+ * packet validation (src/context-inspect.ts) all validate refs through
+ * this function. Validates exactly `artifact:<id>#<anchor>` — starts
+ * `artifact:`, exactly one `#`, non-empty id and anchor. Bare
+ * `<id>#<anchor>` (§23.2:1371-1377's spelling) is refused: this slice
+ * standardizes on the prefixed §7.4:565-578 form (consistency with every
+ * T-012-pinned fixture and the `sourceReferencePolicy: 'artifact-ref'`
+ * mode) — the documented spec divergence. Returns the ref unchanged
+ * (validation only; anchors are opaque). */
+export function parseSourceRef(raw: unknown, label: string): string {
   if (typeof raw !== 'string' || raw.length === 0) {
     refuse(`${label}: must be a non-empty "artifact:<id>#<anchor>" string (got ${JSON.stringify(raw)})`)
   }
@@ -496,8 +535,9 @@ function parseSourceRef(raw: unknown, label: string): string {
   return ref
 }
 
-/** The artifact-id half of a validated `artifact:<id>#<anchor>` ref. */
-function refArtifactId(ref: string): string {
+/** The artifact-id half of a validated `artifact:<id>#<anchor>` ref (the
+ * shared half of `parseSourceRef`'s single definition). */
+export function refArtifactId(ref: string): string {
   return ref.slice('artifact:'.length, ref.indexOf('#'))
 }
 
@@ -643,13 +683,48 @@ function isDistilled(record: ArtifactRecord): boolean {
   return Array.isArray(record.sourceRefs) && record.sourceRefs.length > 0
 }
 
+/** T-014's strict-mode packet-level lineage checks (§7.4:565-578,
+ * §7.5:580-587 rules 2-3), run per Layer-3-class record the pass-through
+ * scan sees, before the budget test inside `include` (mirroring T-013's
+ * declaration-before-budget order — budget-luck can never hide an
+ * untraceable claim, §7.2:544 nothing-silent):
+ * 1. every `sourceRefs` entry carries the §7.4 `artifact:<id>#<anchor>`
+ *    form — validated through `parseSourceRef`, T-013's single definition,
+ *    so the bare §23.2 spelling is refused here exactly as at the record
+ *    level;
+ * 2. every ref's `<id>` resolves into the build's input set — the canon of
+ *    input artifact ids, every disposition, not just inclusions (§7.4:578:
+ *    "a downstream reviewer can expand any distilled statement back to
+ *    original evidence" — an id outside the input set expands to nothing,
+ *    so the claim is untraceable).
+ * Both refusals name the record id (the claim) and the dead/malformed ref.
+ * Anchors stay opaque — no store to resolve into (§34:2028). Mutual and
+ * self citation are legal: resolution is against the input id set, so
+ * cycles build fine; termination is the inspector render's duty
+ * (src/context-inspect.ts). Opt-in: called only when the plan carries the
+ * `distillation` block — see the locked decision in the module header. */
+function enforceSourceLineage(record: ArtifactRecord, inputIds: Set<string>): void {
+  for (const [i, ref] of (record.sourceRefs ?? []).entries()) {
+    const label = `distilled record "${record.id}" sourceRefs[${i}]`
+    const parsed = parseSourceRef(ref, label)
+    const id = refArtifactId(parsed)
+    if (!inputIds.has(id)) {
+      refuse(
+        `${label}: ${JSON.stringify(parsed)} cites artifact id "${id}" which is not in the build's input set (§7.5: no untraceable summary chains — an id outside the input set expands to nothing)`,
+      )
+    }
+  }
+}
+
 /** Builds the packet. Throws ContextRefusal when the mandatory layer alone
  * exceeds maxInputTokens (unsatisfiable — §7.2:516-518 Layer 1 is never
  * trimmed, so there is nothing to cut), when the input carries duplicate
  * artifact ids (the manifest could not list every input exactly once), or —
  * when the plan carries a `distillation` block — when a Layer-3-class
  * record arrives that the block does not declare (§7.5 rule 1 at the plan
- * level). See the module header for the layer-assignment and budget rules. */
+ * level) or whose `sourceRefs` are malformed or dead against the build's
+ * input set (§7.4/§7.5 rules 2-3 at the packet level, T-014). See the
+ * module header for the layer-assignment and budget rules. */
 export function buildContextPacket(
   plan: ContextPlan,
   artifacts: readonly ArtifactRecord[],
@@ -662,6 +737,9 @@ export function buildContextPacket(
       refuse(`duplicate artifact id "${canon[i]!.id}" — every input artifact must appear in the manifest exactly once`)
     }
   }
+  // The resolution universe for the strict lineage check (T-014): the canon
+  // of input artifact ids — every disposition, not just inclusions.
+  const inputIds = new Set(canon.map((r) => r.id))
 
   // Plan exclusions remove before any selection (§7.2:544's exact manifest).
   const excludedByPlan = new Set<string>()
@@ -716,14 +794,21 @@ export function buildContextPacket(
   // Layer 3 — distilled pass-through (nothing distills; the entries are
   // inputs), canon order, budget-respecting. When the plan carries a
   // `distillation` block, every Layer-3-class record this scan sees must be
-  // declared in `expectedArtifactIds` — §7.5 rule 1 at the plan level. The
-  // declaration check precedes the budget test inside `include`, so a
-  // record that would have been excluded-by-budget is refused all the same:
-  // budget-luck never hides a provenance violation (nothing silent,
-  // §7.2:544). Declared-but-absent ids are not a refusal — the builder
-  // refuses what arrived untraceable, not what didn't arrive; the manifest
-  // and ledger record the truth. Plan `exclusions` still remove first
-  // (§7.2:544): a plan-excluded record never reaches selection.
+  // declared in `expectedArtifactIds` — §7.5 rule 1 at the plan level — and
+  // its refs must carry the §7.4 form and resolve into the input set
+  // (T-014's packet-level lineage, `enforceSourceLineage`). The declaration
+  // check and the lineage checks all precede the budget test inside
+  // `include`, so a record that would have been excluded-by-budget is
+  // refused all the same: budget-luck never hides a provenance violation
+  // (nothing silent, §7.2:544). The lineage checks also run for a
+  // Layer-3-class record already captured by an earlier layer (Layer 1):
+  // every Layer-3-class record the builder sees — the T-013 declaration
+  // posture, mirrored. Declared-but-absent ids are not a refusal — the
+  // builder refuses what arrived untraceable, not what didn't arrive; the
+  // manifest and ledger record the truth. Plan `exclusions` still remove
+  // first (§7.2:544): a plan-excluded record never reaches the scan and is
+  // recorded `excluded-by-plan` — the builder refuses what arrived
+  // untraceable, not what didn't arrive.
   for (const record of pool) {
     if (!isDistilled(record)) continue
     if (plan.distillation !== undefined && !plan.distillation.expectedArtifactIds.includes(record.id)) {
@@ -731,6 +816,7 @@ export function buildContextPacket(
         `untraceable distilled entry "${record.id}" — the plan's distillation.expectedArtifactIds does not declare it (§7.5 rule 1: no untraceable summary chains)`,
       )
     }
+    if (plan.distillation !== undefined) enforceSourceLineage(record, inputIds)
     if (layerOf.has(record.id)) continue
     include(record, 3)
   }
@@ -752,6 +838,26 @@ export function buildContextPacket(
     if (excludedByPlan.has(record.id)) return { id: record.id, disposition: 'excluded-by-plan' as const }
     return { id: record.id, disposition: 'excluded-by-budget' as const }
   })
+
+  // T-014: per-ref resolution recorded on the packet entry — strict mode
+  // only (the block present), included Layer-3 entries only. Each ref's
+  // disposition is read off the final manifest, so a ref naming an excluded
+  // input records that exclusion rather than hiding it — the §7.5 chain
+  // stays walkable through exclusions (§7.2:544). The lookup cannot miss:
+  // every ref id passed the input-set check above and the manifest covers
+  // every input id exactly once. The field rides the entry, never the
+  // fingerprint (`selected` stays `{id, contentHash}` in packet order), and
+  // is never added under a blockless plan — blockless output stays
+  // byte-identical (pinned by Gate 1.14's untouched snapshot).
+  if (plan.distillation !== undefined) {
+    const manifestById = new Map(manifest.map((m) => [m.id, m]))
+    for (const entry of layers.distilled) {
+      entry.sourceRefResolutions = (entry.sourceRefs ?? []).map((ref) => ({
+        ref,
+        disposition: manifestById.get(refArtifactId(ref))!.disposition,
+      }))
+    }
+  }
 
   const sumRefs = (refs: ArtifactRef[]): number => refs.reduce((sum, r) => sum + r.estimatedTokens, 0)
   const ledger: ContextPacket['ledger'] = {

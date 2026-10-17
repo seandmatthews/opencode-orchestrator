@@ -337,8 +337,18 @@ try {
   // and recomputes planHashOf, so a plan carrying a VALID distillation block
   // (with a packet built from that parsed plan) inspects exit 0, and an
   // invalid block still exits non-zero with no body.
-  const distPlanRaw = { ...PLAN_A, distillation: { expectedArtifactIds: ['distilled-research'] } }
-  const distPacket = buildContextPacket(parseContextPlan(distPlanRaw), ARTIFACTS, { model: MODEL, jobId: 'c01' })
+  // T-014 corrected this strict-mode fixture at preserved assertion strength
+  // (the ticket's provision for T-013 landed fixtures whose refs do not
+  // resolve): the strict builder now refuses sourceRefs dead against the
+  // build's input set, so the round-trip rides a dedicated artifact citing
+  // included inputs. Every blockless fixture above — including
+  // distilled-research's research-003/research-011 refs — is untouched
+  // (blockless pass-through stays byte-identical and dead-ref-tolerant), and
+  // no assertion below changed: the replacement is sized to the same 25
+  // tokens the assertions pin.
+  const strictResearch = { id: 'distilled-strict', type: 'distillation-report', contentHash: 'sha-dist-strict', sizeBytes: 100, sourceRefs: ['artifact:goal-primary#obs-1', 'artifact:schema-roles#obs-2'], content: 'e'.repeat(100) } // 25 tokens, refs resolve into included Layer-1 inputs
+  const distPlanRaw = { ...PLAN_A, exclusions: [...(PLAN_A.exclusions ?? []), { ids: ['distilled-research'] }], distillation: { expectedArtifactIds: ['distilled-strict'] } }
+  const distPacket = buildContextPacket(parseContextPlan(distPlanRaw), [...ARTIFACTS, strictResearch], { model: MODEL, jobId: 'c01' })
   const distPlanPath = join(sandbox, 'plan-distillation.json')
   const distPacketPath = join(sandbox, 'packet-distillation.json')
   writeFileSync(distPlanPath, JSON.stringify(distPlanRaw))

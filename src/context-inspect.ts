@@ -1,4 +1,6 @@
-// Context inspector (T-012) — read-only CLI over a context plan + packet.
+// Context inspector (T-012; claim-chain lineage rendering + strict-keyed
+// packet validation added by T-014) — read-only CLI over a context plan +
+// packet.
 //
 //   npm run context -- --plan <path> --packet <path> [--json] [--run-root <path>]
 //
@@ -8,23 +10,42 @@
 // distilled included artifacts, excluded artifacts with reasons, L3 source
 // chains, context fingerprint (producerless components shown as no-producer)
 // — the token-free precursor of the Milestone-7 §26.4 UI, exactly as the dag
-// dump is §26.2's. `--json` emits the same structure as JSON — the future
-// feed for that UI.
+// dump is §26.2's. T-014 adds the §7.5 rules 2-3 chain render alongside (never
+// replacing) the one-hop `sources:` line and the `sourceChains` --json shape:
+// a per-distilled-entry walk of every sourceRef with its resolution status —
+// `included (layer N)` / `excluded-by-plan` / `excluded-by-budget`,
+// expanded transitively through included Layer-3 entries in the packet,
+// depth-labeled and cycle-safe (a revisit renders the terminated marker
+// `↺ <id>`, self-reference included). In strict mode (the plan carries a
+// `distillation` block) statuses come from the recorded
+// `sourceRefResolutions`; in blockless mode they are computed at render
+// time against the manifest, where a dead ref renders `unresolved` and does
+// NOT refuse — the blockless builder verbatim-copies refs and never
+// promised resolution. `--json` emits the same structure as JSON — the
+// future feed for that UI.
 //
 // Paths resolve absolute or against --run-root (default C:\swarm — same
 // literal as src/cli.ts, decisions.md run root). Refusals exit non-zero
 // BEFORE any body is printed (the T-005/T-006 refusal pattern): missing
 // --plan/--packet, missing file, unparseable JSON, a packet failing
 // validation (recorded ledger inconsistent with recomputation, or recorded
-// total over cap), fingerprint mismatch on recompute. The CLI never writes:
-// input files are byte-identical after an inspect (pinned by Gate 1.13).
+// total over cap), fingerprint mismatch on recompute — and, keyed to the
+// strict mode the plan declares (T-014), a Layer-3 entry missing its
+// `sourceRefResolutions`, a recorded ref malformed/absent from
+// `sourceRefs`/dead against the manifest, or a recorded disposition
+// disagreeing with the manifest: the strict builder resolves before
+// recording, so a packet like that was not produced by this builder — it
+// is tamper. The CLI never writes: input files are byte-identical after an
+// inspect (pinned by Gate 1.13).
 import { existsSync, readFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import {
   ContextRefusal,
   fingerprintHashOf,
   parseContextPlan,
+  parseSourceRef,
   planHashOf,
+  refArtifactId,
   type ArtifactRef,
   type ContextLayer,
   type ContextPacket,
@@ -47,11 +68,16 @@ Options:
 
 Renders the §26.4 fields: token budget (cap + per-layer ledger), the
 per-layer included artifacts, excluded artifacts with reasons, Layer-3
-source chains, and the context fingerprint. Refusals exit non-zero and
-print no body: missing --plan/--packet, missing file, unparseable JSON,
-a packet failing validation (recorded ledger inconsistent with
-recomputation, or recorded total over cap), fingerprint mismatch on
-recompute. The inspector never writes.`
+source chains, the §7.5 claim-chain lineage walk (transitive, cycle-safe),
+and the context fingerprint. Refusals exit non-zero and print no body:
+missing --plan/--packet, missing file, unparseable JSON, a packet failing
+validation (recorded ledger inconsistent with recomputation, or recorded
+total over cap), fingerprint mismatch on recompute — and, when the plan
+carries a "distillation" block (strict mode), a Layer-3 entry missing its
+per-ref resolutions or carrying a recorded ref that is malformed, absent
+from its sourceRefs, dead against the manifest, or disagrees with the
+manifest disposition (tamper — the strict builder resolves before
+recording). The inspector never writes.`
 
 interface Options {
   plan: string
@@ -129,8 +155,12 @@ const LAYER_NAMES = { 1: 'mandatory', 2: 'primary', 3: 'distilled', 4: 'supporti
 
 /** Structural validation of a packet against this slice's contract. Every
  * check refuses (no body) — the builder guarantees these; a packet that
- * fails them was not produced by this codebase or was tampered with. */
-function validatePacketShape(packet: unknown): asserts packet is ContextPacket {
+ * fails them was not produced by this codebase or was tampered with.
+ * `strict` is keyed to the plan: the `distillation` block present. In
+ * strict mode the per-ref `sourceRefResolutions` contract applies (T-014 —
+ * see `validateStrictResolutions`); in blockless mode it does not — the
+ * blockless builder verbatim-copies refs and never promised resolution. */
+function validatePacketShape(packet: unknown, strict: boolean): asserts packet is ContextPacket {
   if (!isPlainObject(packet)) refuse('packet: must be a JSON object')
   const p = packet as Record<string, unknown>
   if (p.jobId !== null && !isNonEmptyString(p.jobId)) refuse('packet: "jobId" must be a non-empty string or null')
@@ -174,6 +204,9 @@ function validatePacketShape(packet: unknown): asserts packet is ContextPacket {
       refuse(`${label}: "disposition" must be "included", "excluded-by-plan", or "excluded-by-budget" (got ${JSON.stringify(e.disposition)})`)
     }
   }
+  // T-014: strict-keyed per-ref resolution validation — after the layers
+  // and manifest shape loops above, which it reads.
+  if (strict) validateStrictResolutions(p)
   if (!isPlainObject(p.ledger)) refuse('packet: "ledger" must be an object')
   const ledger = p.ledger as Record<string, unknown>
   if (!isFiniteNumber(ledger.capTokens)) refuse('packet: "ledger.capTokens" must be a number')
@@ -201,6 +234,61 @@ function validatePacketShape(packet: unknown): asserts packet is ContextPacket {
   for (const key of ['promptVersion', 'roleVersion', 'reasoningConfiguration', 'projectManifestVersion']) {
     if (c[key] !== null) {
       refuse(`packet: fingerprint.components.${key} must be null — no producer exists this slice (recorded, never faked)`)
+    }
+  }
+}
+
+/** Strict-mode (distillation block present) per-ref resolution validation
+ * (T-014). The strict builder resolves every ref against its own manifest
+ * before recording, so a packet that fails any of these was not produced
+ * by this builder — tamper; each check refuses (no body) naming the
+ * offense. Per Layer-3 entry: the entry must carry `sourceRefResolutions`,
+ * one `{ ref, disposition }` per `sourceRefs` entry, each ref well-formed
+ * (the shared `parseSourceRef` predicate — never a second divergent
+ * copy), unique, and belonging to the entry's `sourceRefs`, with a legal
+ * disposition. The ref's artifact id must appear in the packet manifest —
+ * a dead ref (an id in neither the manifest nor the packet layers) is
+ * tamper evidence, because a strict build refuses dead refs and can never
+ * record one. The recorded disposition must agree with the manifest. */
+function validateStrictResolutions(p: Record<string, unknown>): void {
+  const layers = p.layers as Record<string, unknown>
+  const manifestById = new Map<string, { disposition: string; layer: number | undefined }>()
+  for (const entry of p.manifest as unknown[]) {
+    const e = entry as Record<string, unknown>
+    manifestById.set(e.id as string, { disposition: e.disposition as string, layer: e.layer as number | undefined })
+  }
+  for (const [i, ref] of (layers.distilled as unknown[]).entries()) {
+    const label = `packet: layers.distilled[${i}]`
+    const r = ref as Record<string, unknown>
+    const who = `${label} ("${r.id as string}")`
+    const sourceRefs = r.sourceRefs as string[]
+    const recorded = r.sourceRefResolutions
+    if (!Array.isArray(recorded) || recorded.length !== sourceRefs.length) {
+      refuse(`${who}: a strict-mode (distillation block present) Layer-3 entry must carry "sourceRefResolutions" — one { ref, disposition } per "sourceRefs" entry`)
+    }
+    const seen = new Set<string>()
+    for (const [j, res] of (recorded as unknown[]).entries()) {
+      const at = `${who} sourceRefResolutions[${j}]`
+      if (!isPlainObject(res)) refuse(`${at}: must be an object`)
+      const rec = res as Record<string, unknown>
+      if (!isNonEmptyString(rec.ref)) refuse(`${at}: "ref" must be a non-empty string`)
+      if (seen.has(rec.ref)) refuse(`${at}: duplicate recorded ref ${JSON.stringify(rec.ref)}`)
+      seen.add(rec.ref)
+      const parsed = parseSourceRef(rec.ref, at)
+      if (!sourceRefs.includes(parsed)) {
+        refuse(`${at}: ${JSON.stringify(parsed)} is absent from the entry's "sourceRefs"`)
+      }
+      if (rec.disposition !== 'included' && rec.disposition !== 'excluded-by-plan' && rec.disposition !== 'excluded-by-budget') {
+        refuse(`${at}: "disposition" must be "included", "excluded-by-plan", or "excluded-by-budget" (got ${JSON.stringify(rec.disposition)})`)
+      }
+      const targetId = refArtifactId(parsed)
+      const target = manifestById.get(targetId)
+      if (target === undefined) {
+        refuse(`${at}: ${JSON.stringify(parsed)} cites artifact id "${targetId}" which is in neither the manifest nor the packet layers — a strict-mode build refuses dead refs, so a recorded dead ref is tamper`)
+      }
+      if (target.disposition !== rec.disposition) {
+        refuse(`${at}: ${JSON.stringify(parsed)} records ${JSON.stringify(rec.disposition)} but the manifest records ${JSON.stringify(target.disposition)} — the resolution was not produced by this builder (it resolves against its own manifest before recording)`)
+      }
     }
   }
 }
@@ -285,6 +373,17 @@ interface ContextInspection {
   }
   excluded: { id: string; reason: 'excluded-by-plan' | 'excluded-by-budget' }[]
   sourceChains: { id: string; sourceRefs: string[] }[]
+  /** T-014: the §7.5 claim-chain walk, per distilled entry — every
+   * sourceRef with its resolution status (`included (layer N)` /
+   * `excluded-by-plan` / `excluded-by-budget` / `unresolved` / the
+   * terminated marker `↺ <id>`), expanded transitively through included
+   * Layer-3 entries, depth-labeled, cycle-safe. Statuses come from the
+   * recorded `sourceRefResolutions` in strict mode and are computed
+   * against the manifest at render time in blockless mode. */
+  lineageChains: {
+    claimId: string
+    lines: { depth: number; ref: string; status: string }[]
+  }[]
   fingerprint: {
     hash: string
     planHash: string
@@ -299,7 +398,64 @@ interface ContextInspection {
   }
 }
 
-function inspectionOf(packet: ContextPacket, planPath: string, packetPath: string): ContextInspection {
+/** The §7.5 rules 2-3 chain walk (T-014): per distilled entry, every
+ * sourceRef with its resolution status, expanded transitively when a ref
+ * names another Layer-3-class entry included in the packet (identified by
+ * carrying `sourceRefs` — the layers.distilled entries), depth-labeled and
+ * cycle-safe: a visited-set (seeded with the root claim) renders a revisit
+ * — including self-reference — as the terminated marker `↺ <id>` instead
+ * of recursing; termination of the walk is the render's duty, never a
+ * build-time concern (cycles build fine, src/context.ts). A ref naming an
+ * excluded input terminates at its recorded (strict) / manifest-computed
+ * (blockless) disposition; in blockless mode a ref with no manifest id
+ * renders `unresolved` — no refusal, the builder never promised
+ * resolution there. */
+function lineageChainsOf(packet: ContextPacket, strict: boolean): ContextInspection['lineageChains'] {
+  const manifestById = new Map<string, { disposition: ManifestEntry['disposition']; layer?: ContextLayer }>(
+    packet.manifest.map((m) => (m.disposition === 'included' ? [m.id, { disposition: m.disposition, layer: m.layer }] : [m.id, { disposition: m.disposition }])),
+  )
+  const distilledById = new Map(packet.layers.distilled.map((r) => [r.id, r]))
+  const statusOf = (entry: ArtifactRef, ref: string): string => {
+    if (strict) {
+      // validateStrictResolutions ran before any render: the recorded
+      // resolution exists, agrees with the manifest, and an included
+      // target's manifest entry carries its layer.
+      const recorded = (entry.sourceRefResolutions ?? []).find((r) => r.ref === ref)!
+      if (recorded.disposition !== 'included') return recorded.disposition
+      return `included (layer ${manifestById.get(refArtifactId(ref))!.layer})`
+    }
+    const target = manifestById.get(refArtifactId(ref))
+    if (target === undefined) return 'unresolved'
+    if (target.disposition !== 'included') return target.disposition
+    return `included (layer ${target.layer})`
+  }
+  const chains: ContextInspection['lineageChains'] = []
+  for (const claim of packet.layers.distilled) {
+    const lines: ContextInspection['lineageChains'][number]['lines'] = []
+    const visited = new Set<string>([claim.id])
+    const emitRefs = (entry: ArtifactRef, depth: number): void => {
+      for (const ref of entry.sourceRefs ?? []) {
+        const targetId = refArtifactId(ref)
+        const target = distilledById.get(targetId)
+        if (target !== undefined && visited.has(targetId)) {
+          lines.push({ depth, ref, status: `↺ ${targetId}` })
+          continue
+        }
+        const status = statusOf(entry, ref)
+        lines.push({ depth, ref, status })
+        if (target !== undefined && status.startsWith('included')) {
+          visited.add(targetId)
+          emitRefs(target, depth + 1)
+        }
+      }
+    }
+    emitRefs(claim, 0)
+    chains.push({ claimId: claim.id, lines })
+  }
+  return chains
+}
+
+function inspectionOf(packet: ContextPacket, planPath: string, packetPath: string, strict: boolean): ContextInspection {
   return {
     planPath,
     packetPath,
@@ -319,6 +475,7 @@ function inspectionOf(packet: ContextPacket, planPath: string, packetPath: strin
       .filter((e): e is ExcludedEntry => e.disposition !== 'included')
       .map((e) => ({ id: e.id, reason: e.disposition })),
     sourceChains: packet.layers.distilled.map((r) => ({ id: r.id, sourceRefs: r.sourceRefs ?? [] })),
+    lineageChains: lineageChainsOf(packet, strict),
     fingerprint: {
       hash: packet.fingerprint.hash,
       planHash: packet.fingerprint.components.planHash,
@@ -362,6 +519,16 @@ function printText(view: ContextInspection): void {
     console.log(`  ${e.id}  ${e.reason}`)
   }
   console.log('')
+  if (view.lineageChains.length > 0) {
+    console.log('source chains (lineage):')
+    for (const chain of view.lineageChains) {
+      console.log(`  ${chain.claimId}:`)
+      for (const line of chain.lines) {
+        console.log(`${'    '.repeat(line.depth + 1)}${line.ref} → ${line.status}`)
+      }
+    }
+    console.log('')
+  }
   console.log('context fingerprint')
   console.log(`  hash: ${view.fingerprint.hash}`)
   console.log(`  plan hash: ${view.fingerprint.planHash}`)
@@ -379,13 +546,15 @@ function main(): void {
   const packetPath = resolveInput(opts.packet, opts.runRoot)
 
   // Refusals before anything is printed: plan load + parse, packet load,
-  // packet shape, packet-vs-plan consistency.
+  // packet shape (strict-keyed to the plan's `distillation` block — T-014),
+  // packet-vs-plan consistency.
   const plan = parseContextPlan(readJsonFile(planPath, 'plan'))
   const packetRaw = readJsonFile(packetPath, 'packet')
-  validatePacketShape(packetRaw)
+  const strict = plan.distillation !== undefined
+  validatePacketShape(packetRaw, strict)
   validatePacketConsistency(packetRaw, plan)
 
-  const view = inspectionOf(packetRaw, planPath, packetPath)
+  const view = inspectionOf(packetRaw, planPath, packetPath, strict)
   if (opts.json) console.log(JSON.stringify(view, null, 2))
   else printText(view)
 }

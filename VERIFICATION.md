@@ -694,7 +694,10 @@ node node_modules/tsx/dist/cli.mjs scripts/check-context.mjs
 Pins T-012 (the first Milestone-2 slice, spec §34:2035-2047 minus shard
 distillation and source lineage — T-013 has since landed the
 distillation-contract half in `src/context.ts` and flipped this gate's two
-time-boxed assertions, noted below): the pure context module (`src/context.ts`
+time-boxed assertions, noted below, and T-014 has since landed the
+source-lineage half and corrected this gate's T-013-added strict
+round-trip fixture at preserved assertion strength, noted in Gate 1.14):
+the pure context module (`src/context.ts`
 — no I/O, no model knowledge, zero npm dependencies, `node:crypto` sha256
 only) and the read-only inspector CLI (`npm run context -- --plan <path>
 --packet <path> [--json] [--run-root <path>]`, `src/context-inspect.ts` —
@@ -789,11 +792,11 @@ must reconcile the fingerprint with T-007's `input_context_hash`), the
 `context_plans`/`context_packets` store tables (§27:1826-1827 — needs
 T-006's landed store plus a pipeline producer), the §7.3-7.5 pipeline
 distiller stage (the record/contract level — `DistillationPlan`
-semantics, distilled-claim records, the §7.5 rule-1 validator — is pinned
-by Gate 1.14 since T-013; the pipeline stage that produces and consumes
-them is carved and owns its own Gate 2 run), packet-level lineage
-enforcement and multi-hop chain resolution (§7.5 rules 2-3, the carved
-successor ticket), the artifact store itself, the full §7.7 fingerprint
+semantics, distilled-claim records, the §7.5 rule-1 validator, and since
+T-014 the packet-level lineage enforcement and multi-hop chain resolution
+of §7.5 rules 2-3 — is pinned by Gate 1.14; the pipeline stage that
+produces and consumes them is carved and owns its own Gate 2 run), the
+artifact store itself, the full §7.7 fingerprint
 (the four producerless components stay null), and the §26.4 UI (the CLI
 is the token-free precursor, as the dag dump is §26.2's). Gate 2 is not
 required and not run: the slice touches none of Gate 2's triggers — it
@@ -802,13 +805,13 @@ adds `src/context.ts`, `src/context-inspect.ts`, and
 pipeline file. Gate 3 n/a (no adapter; the model enters only as the
 fingerprint's CLI/config string).
 
-## Gate 1.14 — shard distillation core (seconds, fast tier)
+## Gate 1.14 — shard distillation core + packet source lineage (seconds, fast tier)
 
 ```bash
 node node_modules/tsx/dist/cli.mjs scripts/check-distillation.mjs
 ```
 
-Pins T-013 (the second and final contract-level slice of Milestone 2, spec
+Pins T-013 (the second contract-level slice of Milestone 2, spec
 §34:2035-2047): the shard-distillation contract T-012 reserved —
 `DistillationPlan` (§7.1:507, the type the spec uses but never defines;
 chosen here and documented), `parseDistillationReport` (§23.2:1358-1381,
@@ -872,24 +875,104 @@ functions directly plus the inspector CLI as a list-form subprocess over
   `parseContextPlan` and recomputes `planHashOf` — no CLI change needed);
   a plan carrying an invalid block exits non-zero with no body.
 
+**Packet source lineage (T-014 — the third and final contract-level slice
+of Milestone 2, extending this gate in place, completing the build list of
+spec §34:2035-2047):** the builder-input lineage enforcement, per-ref
+resolution recording, and claim-chain inspection that T-013 explicitly
+carved (its pre-authorized follow-up). Opt-in, keyed to the
+`distillation` block — **a locked decision, documented in
+`src/context.ts`'s module header**: a blockless plan has no declared-input
+contract to enforce against (`expectedArtifactIds` is the block's own
+field), tightening would flip previously-valid inputs (Gate 1.13's
+blockless fixtures ride dead-ref pass-through by design), and no pipeline
+builds strict packets yet, so default-on buys nothing today; a future
+change-set may tighten and must do so by explicitly flipping those gate
+fixtures — a decision to be made, not an omission. A blockless plan builds
+byte-identically to its pre-T-014 output and carries no resolution field.
+The gate asserts:
+
+- **builder ref enforcement** (strict mode only): a Layer-3-class record
+  whose `sourceRefs` carry a malformed entry — the bare §23.2:1371-1377
+  `id#anchor` spelling, a missing anchor, a doubled `#` — or a ref whose
+  `<id>` is not in the build's input set (the canon of input artifact ids,
+  every disposition, not just inclusions) is refused naming the record id
+  and the dead/malformed ref, both when the record would fit and when it
+  would be `excluded-by-budget` (the checks sit in the Layer-3 pass-through
+  scan before the budget test inside `include`, mirroring T-013's
+  declaration-before-budget order; the counterfactual is pinned: the same
+  dead-ref record at the same tight cap rides `excluded-by-budget`
+  unchecked without the block); a declared Layer-3-class record captured by
+  Layer 1 is still a check target — every Layer-3-class record the builder
+  sees; plan-excluded records never reach the scan and are recorded
+  `excluded-by-plan` (the builder refuses what arrived untraceable, not
+  what didn't arrive); anchors are not resolved (no store, §34:2028); the
+  format predicate is T-013's single `parseSourceRef`, exported and
+  reused — never a second divergent copy;
+- **per-ref resolution recording**: a resolving strict build is admitted,
+  and each included Layer-3 entry carries `sourceRefResolutions` — the
+  `{ ref, disposition }` shape, one per `sourceRefs` entry, the field name
+  chosen at implementation and pinned here — with all three dispositions
+  exercised (`included`; a ref naming an `excluded-by-plan` input
+  recording exactly that; a ref naming an `excluded-by-budget` input
+  likewise, agreeing with the manifest); two Layer-3 records citing each
+  other build fine, and so does self-citation (resolution is against the
+  input id set, so cycles build; termination is the render's duty); the
+  field rides the entry, never the fingerprint (`selected` stays
+  `{id, contentHash}` in packet order, recomputed hash equals the recorded
+  hash), and two strict builds from identical inputs stay byte-identical;
+- **claim-chain rendering** (the inspector; no new CLI flags): a new
+  `source chains (lineage):` text section and a new `--json`
+  `lineageChains` field render, per distilled entry, every sourceRef with
+  its status — `included (layer N)` / `excluded-by-plan` /
+  `excluded-by-budget` — expanded transitively through included Layer-3
+  entries of the packet, depth-labeled and cycle-safe (a visited-set
+  renders a revisit, self-reference included, as the terminated marker
+  `↺ <id>`); the existing one-hop `sources:` line and the `--json`
+  `sourceChains` shape are untouched (Gate 1.13 pins both); statuses come
+  from the recorded `sourceRefResolutions` in strict mode and are computed
+  at render time against the manifest in blockless mode, where a dead ref
+  renders `unresolved` and does NOT refuse — the blockless builder
+  verbatim-copies refs and never promised resolution (the keying that
+  keeps Gate 1.13's `research-003`-refs fixtures green untouched);
+- **strict-keyed inspector refusals** (exit non-zero, no body, naming the
+  offense; blockless stays exit-0): when the plan carries the block, a
+  Layer-3 entry missing `sourceRefResolutions`, a recorded ref that is
+  malformed (the shared `parseSourceRef`), absent from the entry's
+  `sourceRefs`, or dead against the manifest (an id in neither the
+  manifest nor the packet layers — tamper evidence, since a strict build
+  refuses dead refs and can never record one), or a recorded disposition
+  disagreeing with the manifest is each refused; the read-only sha256
+  proof covers the strict and blockless inspects alike (plan and packet
+  byte-identical after every successful and refused inspect).
+
+T-014 also corrected T-013's landed strict-mode fixtures whose refs did
+not resolve into their input sets (the ticket's provision, AGENTS.md #8):
+`dist-a` in the distillation fixtures now cites `artifact:note-b#obs-1`
+(ref value only — ids, hashes, sizes, contents untouched; the byte-for-byte
+blockless snapshot was re-pinned on exactly its `sourceRefs` line, whose
+planHash/fingerprint lines are ref-blind and byte-identical to the T-013
+pin), and Gate 1.13's T-013-added strict round-trip fixture rides a
+dedicated `distilled-strict` artifact citing included Layer-1 inputs,
+sized to the same 25 tokens its assertions pin — zero assertion text
+changed anywhere; every blockless fixture (including `research-003`'s
+dead-ref pass-through) is untouched.
+
 Not pinned here and carved by the ticket: the pipeline distiller stage
 (§7.3:546-563 — jobs still cannot receive artifacts: `inputArtifacts`/
 `contextPlan`/`role` remain refused job-spec fields, `src/scheduler.ts:153`,
-and dependencies gate dispatch order only, `src/runner.ts:173-189`), the
-packet-level lineage enforcement and multi-hop chain resolution of §7.5
-rules 2-3 (the pre-authorized carved successor ticket), real anchor
-resolution (needs the filesystem artifact store, §34:2028), the
+and dependencies gate dispatch order only, `src/runner.ts:173-189`), real
+anchor resolution (needs the filesystem artifact store, §34:2028), the
 `artifacts`/`artifact_lineage`/`context_plans`/`context_packets` store
 tables (§27:1825-1827 — blocked on that store and a pipeline producer),
 §7.5 rule 4 ("show source chain" is Milestone-7 UI — the inspector's
-existing sourceChains render stays the token-free precursor), and any
-advisory-ness change. Gate 2 is not required and not run: the slice
-touches none of Gate 2's triggers — no `src/runner.ts`, no adapter, no
-gate code, no workspace handling, no report-shape change (everything
-lives in `src/context.ts`, `scripts/check-context.mjs`, the new
-`scripts/check-distillation.mjs`, the one hook block in
-`scripts/verify.mjs`, and docs). Gate 3 n/a (no adapter; the model enters
-only as a CLI/config string).
+lineage render stays the token-free precursor), and any advisory-ness
+change. Gate 2 is not required and not run: neither slice touches any of
+Gate 2's triggers — no `src/runner.ts`, no adapter, no gate code, no
+workspace handling, no report-shape change (everything lives in
+`src/context.ts`, `src/context-inspect.ts`, `scripts/check-context.mjs`,
+`scripts/check-distillation.mjs`, the hook block in `scripts/verify.mjs`,
+and docs). Gate 3 n/a (no adapter; the model enters only as a CLI/config
+string).
 
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
