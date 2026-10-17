@@ -7,12 +7,13 @@ import { acquireCheckoutLock, releaseCheckoutLock } from './lock.js'
 import { createProbe } from './probe.js'
 import { runSkeleton } from './runner.js'
 import type { ResolvedJob } from './runner.js'
-import { parseJobsSpec } from './scheduler.js'
+import { parseJobsSpec, commandPairingRefusal } from './scheduler.js'
 import type { JobsSpec } from './scheduler.js'
 import { ingest } from './store/index.js'
 import type { WorkerAdapter } from './types.js'
 import { WorktreeProvider } from './workspace/worktree.js'
 import { OpenCodeWorker } from './worker/opencode.js'
+import { MachineWorker } from './worker/machine.js'
 
 const usage = `Stage-0 walking skeleton: fan out N headless worker agents over isolated git
 worktrees of one repo at one base SHA, then decide survival with machine gates.
@@ -29,8 +30,8 @@ Options:
                            see src/scheduler.ts) instead of planner briefs:
                            deterministic DAG-driven dispatch under
                            --concurrency, one candidate per job, per-job
-                           model/worker/timeoutMs/gates defaulting to the
-                           run-level flags. --goal is not required;
+                           model/worker/command/timeoutMs/gates defaulting
+                           to the run-level flags. --goal is not required;
                            --candidates and the planner are ignored.
                            Spec refusals exit 1 before the checkout lock,
                            repo validation, or any artifacts dir exists.
@@ -42,7 +43,10 @@ Options:
   --reviewer-model <id>    Reviewer-tier model ID for advisory post-gate review
                            of passing candidates (default: zai-coding-plan/glm-5.3)
   --no-review              Skip the reviewer phase
-  --worker <id>            Worker adapter (default: opencode)
+  --worker <id>            Worker adapter (default: opencode). "machine"
+                           (T-017) is per-job only — a --jobs spec's
+                           worker+command fields; run-level --worker machine
+                           is refused at parse time.
   --candidates <n>         Number of candidates (default: 3)
   --concurrency <n>        Parallel lanes (default: same as candidates)
   --base <ref>             Base commit: branch or SHA (default: HEAD)
@@ -128,7 +132,19 @@ function parseArgs(argv: string[]): Options {
       case '--no-planner': opts.plannerModel = null; break
       case '--reviewer-model': opts.reviewerModel = value(); break
       case '--no-review': opts.reviewerModel = null; break
-      case '--worker': opts.workerId = value(); break
+      case '--worker': {
+        const id = value()
+        // T-017: `machine` is refused at run level, at parse time (the
+        // --max-attempts refusal pattern): the planner and reviewer phases
+        // execute through the run-level worker (src/runner.ts) and no
+        // machine command exists for them. Machine selection is per-job, in
+        // a --jobs spec's worker+command fields.
+        if (id === 'machine') {
+          throw new Error(`--worker machine is not valid at run level — the planner and reviewer phases run through the run-level worker and have no machine command; select machine per job in a --jobs spec (worker: "machine" + command)`)
+        }
+        opts.workerId = id
+        break
+      }
       case '--candidates': opts.candidates = Number(value()); break
       case '--concurrency': opts.concurrency = Number(value()); break
       case '--base': opts.base = value(); break
@@ -186,11 +202,15 @@ function loadJobsSpec(path: string): JobsSpec {
 /** Bind the parsed spec to run-level defaults and adapter/gate objects. */
 function resolveJobs(jobsSpec: JobsSpec, opts: Options): ResolvedJob[] {
   const workers = new Map<string, WorkerAdapter>()
-  const workerFor = (id: string): WorkerAdapter => {
-    let w = workers.get(id)
+  // T-017: the cache keys by adapter id + serialized command, so two machine
+  // jobs with identical commands share one instance and distinct commands
+  // get distinct instances (pinned behaviorally by Gate 1.17 S5).
+  const workerFor = (id: string, command?: string[]): WorkerAdapter => {
+    const key = command !== undefined ? `${id}\u0000${JSON.stringify(command)}` : id
+    let w = workers.get(key)
     if (!w) {
-      w = createWorker(id, opts)
-      workers.set(id, w)
+      w = createWorker(id, opts, command)
+      workers.set(key, w)
     }
     return w
   }
@@ -200,7 +220,7 @@ function resolveJobs(jobsSpec: JobsSpec, opts: Options): ResolvedJob[] {
     dependencies: j.dependencies,
     brief: j.brief,
     model: j.model ?? opts.model,
-    worker: workerFor(j.worker ?? opts.workerId),
+    worker: workerFor(j.worker ?? opts.workerId, j.command),
     timeoutMs: j.timeoutMs ?? opts.timeoutMs,
     gates: (j.gates ?? opts.gates).map((g) => new CommandGate(g.name, g.command)),
     // T-015: probes attach via the --jobs spec only — no run-level flag this
@@ -209,15 +229,28 @@ function resolveJobs(jobsSpec: JobsSpec, opts: Options): ResolvedJob[] {
   }))
 }
 
-function createWorker(workerId: string, opts: Options): WorkerAdapter {
+/** The adapter ids createWorker knows. Shared with the early per-job
+ *  validation in main() so an unknown job worker id refuses BEFORE the
+ *  checkout lock or any artifacts dir exists (the AC's zero-side-effects
+ *  refusal set), with exactly the message the registry itself throws. */
+const WORKER_ADAPTERS: readonly string[] = ['opencode', 'machine']
+
+function createWorker(workerId: string, opts: Options, command?: string[]): WorkerAdapter {
   switch (workerId) {
     case 'opencode':
       if (!existsSync(opts.opencodeBin)) {
         throw new Error(`opencode executable not found at ${opts.opencodeBin} — run: npm install`)
       }
       return new OpenCodeWorker(opts.opencodeBin)
+    case 'machine':
+      // Constructed from the job's command (resolveJobs). The run-level call
+      // site can never land here: --worker machine is refused at parse time.
+      if (command === undefined) {
+        throw new Error(`the machine worker requires a per-job command argv (a --jobs spec "command" field)`)
+      }
+      return new MachineWorker(command)
     default:
-      throw new Error(`unknown worker adapter '${workerId}' (available: opencode)`)
+      throw new Error(`unknown worker adapter '${workerId}' (available: ${WORKER_ADAPTERS.join(', ')})`)
   }
 }
 
@@ -228,6 +261,19 @@ async function main(): Promise<void> {
   // checkout lock, or any artifacts dir exists — a refusal must write
   // nothing (the T-007 --max-attempts parse-refusal pattern).
   const jobsSpec = opts.jobs ? loadJobsSpec(opts.jobs) : null
+  // T-017: the worker/command pairing rules and the per-job worker-id
+  // validity refuse here — before the checkout lock or any artifacts dir —
+  // never inside resolveJobs, which runs after the checkout lock and would
+  // break the zero-side-effects refusal pattern.
+  if (jobsSpec) {
+    const pairing = commandPairingRefusal(jobsSpec.jobs, opts.workerId)
+    if (pairing) throw new Error(`--jobs spec refused: ${pairing}`)
+    for (const j of jobsSpec.jobs) {
+      if (j.worker !== undefined && !WORKER_ADAPTERS.includes(j.worker)) {
+        throw new Error(`unknown worker adapter '${j.worker}' (available: ${WORKER_ADAPTERS.join(', ')})`)
+      }
+    }
+  }
   // Concurrency default (generalized: the job count in --jobs mode, the
   // candidate count in default mode).
   if (!opts.concurrency) opts.concurrency = jobsSpec ? jobsSpec.jobs.length : opts.candidates

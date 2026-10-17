@@ -545,6 +545,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.17: MachineWorker adapter (T-017) ----------
+section('Gate 1.17 — MachineWorker adapter (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-machine-worker.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'machine-worker self-check exit 0')
+} catch (e) {
+  fail(`machine-worker self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
