@@ -54,3 +54,4 @@ Rules:
 | T-015 | Probe layer first slice: Probe seam, EvidenceBundle contract, command + test probes | high | done 2026-10-17 |
 | T-016 | Filesystem artifact store: artifacts + probe_runs records, hash-at-ingest, re-verification | high | proposed |
 | T-017 | MachineWorker adapter: deterministic-command worker behind WorkerAdapter (spec §5.3, §34) | high | proposed |
+| T-018 | Benchmark probe: repeated measured command → quantitative EvidenceBundle (per-run durations + min/median/p95) | medium | proposed |
