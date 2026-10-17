@@ -1,24 +1,10 @@
 /* zcode-workflow
-description: "Implement a batch of Inference Refinery tickets end to end: one
-  sequential worktree lane per ticket — implementer subagent, script-run
-  fast-tier gates, independent reviewer with kick-back rounds, full e2e gate
-  when the pipeline is touched, --no-ff merge with the repo's commit
-  conventions, then the fast tier re-verified on main with auto-revert on red."
-whenToUse: "When this repo has forged, proposed tickets in docs/tickets/ ready
-  to be implemented. Pass the batch in dependency order as tickets: [{ id, slug,
-  deps }] where slug is from the filename docs/tickets/<id>-<slug>.md. Lanes run
-  strictly sequentially (store-schema lanes layer); a blocked lane keeps its
-  branch and worktree for inspection and its dependents are skipped; every merge
-  is decided by machine gates, never by claims. Requires the repo charter
-  (AGENTS.md), gate tiers (VERIFICATION.md), and the git identity override to
-  exist."
+description: Implement a batch of Inference Refinery tickets end to end - one sequential worktree lane per ticket (implementer subagent, script-run fast-tier gates, independent reviewer with kick-back rounds, full e2e gate when the pipeline is touched, no-ff merge with the repo commit conventions, then the fast tier re-verified on main with auto-revert on red).
+whenToUse: When this repo has forged, proposed tickets in docs/tickets/ ready to be implemented - pass the batch in dependency order. Lanes run strictly sequentially; a blocked lane keeps its branch and worktree for inspection and its dependents are skipped; every merge is decided by machine gates, never by claims.
 args:
   tickets:
     type: json
-    description: 'The ticket batch, in dependency order: array of { id: "T-013",
-      slug: "shard-distillation", deps: ["T-009"] }. deps are enforced only for
-      ids inside the batch; ids outside it are assumed already landed on main.'
-    required: true
+    description: The ticket batch in dependency order, as an array of objects with id, slug, and deps fields. deps are enforced only for ids inside the batch; ids outside it are assumed already landed on main. Omitting it fails fast with an instruction message.
 */
 const repo = "C:/Users/matth/Documents/opencode-orchestrator";
 const laneRoot = "C:/Users/matth/Documents/orchestrator-lanes";
