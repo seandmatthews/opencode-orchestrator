@@ -1,6 +1,6 @@
 # T-014 — Packet-level source lineage: builder-input ref enforcement + claim-chain inspection
 
-**Status:** proposed
+**Status:** done 2026-10-17
 **Category:** engine
 **Value (1-5):** 3 · **Risk (1-5):** 2
 **Depends on:** T-013 — and T-013 is paper as of this ticket: its commit at HEAD `c913903` is docs-only (verified: `git show --stat c913903` → exactly 2 files, `docs/tickets/README.md` +1 and the T-013 file +289), `src/context.ts:367-369` still refuses a present `distillation` block, and grep for `DistillationPlan`/`parseDistillationReport`/`check-distillation` over `src/`, `scripts/`, `package.json` returns zero hits (verified this session). **This ticket cannot start until T-013's implementation lands** — the T-009:170-173 paper-dependency precedent, stated plainly rather than papered over. What follows is written against T-013's pinned surface and must be reconciled against what actually lands.
@@ -221,7 +221,7 @@ spirit, AGENTS.md #7).
 
 ## Acceptance criteria
 
-- [ ] Builder ref enforcement (strict mode): a Layer-3-class record whose `sourceRefs`
+- [x] Builder ref enforcement (strict mode): a Layer-3-class record whose `sourceRefs`
       carry a malformed entry (anything not `artifact:<id>#<anchor>`, including
       §23.2:1371-1377's bare form) or a ref whose `<id>` is not in the build's input
       set is refused — `ContextRefusal` naming the record id and the ref — both when
@@ -229,48 +229,130 @@ spirit, AGENTS.md #7).
       precedes the budget test); plan-excluded records are recorded `excluded-by-plan`,
       not checked; anchors are not resolved (no store, §34:2028) — pinned by the
       **lineage gate**.
-- [ ] Per-ref resolution recording: a strict-mode build records each included
+- [x] Per-ref resolution recording: a strict-mode build records each included
       Layer-3 entry's per-ref resolution agreeing with the build's manifest, with all
       three dispositions exercised; two Layer-3 records citing each other build fine;
       a blockless build is byte-identical to the pre-change fixture output and carries
       no resolution field; fingerprint and planHash are unchanged by the new field —
       pinned by the **lineage gate** + **Gate 1.13**'s determinism/fingerprint
       assertions (`scripts/check-context.mjs:127-131`).
-- [ ] Inspector chain rendering: a strict-mode packet renders each distilled entry's
+- [x] Inspector chain rendering: a strict-mode packet renders each distilled entry's
       refs with resolution status, expanded transitively through included Layer-3
       entries, cycle-safe (a cycle or self-reference renders terminated, not looping),
       in both text and `--json`; the existing `sources:` line and `--json`
       `sourceChains` shape are untouched; a blockless packet with an unresolvable ref
       still inspects exit 0, rendering it `unresolved` — pinned by the **lineage
       gate**'s CLI section + **Gate 1.13**'s inspector assertions (`:285-291`, `:302`).
-- [ ] Inspector refusals (strict mode only): a dead ref (id in neither manifest nor
+- [x] Inspector refusals (strict mode only): a dead ref (id in neither manifest nor
       packet layers), a Layer-3 entry missing the resolution field, a resolution
       disagreeing with the manifest, and a malformed recorded ref each exit non-zero
       with no body, naming the offense — pinned by the **lineage gate**'s CLI section
       (the Gate 1.13 inspector pattern: exit codes, no-body-on-refusal, sha256
       read-only proof, `scripts/check-context.mjs:277-420`).
-- [ ] No drift: every existing Gate 1.13 assertion stays green untouched — its
+- [x] No drift: every existing Gate 1.13 assertion stays green untouched — its
       fixtures ride blockless plans, including the `research-003`-refs fixture at
       `scripts/check-context.mjs:70`, which must not be edited; T-013's landed gate
       stays green, with any strict-mode-fixture ref corrections made in this
       change-set at preserved assertion strength (AGENTS.md #8) — pinned by **Gate
       1.13 + T-013's gate + the lineage gate** all green in `npm run verify`, and
       change-set review.
-- [ ] The lineage gate (extension of T-013's `scripts/check-distillation.mjs` if that
+- [x] The lineage gate (extension of T-013's `scripts/check-distillation.mjs` if that
       is what landed, else the next free integer at landing — content pinned above
       regardless) is hooked into `scripts/verify.mjs` after the Gate 1.13 block before
       the fast-tier finish (`:508-518`), runs token-free over hand-built fixtures, and
       VERIFICATION.md carries its section in the same change-set (AGENTS.md #6) —
       pinned by `npm run verify` completing ALL GREEN with the section running.
-- [ ] Zero pipeline surface: `src/runner.ts`, `src/scheduler.ts`, adapters, gate
+- [x] Zero pipeline surface: `src/runner.ts`, `src/scheduler.ts`, adapters, gate
       code, store, `RunReport` shape, and `package.json` are untouched; zero new npm
       dependencies — pinned by **Gate 0** (`npm run typecheck`), the full fast tier
       (`npm run verify` ALL GREEN), and change-set review.
-- [ ] The blockless-tightening decision (stays keyed to the `distillation` block) is
+- [x] The blockless-tightening decision (stays keyed to the `distillation` block) is
       documented in the change-set itself — code comment + VERIFICATION.md wording —
       closing the question T-013:39-42 handed here — pinned by change-set review.
-- [ ] Ticket status + index row move in the same change-set (tickets README rules) —
+- [x] Ticket status + index row move in the same change-set (tickets README rules) —
       pinned by change-set review.
+
+## Landed
+
+2026-10-17, lane branch `ticket/T-014-packet-source-lineage`. T-013's implementation
+had landed before this ticket started (commit `e8a31b7`, merged `448c3c9` — Gate 1.14
+with `scripts/check-distillation.mjs`), so the ticket's at-landing moves resolved as
+follows.
+
+What changed:
+
+- **The lineage gate is an extension of T-013's landed
+  `scripts/check-distillation.mjs`** — Gate 1.14 keeps its number (the extension arm
+  of the ticket's at-landing move), already hooked in `scripts/verify.mjs` after the
+  Gate 1.13 block and before the fast-tier finish; the hook's section label now names
+  both halves ("shard distillation core + packet source lineage").
+- **`src/context.ts`** (pure module unchanged in character: no I/O, no model
+  knowledge, zero npm dependencies): `parseSourceRef`/`refArtifactId` — T-013's
+  single ref-format definition — are now exported and reused at the packet level
+  (never a second divergent copy); `enforceSourceLineage` runs per Layer-3-class
+  record in the pass-through scan, after T-013's declaration check and before the
+  budget test inside `include` (format + input-set resolution; refusals name the
+  record id and the ref; a Layer-1-captured declared record is still checked); the
+  new packet field is **`sourceRefResolutions`** — `{ ref, disposition }[]`, one per
+  `sourceRefs` entry, recorded only on included Layer-3 entries built under the
+  block, dispositions read off the final manifest (name chosen at implementation as
+  the ticket reserved; documented on the `SourceRefResolution` interface); the
+  blockless-tightening decision (stays keyed to the block) is documented in the
+  module header as a locked decision with its revisit conditions.
+- **`src/context-inspect.ts`** (no new flags): `validatePacketShape` gained a
+  `strict` parameter keyed to the plan's block, adding the per-ref validation — a
+  Layer-3 entry missing `sourceRefResolutions`, a recorded ref malformed (the shared
+  `parseSourceRef`), absent from the entry's `sourceRefs`, or dead against the
+  manifest, or a recorded disposition disagreeing with the manifest, each refuses
+  non-zero with no body naming the offense; `lineageChains` added to the inspection
+  view — a new `source chains (lineage):` text section and `--json` field rendering
+  per distilled entry every ref with its status (`included (layer N)` /
+  `excluded-by-plan` / `excluded-by-budget` / `unresolved` / the terminated marker
+  `↺ <id>`), transitive through included Layer-3 entries, depth-labeled, cycle-safe;
+  statuses come from the recorded resolutions in strict mode, computed at render
+  time in blockless mode; the one-hop `sources:` line and the `--json`
+  `sourceChains` shape are untouched.
+- **Deviations — the ticket's anticipated fixture corrections, both
+  strength-preserving and scoped to ref values (AGENTS.md #8):**
+  1. `scripts/check-distillation.mjs`: `dist-a` cited `artifact:research-001#obs-1`
+     against input set `{dist-a, note-b}` — dead under the new enforcement, so the
+     declared-entry-admitted assertions went red exactly as the ticket predicted.
+     Corrected to `artifact:note-b#obs-1`; the byte-for-byte blockless snapshot was
+     re-pinned on exactly its `sourceRefs` line (planHash and fingerprint lines are
+     ref-blind and byte-identical to the T-013 pin — documented in the snapshot
+     comment). No assertion changed.
+  2. `scripts/check-context.mjs`: the T-013-added strict round-trip fixture (its
+     :336-347 block, not a blockless rider) built under the block with
+     `distilled-research` citing `research-003`/`research-011`, absent from the
+     input set — that build now refuses. Corrected to a dedicated `distilled-strict`
+     artifact citing included Layer-1 inputs (`goal-primary`/`schema-roles`), sized
+     to the same 25 tokens its assertions pin, with `distilled-research` removed via
+     plan exclusion. Every assertion text unchanged; every blockless fixture —
+     including the `research-003`-refs fixture at :70 — untouched. Gate 1.13: ALL
+     GREEN, 126 ok lines, zero assertion edits.
+- **Blockless-tightening decision**: documented in `src/context.ts`'s module header
+  (code comment) and in VERIFICATION.md's Gate 1.14 lineage paragraph — enforcement
+  stays keyed to the `distillation` block; revisit conditions stated.
+
+Measured this session (lane, after the full change-set):
+
+- Gate 0: `npm run typecheck` → exit 0.
+- Full fast tier: `node scripts/verify.mjs fast` → "verify (fast) complete: ALL
+  GREEN", exit 0 — Gates 0/1/0.5/1.5/1.6-1.14, Gate 1.13 "check-context: ALL
+  GREEN" untouched, Gate 1.14 (extended) ALL GREEN with **92 ok lines, up from
+  52** (+40: 19 builder-lineage assertions, 21 lineage-CLI assertions including
+  5 refusals × 3).
+- Gate 2 not run — the change-set touches none of VERIFICATION.md's Gate 2
+  triggers: no `src/runner.ts`, no adapter, no gate code, no workspace handling,
+  no report-shape change (the diff is `src/context.ts`, `src/context-inspect.ts`,
+  `scripts/check-distillation.mjs`, `scripts/check-context.mjs` (fixture
+  correction only), the `scripts/verify.mjs` section label, and docs). Any
+  successor that composes packets into prompts or consumes chains in the
+  pipeline owns a Gate 2 run. Gate 0.5 n/a (`src/parse.ts` untouched). Gate 3
+  n/a (no adapter).
+- Zero pipeline surface confirmed: `src/runner.ts`, `src/scheduler.ts`, adapters,
+  gate code, store, `RunReport`, and `package.json` untouched; zero new npm
+  dependencies.
 
 ## Verification
 
