@@ -692,7 +692,9 @@ node node_modules/tsx/dist/cli.mjs scripts/check-context.mjs
 ```
 
 Pins T-012 (the first Milestone-2 slice, spec §34:2035-2047 minus shard
-distillation and source lineage): the pure context module (`src/context.ts`
+distillation and source lineage — T-013 has since landed the
+distillation-contract half in `src/context.ts` and flipped this gate's two
+time-boxed assertions, noted below): the pure context module (`src/context.ts`
 — no I/O, no model knowledge, zero npm dependencies, `node:crypto` sha256
 only) and the read-only inspector CLI (`npm run context -- --plan <path>
 --packet <path> [--json] [--run-root <path>]`, `src/context-inspect.ts` —
@@ -711,12 +713,21 @@ item). It asserts:
 
 - **ContextPlan parsing** (`parseContextPlan`, refusals as `ContextRefusal`
   naming the offense, before anything is built): a valid plan parses;
-  unknown plan fields, a present `distillation` block (refused, never
-  silently ignored, until the §7.3-7.5 slice defines builder semantics),
-  `maxInputTokens ≤ 0`, a selector outside the §7.6:593-605 vocabulary, a
-  query naming no known selector field, and bad enum values
-  (`gateStatus`/`layer`/`orderBy`/`limit`/`sourceReferencePolicy`) are each
-  refused; parse normalization is key-order independent (same planHash).
+  unknown plan fields, `maxInputTokens ≤ 0`, a selector outside the
+  §7.6:593-605 vocabulary, a query naming no known selector field, and bad
+  enum values (`gateStatus`/`layer`/`orderBy`/`limit`/`sourceReferencePolicy`)
+  are each refused; parse normalization is key-order independent (same
+  planHash). **Time-box expired by T-013:** the retired sentence — "a
+  present `distillation` block (refused, never silently ignored, until the
+  §7.3-7.5 slice defines builder semantics)" — named this ticket as its
+  expiry. Its two time-boxed assertions were replaced in the same
+  change-set by strictly stronger coverage (no assertion weakened, removed
+  without replacement): a valid block parses with all fields intact while
+  an unknown sub-field inside the block is still refused naming it, and —
+  at the CLI — a plan carrying a valid block inspects exit 0 while an
+  invalid block still exits non-zero with no body. All other assertions
+  untouched and green, including the Layer-3 pass-through/budget fixtures,
+  which ride plans without a block.
 - **Determinism**: two builds from identical plan + artifact inputs give
   byte-identical packet JSON and the same fingerprint; input array order
   never matters (base canon is id-ascending).
@@ -776,14 +787,109 @@ Not pinned here and carved by the ticket: packet→prompt composition
 (anything consuming a packet in the pipeline owns its own Gate 2 run and
 must reconcile the fingerprint with T-007's `input_context_hash`), the
 `context_plans`/`context_packets` store tables (§27:1826-1827 — needs
-T-006's landed store plus a pipeline producer), distillation workflows
-(§7.3-7.5), the artifact store itself, the full §7.7 fingerprint (the four
-producerless components stay null), and the §26.4 UI (the CLI is the
-token-free precursor, as the dag dump is §26.2's). Gate 2 is not required
-and not run: the slice touches none of Gate 2's triggers — it adds
-`src/context.ts`, `src/context-inspect.ts`, and `scripts/check-context.mjs`
-plus one package.json script, and changes no pipeline file. Gate 3 n/a
-(no adapter; the model enters only as the fingerprint's CLI/config string).
+T-006's landed store plus a pipeline producer), the §7.3-7.5 pipeline
+distiller stage (the record/contract level — `DistillationPlan`
+semantics, distilled-claim records, the §7.5 rule-1 validator — is pinned
+by Gate 1.14 since T-013; the pipeline stage that produces and consumes
+them is carved and owns its own Gate 2 run), packet-level lineage
+enforcement and multi-hop chain resolution (§7.5 rules 2-3, the carved
+successor ticket), the artifact store itself, the full §7.7 fingerprint
+(the four producerless components stay null), and the §26.4 UI (the CLI
+is the token-free precursor, as the dag dump is §26.2's). Gate 2 is not
+required and not run: the slice touches none of Gate 2's triggers — it
+adds `src/context.ts`, `src/context-inspect.ts`, and
+`scripts/check-context.mjs` plus one package.json script, and changes no
+pipeline file. Gate 3 n/a (no adapter; the model enters only as the
+fingerprint's CLI/config string).
+
+## Gate 1.14 — shard distillation core (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-distillation.mjs
+```
+
+Pins T-013 (the second and final contract-level slice of Milestone 2, spec
+§34:2035-2047): the shard-distillation contract T-012 reserved —
+`DistillationPlan` (§7.1:507, the type the spec uses but never defines;
+chosen here and documented), `parseDistillationReport` (§23.2:1358-1381,
+the enforcement point §7.5 rule 1 has at the record level), the builder's
+plan-level untraceable-chain refusal, and planHash coverage of the block.
+**Zero behavior change to the pipeline** — nothing in `src/runner.ts`,
+`src/scheduler.ts`, the adapters, the gate code, or the store produces or
+consumes a distilled claim after this slice; a distiller is advisory
+compression, honored by construction (decisions.md: gates decide survival,
+models advise — the T-012 posture). Like Gate 1.13, it drives the pure
+functions directly plus the inspector CLI as a list-form subprocess over
+**hand-built fixtures** (no artifact store exists to produce inputs,
+§34:2028). Zero model tokens. It asserts:
+
+- **`DistillationPlan` parsing**: a valid block parses with
+  `expectedArtifactIds` intact — through `parseContextPlan` and the
+  exported `parseDistillationPlan` sub-parse alike; non-object blocks,
+  unknown sub-fields (refuse-don't-ignore, the T-009 unknown-field
+  posture), a non-array or empty `expectedArtifactIds`, non-string/empty
+  entries, and duplicate entries are each refused naming the offense.
+- **`parseDistillationReport`**: the §23.2:1358-1381 example — adapted to
+  the pinned §7.4:565-578 prefixed-ref form, which reconciles the
+  documented spec divergence (§23.2:1371-1377's bare `id#anchor` is
+  refused) — parses with camelCase normalization
+  (`sourceArtifacts`/`claims[].sourceRefs`/`disagreementRefs`);
+  `claims: []` is valid (a distiller that found nothing worth claiming
+  still produces the record — documented choice); `disagreement_refs` is
+  optional but validated and resolved exactly like `source_refs`; anchors
+  are opaque and never resolved (no store, §34:2028 — format +
+  declared-input-set resolution only). Every refusal names its offense,
+  and claim-level ones name the claim id: unknown fields at either level,
+  a missing/non-string/empty claim id, duplicate claim ids, an empty
+  `statement`, missing/empty `source_refs`, malformed refs (anything not
+  exactly `artifact:<id>#<anchor>` — a missing or doubled `#`, an empty id
+  or anchor, a non-string entry — and the bare `id#anchor` spelling
+  explicitly), empty/non-string `source_artifacts`, and any
+  `source_refs`/`disagreement_refs` entry whose `<id>` is not in the
+  report's declared `source_artifacts`.
+- **Builder integration**: with a `distillation` block present, an
+  undeclared Layer-3-class record is refused naming its id — both when it
+  would fit and when it would be `excluded-by-budget` (the declaration
+  check precedes the budget test, so budget-luck never hides a provenance
+  violation; the counterfactual is pinned: the same record under the same
+  tight cap rides `excluded-by-budget` when no block is present); a
+  declared entry is admitted with ledger and manifest identical to the
+  blockless build; declared-but-absent is not a refusal (the builder
+  refuses what arrived untraceable, not what didn't arrive); a
+  Layer-3-class record captured by Layer 1 is still a declaration-check
+  target — every Layer-3-class record the builder sees.
+- **Blockless plans ride unchanged**: a plan without the block builds
+  byte-identically to the pre-change fixture output — pinned as a
+  byte-for-byte snapshot (plans carrying `distillation` were refused
+  outright before this slice, so every previously-valid plan input is
+  untouched — the T-012:94-100 narrowed-hash stability argument, verbatim).
+- **planHash sensitivity**: a plan carrying the block hashes differently
+  from the same plan without it; different `expectedArtifactIds` hash
+  differently; the block changes the fingerprint through the planHash even
+  with identical inclusions.
+- **CLI round-trip**: a plan carrying a valid block, with a packet built
+  from that parsed plan, inspects exit 0 (the CLI parses via
+  `parseContextPlan` and recomputes `planHashOf` — no CLI change needed);
+  a plan carrying an invalid block exits non-zero with no body.
+
+Not pinned here and carved by the ticket: the pipeline distiller stage
+(§7.3:546-563 — jobs still cannot receive artifacts: `inputArtifacts`/
+`contextPlan`/`role` remain refused job-spec fields, `src/scheduler.ts:153`,
+and dependencies gate dispatch order only, `src/runner.ts:173-189`), the
+packet-level lineage enforcement and multi-hop chain resolution of §7.5
+rules 2-3 (the pre-authorized carved successor ticket), real anchor
+resolution (needs the filesystem artifact store, §34:2028), the
+`artifacts`/`artifact_lineage`/`context_plans`/`context_packets` store
+tables (§27:1825-1827 — blocked on that store and a pipeline producer),
+§7.5 rule 4 ("show source chain" is Milestone-7 UI — the inspector's
+existing sourceChains render stays the token-free precursor), and any
+advisory-ness change. Gate 2 is not required and not run: the slice
+touches none of Gate 2's triggers — no `src/runner.ts`, no adapter, no
+gate code, no workspace handling, no report-shape change (everything
+lives in `src/context.ts`, `scripts/check-context.mjs`, the new
+`scripts/check-distillation.mjs`, the one hook block in
+`scripts/verify.mjs`, and docs). Gate 3 n/a (no adapter; the model enters
+only as a CLI/config string).
 
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 

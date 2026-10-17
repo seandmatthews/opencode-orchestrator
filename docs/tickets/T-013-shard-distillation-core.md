@@ -1,6 +1,6 @@
 # T-013 — Shard distillation core: DistillationPlan semantics, distilled-claim records, §7.5 no-untraceable-chain refusal
 
-**Status:** proposed
+**Status:** done
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 2
 **Depends on:** T-012 — this slice removes the parse refusal T-012 installed (`src/context.ts:367-369`) and defines the semantics T-012's Layer-3 pass-through reserved; Gate 1.13's fixture set is this slice's regression baseline.
@@ -205,13 +205,13 @@ off, exactly as the ask pre-authorizes.
 
 ## Acceptance criteria
 
-- [ ] `DistillationPlan` parsing: a plan carrying a valid `distillation` block parses
+- [x] `DistillationPlan` parsing: a plan carrying a valid `distillation` block parses
       with all other fields intact; unknown sub-fields, a non-array or empty
       `expectedArtifactIds`, non-string/empty entries, and duplicate entries are each
       refused (ContextRefusal naming the offense) — pinned by **Gate 1.14**; the
       flipped parser assertion in **Gate 1.13** (`scripts/check-context.mjs:100`)
       covers the positive parse on the shared fixture plan.
-- [ ] `parseDistillationReport`: the §23.2:1358-1381 shape (with §7.4:565-578-prefixed
+- [x] `parseDistillationReport`: the §23.2:1358-1381 shape (with §7.4:565-578-prefixed
       refs) parses; unknown top-level or claim fields, an empty `statement`, duplicate
       claim ids, missing/empty `source_refs`, malformed refs (anything not
       `artifact:<id>#<anchor>`, including §23.2:1371-1377's bare `id#anchor` — the
@@ -220,39 +220,126 @@ off, exactly as the ask pre-authorizes.
       claim id**; `claims: []` is valid; `disagreement_refs` is optional but resolved
       when present; anchors are not resolved (no store, §34:2028) — pinned by
       **Gate 1.14**.
-- [ ] Builder integration: with a `distillation` block present, a Layer-3-class record
+- [x] Builder integration: with a `distillation` block present, a Layer-3-class record
       the block does not declare is refused naming its id — both when it would fit and
       when it would be `excluded-by-budget` (the declaration check precedes the budget
       test); a declared entry is admitted with Layer-3 budget/manifest semantics
       unchanged; declared-but-absent is not a refusal; a plan without the block builds
       byte-identically to the pre-change fixture output — pinned by **Gate 1.14** +
       **Gate 1.13**'s untouched Layer-3/determinism assertions.
-- [ ] Fingerprint stability: `planHashOf` covers the new block (a plan carrying it
+- [x] Fingerprint stability: `planHashOf` covers the new block (a plan carrying it
       hashes differently from the same plan without it), and no previously-valid plan
       changes hash or behavior — plans carrying `distillation` could not parse before
       (`src/context.ts:367-369`), so every previously-valid input is untouched
       (T-007:94-100) — pinned by **Gate 1.13**'s determinism/fingerprint assertions
       plus **Gate 1.14**'s planHash-sensitivity assertion.
-- [ ] Gate 1.13's two time-boxed refusal assertions (`scripts/check-context.mjs:100`
+- [x] Gate 1.13's two time-boxed refusal assertions (`scripts/check-context.mjs:100`
       and `:335-337`) are replaced in this same change-set by strictly stronger
       coverage — positive parse/inspect of valid blocks plus refusal of invalid
       blocks — and VERIFICATION.md's time-box sentence (`:714-716`) records the
       expiry; no existing assertion is weakened or removed without replacement
       (AGENTS.md #8) — pinned by **Gate 1.13 + Gate 1.14** both green and by
       change-set review.
-- [ ] New **Gate 1.14** (`scripts/check-distillation.mjs`, next free integer at
+- [x] New **Gate 1.14** (`scripts/check-distillation.mjs`, next free integer at
       landing) is hooked into `scripts/verify.mjs` after the Gate 1.13 block and
       before the fast-tier finish (`scripts/verify.mjs:508-518`), runs token-free over
       hand-built fixtures, and VERIFICATION.md carries its section in the same
       change-set (AGENTS.md #6) — pinned by `npm run verify` completing ALL GREEN with
       both gate sections running.
-- [ ] Zero pipeline surface: `src/runner.ts`, `src/scheduler.ts`, adapters, gate code,
+- [x] Zero pipeline surface: `src/runner.ts`, `src/scheduler.ts`, adapters, gate code,
       store, `RunReport` shape, `src/context-inspect.ts`, and `package.json` are
       untouched; zero new npm dependencies — pinned by **Gate 0** (`npm run
       typecheck`), the full fast tier (`npm run verify` ALL GREEN), and change-set
       review.
-- [ ] Ticket status + index row move in the same change-set (tickets README rules) —
+- [x] Ticket status + index row move in the same change-set (tickets README rules) —
       pinned by change-set review.
+
+## Landed
+
+Landed 2026-10-17 on `ticket/T-013-shard-distillation-core`, lane worktree off HEAD
+`706d948`. Exactly the ticketed slice; no pipeline file touched.
+
+**What changed:**
+
+- `src/context.ts` — the pure module extends (no I/O, no model knowledge,
+  zero new npm dependencies — `node:crypto` sha256 only; the
+  `ceil(chars/4)` estimator untouched):
+  - `DistillationPlan` — §7.1:507's type chosen here and documented
+    (`expectedArtifactIds`, the declared-entries contract); `ContextPlan`
+    gains the optional `distillation` field, doc comment now
+    "§7.1:500-512 in full".
+  - `parseDistillationPlan` (exported sub-parse) — refuses non-object
+    blocks, unknown sub-fields (the T-009 posture), and a non-array/empty/
+    non-string-entry/duplicate `expectedArtifactIds`, each naming the
+    offense.
+  - `DistilledClaim`/`DistillationReport` types + `parseDistillationReport`
+    — §23.2:1358-1381's wire shape (snake_case) validated into the camelCase
+    record; refs only in the §7.4:565-578 prefixed form (§23.2:1371-1377's
+    bare `id#anchor` refused — the documented divergence, standardized on
+    the §7.4 form per the ticket); every `source_refs`/`disagreement_refs`
+    `<id>` resolved into the report's declared `source_artifacts`, the
+    refusal naming the claim id; anchors opaque (format + declared-input-set
+    resolution only); `claims: []` valid (documented choice);
+    `disagreement_refs` optional but validated and resolved exactly like
+    `source_refs`.
+  - `parseContextPlan` — the `:367-369` special-case refusal removed;
+    `PLAN_FIELDS` gains `'distillation'`; a present block is sub-parsed,
+    never silently ignored; an invalid one refuses with block-level detail.
+  - `buildContextPacket` — the Layer-3 scan refuses, when the block is
+    present, any Layer-3-class record it sees that the block does not
+    declare, naming the record id, with the declaration check preceding the
+    budget test (an undeclared record is refused even when it would be
+    `excluded-by-budget`); declared-but-absent is not a refusal; blockless
+    plans ride the pass-through unchanged.
+  - Fingerprint: `distillation` rides inside the normalized plan, so
+    `planHashOf` covers it; blockless parsing is untouched, so no
+    previously-valid plan input changed (the T-012:94-100 narrowed-hash
+    stability argument, verbatim). `ArtifactRecord.sourceRefs` untouched.
+- `scripts/check-context.mjs` — Gate 1.13's two time-boxed assertions
+  flipped, nothing weakened: `:100` (parser refusal) → positive parse of
+  `{ ...PLAN_A, distillation: { expectedArtifactIds: ['distilled-research'] } }`
+  with all fields intact + refusal of an unknown sub-field naming it;
+  `:335-337` (CLI refusal) → a plan carrying a valid block, with a packet
+  built from that parsed plan, inspects exit 0, and an invalid block still
+  exits non-zero with no body. All other assertions untouched and green.
+  Net strictness increases: 124 → 126 assertions.
+- `scripts/check-distillation.mjs` (new) — **Gate 1.14**, hooked into
+  `scripts/verify.mjs` after the Gate 1.13 block, before the fast-tier
+  finish; tsx-loaded, list-form spawn, hand-built fixtures, zero model
+  tokens. 52 assertions: `DistillationPlan` parse (11), `parseDistillationReport`
+  incl. the bare-ref divergence pin and unresolvable-ref refusals naming the
+  claim id (26), builder integration incl. the byte-identical blockless
+  snapshot and the declaration-precedes-budget counterfactual (8), planHash
+  sensitivity (3), CLI round-trip (4).
+- `VERIFICATION.md` — new Gate 1.14 section; Gate 1.13's time-box expiry
+  recorded (the retired ":714-716" sentence); the carved-list paragraph
+  updated (record/contract level now pinned by Gate 1.14, the pipeline
+  stage and packet-level lineage stay carved). Same change-set (AGENTS.md #6).
+- `docs/tickets/T-013-shard-distillation-core.md` +
+  `docs/tickets/README.md` — status/index row (this change-set).
+
+**Measured gates (this lane, 2026-10-17):**
+
+- Gate 0: `npm run typecheck` → exit 0.
+- Full fast tier: `node scripts/verify.mjs fast` → "verify (fast) complete:
+  ALL GREEN", exit 0 — Gates 0/1/0.5/1.5/1.6-1.14, including Gate 1.13
+  "check-context: ALL GREEN" (126 assertions, the two flips live) and the
+  new Gate 1.14 "check-distillation: ALL GREEN" (52 assertions).
+- Gate 1 rides the fast tier (fixture regenerated, `build ok` + `tests ok`).
+- Gate 2 not required and not run — trigger analysis in the Verification
+  section stands: no `src/runner.ts`, no adapter, no gate code, no
+  workspace handling, no report-shape change. Gate 0.5 n/a (`src/parse.ts`
+  untouched); Gate 3 n/a (no adapter); `package.json` untouched (zero new
+  npm dependencies, no CLI surface change).
+
+**Implementation note (inside the ticket's wording, not a deviation):** the
+declaration check in the Layer-3 scan also covers a Layer-3-class record
+already captured by Layer 1 (a mandatory query can claim a sourceRefs
+carrier before Layer 3 runs) — "every Layer-3-class record the builder
+sees", as the ticket's own `DistillationPlan` docstring puts it; pinned by
+Gate 1.14. A plan-excluded record never reaches selection (exclusions
+remove first, §7.2:544) and is therefore not a declaration target; Gate
+1.14 pins the budget counterfactual, not a plan-exclusion one.
 
 ## Verification
 
