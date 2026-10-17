@@ -1,6 +1,6 @@
 # T-017 — MachineWorker adapter: deterministic-command worker behind WorkerAdapter (spec §5.3, §34:2030-2033)
 
-**Status:** proposed
+**Status:** done 2026-10-17
 **Category:** adapters
 **Value (1-5):** 4 · **Risk (1-5):** 2
 **Depends on:** — (independent of T-016 — disjoint files; one gate-numbering note under Verification)
@@ -51,17 +51,123 @@ Pre-change state, run this session: Gate 0 `npm run typecheck` → exit 0; full 
 
 ## Acceptance criteria
 
-- [ ] `MachineWorker.execute` runs a real file-mutating node command in the contracted cwd: `ok: true`, exit 0, and the change is visible to `git diff` in a scratch repo — pinned by **new Gate 1.17** S1 (direct-adapter, token-free).
-- [ ] T-010 spawn contract: `onSpawn` called exactly once and `WorkerResult.pid` equals that pid — pinned by Gate 1.17 S1 (today the contract is pinned only for fake adapters, by Gate 1.11; VERIFICATION.md:494ff).
-- [ ] Directory resolution: a child command printing `process.cwd()` yields exactly `req.cwd` with no env pinning — pinned by Gate 1.17 S1's assertion; the spawn-cwd-vs-env.PWD contrast with Known issue #1 is in the adapter docblock; **Gate 3 runs once at landing** (VERIFICATION.md:1107, "adding ... a worker adapter") with the reconciliation recorded in Landed.
-- [ ] A failing command (`node -e "process.exit(3)"`) returns `ok: false` with `exitCode: 3`, `timedOut: false` — no throw — pinned by Gate 1.17 S2. (The engine's worker-failed retry handling is unchanged and stays pinned by Gates 1.8/1.10's fake-adapter legs.)
-- [ ] A non-existent executable returns `ok: false`, `exitCode: null` (the spawn-error path, src/worker/run-with-timeout.ts:45) without throwing — pinned by Gate 1.17 S3.
-- [ ] A timed-out command fires the verified tree kill via `runChildWithTimeout` and `cleanupFailures` pass through onto `WorkerResult` (src/types.ts:52-58) — pinned by Gate 1.17 S4 (the Gate 1.12 S4 mechanics exercised against the real adapter, not a fake).
-- [ ] Token-free REAL-CLI `--jobs` end-to-end (the Gate 1.5 sandbox pattern, VERIFICATION.md:217-220): a fixture run with two `worker: "machine"` jobs carrying different `command`s (each gated on its own marker file) plus a no-op machine command — report shows both real jobs PASS with `diffBytes > 0` and the correct job-command pairing, and the no-op job eliminated as NO-OP, never a pass (AGENTS.md #7) — pinned by Gate 1.17 S5, wired into `scripts/verify.mjs` after the Gate 1.15 hook (scripts/verify.mjs:528) before the fast-tier finish.
-- [ ] Refusals, all exit 1 with zero side effects (no artifacts dir, no lock — cli.ts:227-229): `--worker machine` at run level (parse time); `command` on a non-machine job; a machine job without `command`; a malformed `command`; and the unknown-worker message now reading `available: opencode, machine` — pinned by Gate 1.17 S6.
-- [ ] No engine regression: `src/types.ts`, `src/runner.ts`, gates, workspace handling, and the report shape are untouched; default-mode and fake-adapter gates stay green — pinned by the unchanged Gates 1.10/1.11/1.12/1.15 within a full `npm run verify` ALL GREEN, and Gate 0 (`tsc --noEmit`) over the new file.
-- [ ] **Gate 2 runs once at landing** — "any adapter" is on its trigger list (VERIFICATION.md:1097-1098) even though this slice need not touch `src/runner.ts` (the T-007/T-009/T-010 owed-at-landing precedent) — recorded in Landed with its output.
-- [ ] Docs in the same change-set: VERIFICATION.md (new Gate 1.17 section; the worker-registry sentence; a Gate 3 note reconciling spawn-cwd resolution with Known issue #1), README (`--worker` row, README.md:104, and the per-job field list, README.md:117), ROADMAP.md:12 (the stage-1 cell's stale "remain unticketed" text — coordinate with T-016: whichever lands second corrects the cell for both leftovers).
+- [x] `MachineWorker.execute` runs a real file-mutating node command in the contracted cwd: `ok: true`, exit 0, and the change is visible to `git diff` in a scratch repo — pinned by **new Gate 1.17** S1 (direct-adapter, token-free).
+- [x] T-010 spawn contract: `onSpawn` called exactly once and `WorkerResult.pid` equals that pid — pinned by Gate 1.17 S1 (today the contract is pinned only for fake adapters, by Gate 1.11; VERIFICATION.md:494ff).
+- [x] Directory resolution: a child command printing `process.cwd()` yields exactly `req.cwd` with no env pinning — pinned by Gate 1.17 S1's assertion; the spawn-cwd-vs-env.PWD contrast with Known issue #1 is in the adapter docblock; **Gate 3 runs once at landing** (VERIFICATION.md:1107, "adding ... a worker adapter") with the reconciliation recorded in Landed.
+- [x] A failing command (`node -e "process.exit(3)"`) returns `ok: false` with `exitCode: 3`, `timedOut: false` — no throw — pinned by Gate 1.17 S2. (The engine's worker-failed retry handling is unchanged and stays pinned by Gates 1.8/1.10's fake-adapter legs.)
+- [x] A non-existent executable returns `ok: false`, `exitCode: null` (the spawn-error path, src/worker/run-with-timeout.ts:45) without throwing — pinned by Gate 1.17 S3.
+- [x] A timed-out command fires the verified tree kill via `runChildWithTimeout` and `cleanupFailures` pass through onto `WorkerResult` (src/types.ts:52-58) — pinned by Gate 1.17 S4 (the Gate 1.12 S4 mechanics exercised against the real adapter, not a fake).
+- [x] Token-free REAL-CLI `--jobs` end-to-end (the Gate 1.5 sandbox pattern, VERIFICATION.md:217-220): a fixture run with two `worker: "machine"` jobs carrying different `command`s (each gated on its own marker file) plus a no-op machine command — report shows both real jobs PASS with `diffBytes > 0` and the correct job-command pairing, and the no-op job eliminated as NO-OP, never a pass (AGENTS.md #7) — pinned by Gate 1.17 S5, wired into `scripts/verify.mjs` after the Gate 1.15 hook (scripts/verify.mjs:528) before the fast-tier finish.
+- [x] Refusals, all exit 1 with zero side effects (no artifacts dir, no lock — cli.ts:227-229): `--worker machine` at run level (parse time); `command` on a non-machine job; a machine job without `command`; a malformed `command`; and the unknown-worker message now reading `available: opencode, machine` — pinned by Gate 1.17 S6.
+- [x] No engine regression: `src/types.ts`, `src/runner.ts`, gates, workspace handling, and the report shape are untouched; default-mode and fake-adapter gates stay green — pinned by the unchanged Gates 1.10/1.11/1.12/1.15 within a full `npm run verify` ALL GREEN, and Gate 0 (`tsc --noEmit`) over the new file.
+- [x] **Gate 2 runs once at landing** — "any adapter" is on its trigger list (VERIFICATION.md:1097-1098) even though this slice need not touch `src/runner.ts` (the T-007/T-009/T-010 owed-at-landing precedent) — recorded in Landed with its output.
+- [x] Docs in the same change-set: VERIFICATION.md (new Gate 1.17 section; the worker-registry sentence; a Gate 3 note reconciling spawn-cwd resolution with Known issue #1), README (`--worker` row, README.md:104, and the per-job field list, README.md:117), ROADMAP.md:12 (the stage-1 cell's stale "remain unticketed" text — coordinate with T-016: whichever lands second corrects the cell for both leftovers).
+
+## Landed
+
+2026-10-17, lane branch `ticket/T-017-machine-worker-adapter`.
+
+What changed:
+
+- **`src/worker/machine.ts` (new)** — `MachineWorker` (id `'machine'`):
+  constructor-injected `command: string[]` argv; list-form `spawn(command[0],
+  command.slice(1), { cwd: req.cwd, stdio: ['ignore','pipe','pipe'],
+  windowsHide: true })` — never a shell, never re-tokenized; no
+  `PWD`/`OLDPWD` pinning (the docblock states the spawn-cwd-vs-env.PWD
+  contrast with Known issue #1); `req.onSpawn(pid)` once right after spawn
+  when `child.pid` is defined, same pid returned as `WorkerResult.pid`;
+  the timed run through `runChildWithTimeout` (log draining, verified tree
+  kill, `cleanupFailures` passthrough); `ok = !timedOut && exitCode === 0`;
+  a second collector builds the ANSI-stripped 12k `responseTail` exactly
+  like OpenCodeWorker. `req.prompt` is logged to `logPath` as a provenance
+  header and never interpreted; `req.model` is ignored and recorded
+  verbatim by the report/store. Docblock reconciliations: worker-vs-probe
+  (PRE-gates work producer vs POST-gates evidence) and §11
+  (`capabilities()`/`cancel()` deliberately not implemented).
+- **`src/scheduler.ts`** — `JobSpec.command?: string[]`; `'command'` added
+  to the strict allowed-field list; shape validation refuses anything but a
+  non-empty array of non-empty strings (a spec without `command` still
+  parses to byte-identical JSON — Gate 1.15's P2 pin stays green); new
+  exported pure `commandPairingRefusal(jobs, defaultWorker)` beside
+  `parseJobsSpec`: `command` on a job resolving to a non-machine worker →
+  refuse; a job resolving to `machine` without `command` → refuse.
+- **`src/cli.ts`** — `createWorker` gains the `'machine'` case (constructs
+  `MachineWorker` from the job's command); the unknown-worker error now
+  reads `unknown worker adapter '<id>' (available: opencode, machine)`;
+  `workerFor`'s cache keys by adapter id + serialized command (identical
+  commands share one instance, distinct commands distinct instances —
+  pinned behaviorally by Gate 1.17 S5); `--worker machine` refused at
+  parse time (the `--max-attempts` pattern — planner/reviewer run through
+  the run-level worker and have no machine command); `commandPairingRefusal`
+  called in `main()` immediately after `loadJobsSpec`, deliberately not
+  inside `resolveJobs` (which runs after the checkout lock). Two
+  implementation notes the ticket text left implied: (1) the per-job
+  unknown-worker id is ALSO validated in `main()` before the lock, sharing
+  the registry's `WORKER_ADAPTERS` list and message — required so the AC's
+  "unknown-worker refusal with zero side effects" actually holds (the
+  registry's own throw fires inside `resolveJobs`, post-lock, post-artifacts-dir);
+  (2) the `--jobs`/`--worker` usage lines mention the new field and the
+  per-job-only rule.
+- **`scripts/check-machine-worker.mjs` (new Gate 1.17)** + the hook in
+  `scripts/verify.mjs` after the Gate 1.16 hook, before the fast-tier
+  finish — S1 direct-adapter happy path + spawn contract + directory
+  resolution (bogus inherited `PWD` planted, child's real `process.cwd()`
+  still `req.cwd`), S2 exit-3 command, S3 non-existent exe, S4 timeout +
+  verified tree kill + `cleanupFailures` passthrough (runtime shape +
+  source-level pin), S5 real-CLI token-free `--jobs` machine run (two
+  marker-file codemod jobs + a no-op job gated by a vacuous passing gate),
+  S6 six zero-side-effect refusals through the real CLI, P contract
+  fixtures (parse + pure pairing helper). 32 assertions, zero model
+  tokens, zero opencode involvement.
+- **`VERIFICATION.md`** — new Gate 1.17 section (with the registry
+  sentence), a Gate 3 note reconciling spawn-cwd resolution with Known
+  issue #1, and Known issue #10 (a verified-dead tree once REPORTED a
+  cleanup failure on a transient snapshot/kill hiccup in the first
+  fast-tier pass of this lane — loud-by-design, evidence-only, not
+  reproducible across four subsequent runs; recorded per AGENTS.md #9,
+  not tribal memory).
+- **`README.md`** — the `--worker` flag row (per-job-only rule for
+  `machine`), the job-file field list (`command` added) plus a short
+  machine-worker paragraph, and the Interfaces table's `WorkerAdapter`
+  row now naming `MachineWorker` beside `OpenCodeWorker` (a stale
+  "only implementation" row this landing would have left wrong; declared
+  here rather than left silent).
+- **`docs/ROADMAP.md`** — stage-1 cell corrected for BOTH Milestone-1
+  leftovers (T-016 landed first without touching the cell; this ticket
+  lands second and corrects it for both, per the coordination note).
+- **`docs/tickets/`** — this ticket flipped to done with the boxes
+  checked, index row updated, in the same change-set.
+
+Measured gates (this lane, this change-set):
+
+- Gate 0 `tsc --noEmit` → exit 0.
+- Gate 1.17 new, `node node_modules/tsx/dist/cli.mjs
+  scripts/check-machine-worker.mjs` → `check-machine-worker: ALL GREEN`,
+  exit 0, 32 ok assertions.
+- Full fast tier, `node scripts/verify.mjs fast` → exit 0,
+  `verify (fast) complete: ALL GREEN`, 853 ok lines, every section (Gate
+  0, 1, 0.5, 1.5 ×3, 1.6–1.17) green. First pass of this lane failed one
+  Gate 1.12 S1 assertion (Known issue #10 above — a recorded cleanup
+  failure on a tree that verified dead; no kill-tree code in this
+  change-set); green on standalone re-run (lane and main checkout), on the
+  main checkout's own full fast tier, and on this lane's fast-tier re-run.
+- Gate 3 (owed once at landing — "adding a worker adapter"), both forms
+  against `C:/swarm/demo-target`: form 1 (no override) exit 0 — opencode
+  reports the directory it was spawned in, not the cwd arg (Known issue #1
+  still exhibited, as documented); form 2 (PWD override) exit 0 — opencode
+  reports the override target `C:\swarm\demo-target`. The machine-worker
+  face of directory resolution is pinned behaviorally by Gate 1.17 S1
+  (child's real cwd = `req.cwd` under a bogus inherited `PWD`), and the
+  reconciliation now lives in VERIFICATION.md's Gate 3 section.
+- Gate 2 **owed at landing** ("any adapter" is on the trigger list) and
+  **not run by this lane** — the driving script runs the full e2e gate
+  after this change-set lands (real model tokens); recorded there.
+
+Deviations: the two implementation notes above (early per-job worker-id
+validation so the AC's zero-side-effects refusal set holds; the README
+Interfaces-table row); nothing else. Gate numbering: **1.17** claimed and
+landed as planned — the next free integer after landed 1.15 and T-016's
+landed 1.16.
 
 ## Verification
 

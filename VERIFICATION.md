@@ -1159,6 +1159,109 @@ deliberately never written), ingests it, and asserts:
   across repeated verifications (sha256) and evidence files are only ever
   read; an unknown run verifies to an empty result, never a throw.
 
+## Gate 1.17 — MachineWorker adapter (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-machine-worker.mjs
+```
+
+Pins T-017 (spec §4:186-187, §5.3:254-273, §11:851-859, §34:2030-2033):
+`src/worker/machine.ts` — `MachineWorker` (id `'machine'`), the second real
+`WorkerAdapter`: it executes a brief by running one configured deterministic
+command (an argv list) directly in the leased worktree — no external agent
+harness, no model tokens, no shell. The adapter mirrors the OpenCodeWorker's
+proven shape (constructor-injected config → list-form spawn → `onSpawn` once
+→ `runChildWithTimeout` → result) and keeps only the specifics: the argv.
+The docblock carries the required reconciliations: worker-vs-probe (this
+adapter runs PRE-gates, its file effects ARE the candidate diff, its exit
+code drives `workerOk`/retry; a CommandProbe runs POST-gates, produces an
+EvidenceBundle, and never enters a verdict nor produces a diff), §11's
+fuller contract (`capabilities()`/`cancel()` deliberately not implemented —
+the seam stays `id` + `execute`; termination is onSpawn/pid + T-011's
+verified kill), and the honesty fields (`req.prompt` logged to `logPath` as
+a provenance header, never interpreted or executed; `req.model` ignored —
+the report/store keep recording the configured model string verbatim for a
+candidate no model touched). The registry sentence (src/cli.ts): the
+`--worker`/`--jobs` worker id vocabulary is `opencode` and `machine` —
+`createWorker` constructs `MachineWorker` from the job's `command`; the
+per-job cache keys by adapter id + serialized command (two machine jobs with
+identical commands share one instance, distinct commands get distinct
+instances); the unknown-worker error reads
+`unknown worker adapter '<id>' (available: opencode, machine)`; and
+run-level `--worker machine` is refused at parse time (the planner and
+reviewer phases execute through the run-level worker and have no machine
+command — machine selection is per-job in `--jobs` mode, which makes a fully
+token-free run reachable: `--jobs` + per-job `machine` + `--no-review`).
+Zero new npm dependencies (`node:child_process` only, decisions.md
+2026-10-10). The gate's legs, all token-free:
+
+- **S1 — direct adapter, real work, spawn contract, directory resolution**:
+  a file-mutating node command run in a scratch git repo returns `ok: true`,
+  exit 0, the change visible to `git diff`; `onSpawn` fired exactly once and
+  `WorkerResult.pid` equals that pid (the T-010 contract, previously pinned
+  only for fake adapters by Gate 1.11); a child printing `process.cwd()`
+  yields exactly `req.cwd` — asserted with a bogus inherited `PWD` in the
+  environment, pinning the spawn-cwd-vs-env.PWD contrast with Known issue
+  #1 (the adapter pins no env; the docblock states why); the log carries
+  the argv header and the brief as a provenance header.
+- **S2 — a failing command** (`node -e "process.exit(3)"`): `ok: false`,
+  `exitCode: 3`, `timedOut: false`, no throw; the spawn contract holds.
+- **S3 — a non-existent executable**: `ok: false`, `exitCode: null` (the
+  spawn-error path, src/worker/run-with-timeout.ts:45) without throwing;
+  no pid ever existed (`onSpawn` never called, `pid: null`).
+- **S4 — timeout**: the verified tree kill fires via `runChildWithTimeout`
+  (the Gate 1.12 S4 mechanics against the real adapter, not a fake):
+  `timedOut: true`, the log carries the `tree killed, verified:` line and
+  the drained child stdout, the whole planted tree (parent + spawned child)
+  verified dead on the real process table, and `cleanupFailures` pass
+  through onto `WorkerResult` (a verified kill leaves the key absent, an
+  unproven one records loud `CLEANUP FAIL` lines) — plus a source-level pin
+  (the Gate 1.12 S2 precedent) that the adapter routes through
+  `runChildWithTimeout` and spreads its `cleanupFailures`. The kill exit
+  code is whatever the killed child reports; only `ok`/`timedOut` are the
+  contract.
+- **S5 — token-free REAL-CLI `--jobs` end-to-end** (the Gate 1.5 sandbox
+  pattern): a fixture run with two `worker: "machine"` jobs carrying
+  different `command`s (each gated on its own marker file) plus a no-op
+  machine command (gated by a vacuous passing gate) — both real jobs PASS
+  with `diffBytes > 0` and the correct job-command pairing (each
+  `worker.log` carries exactly its own argv, no cross-contamination; each
+  `diff.patch` captured its own marker-file change), and the no-op job is
+  eliminated as NO-OP, never a pass (AGENTS.md #7) even with its gate
+  passing — the ladder's `diffBytes > 0` leg pinned against the real
+  adapter.
+- **S6 — refusals, all exit 1 with zero side effects** (no artifacts dir,
+  no `locks/`, asserted after each — each through the real CLI with a
+  non-git `--repo`, so the refusals precede repo validation): `--worker
+  machine` at run level (parse time); `command` on a non-machine job; a
+  machine job without `command`; a malformed `command` (a shell string; an
+  empty-string argv entry); and an unknown per-job worker id, whose refusal
+  reads `unknown worker adapter 'bogus' (available: opencode, machine)`
+  before the checkout lock (the registry's own message, checked early so
+  the refusal writes nothing).
+- **P — contract fixtures** (the Gate 0.5 hand-built-input pattern):
+  `parseJobsSpec` accepts a machine job's `command` verbatim, parses a
+  command-less spec to output byte-identical to today (the Gate 1.15 P2
+  argument), and refuses malformed shapes (a string, an empty array, a
+  non-string entry, an empty-string entry) naming the job; the pure
+  `commandPairingRefusal` helper (src/scheduler.ts, beside `parseJobsSpec`)
+  passes well-paired sets, refuses both mispairings naming the job, and
+  resolves the worker through the run-level default argument.
+
+Not pinned here and carved by the ticket: machine workers serving
+planner/reviewer roles (refused by construction this slice); any
+WorkerAdapter seam extension toward §11's `capabilities()`/`cancel()`;
+§5.3's evidence-collection tasks (benchmarks/screenshots/Godot — probe-layer
+successors per T-015's carve, T-018/T-019 ticketed); §19 machine-job
+memoization (deliberately deferred, ROADMAP.md); HumanWorker/
+ZCodePrototypeWorker/CodexWorker (Codex is stage 5). No engine regression:
+`src/types.ts`, `src/runner.ts`, gates, workspace handling, and the report
+shape are untouched — the diff rides the existing seams end to end, and the
+unchanged Gates 1.10/1.11/1.12/1.15 stay green inside the fast tier. Gate 2
+runs once at landing ("any adapter" is on its trigger list) — recorded in
+T-017's Landed section, not a permanent extension. Gate 3 runs once at
+landing (an adapter was added) — see its section's T-017 note.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
@@ -1197,6 +1300,17 @@ Required when adding or changing a worker adapter, or after an opencode upgrade.
 without override, the harness reports the directory it was spawned in; with the
 override it reports the override target. A harness that reports something else does not
 get trusted with worktrees — see Known issues #1.
+
+T-017 reconciliation (spawn-cwd vs env.PWD): the probe exists because
+OpenCode resolves its project directory from `env.PWD` (Known issue #1).
+`MachineWorker` (src/worker/machine.ts) is immune by mechanism, not by
+pinning: a plainly spawned child resolves its working directory from its
+spawn cwd and merely inherits `env.PWD` without consulting it — the adapter
+sets no env, and Gate 1.17 S1 asserts the child's real `process.cwd()`
+equals `req.cwd` even with a bogus `PWD` planted in the inherited
+environment. The probe below therefore exercises the OpenCode harness face;
+the machine-worker face is pinned behaviorally by Gate 1.17 S1 (recorded at
+landing in T-017's Landed section).
 
 ## Known issues
 
@@ -1244,6 +1358,20 @@ get trusted with worktrees — see Known issues #1.
    `taskkill /T /F` ever proves insufficient (decisions.md 2026-10-10), and
    is the race-free successor to the pre-kill CIM snapshot's narrow
    snapshot-to-kill race (spec §15.3:1084 "Later").
+10. **A verified-dead tree can still be REPORTED as a cleanup failure on a
+   transient snapshot/kill hiccup (observed once, 2026-10-17, T-017 lane
+   fast tier).** Gate 1.12 S1's `no cleanup failures on a verified kill`
+   failed inside one full fast-tier pass while the same scenario's tracked
+   gate-child and grandchild pids verified dead on the real process table
+   seconds later — i.e. a `CLEANUP FAIL` line was recorded for a tree that
+   did die. The failure direction is loud by design (T-011: an unproven
+   kill must never read as verified), the line is evidence-only and never a
+   verdict, and the stronger process-table assertions stayed green. Not
+   reproducible: lane and main-checkout standalone runs green, main-checkout
+   full fast tier green, lane fast-tier re-run green (no kill-tree code in
+   that change-set). Benign until observed recurring; the exact triggering
+   line (snapshot failure vs already-gone root vs survivor) is not captured
+   by the check's output and was not diagnosed post-hoc.
 
 ## Definition of done (per ticket)
 

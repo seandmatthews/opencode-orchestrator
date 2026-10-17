@@ -101,7 +101,7 @@ continues.
 | `--timeout-min <n>` | Per-worker time limit in minutes (default 15) |
 | `--max-attempts <n>` | Retry a candidate whose worker crashed or timed out, up to n attempts (default 1) |
 | `--clean` | Delete candidate worktrees after their logs and diffs are saved |
-| `--worker <id>` | Which worker adapter to use (default `opencode`) |
+| `--worker <id>` | Which worker adapter to use (default `opencode`; `machine` is per-job only — see Job files) |
 | `--db <path>` | The SQLite database for run records |
 | `--run-root <path>` | Where runs are stored (default `C:\swarm`) |
 | `--force-lock` | Take the checkout lock even if another process still appears to hold it |
@@ -114,11 +114,20 @@ Planner and reviewer flags are in the table above.
 `--jobs <spec.json>` replaces the planner with a job file you write yourself
 (`phases` + `jobs`; see `src/scheduler.ts`). The engine runs the jobs in
 dependency order, at most `--concurrency` at a time, one candidate per job.
-Each job can set its own `model`/`worker`/`timeoutMs`/`gates`; anything it
-leaves out falls back to the run-level flags. The planner is not used, and
-`--candidates` is ignored. If the job file is invalid, the run stops
-immediately with an error, before it touches the repository or creates any
-files.
+Each job can set its own `model`/`worker`/`command`/`timeoutMs`/`gates`;
+anything it leaves out falls back to the run-level flags. The planner is not
+used, and `--candidates` is ignored. If the job file is invalid, the run
+stops immediately with an error, before it touches the repository or creates
+any files.
+
+A job with `"worker": "machine"` runs no AI model at all: it executes the
+job's `command` — an argument list like `["node", "scripts/codemod.mjs"]`,
+spawned directly in the candidate's worktree with no shell — and whatever
+files it changes become that candidate's diff, judged by the same gates as
+any other candidate. A machine job must carry a `command`, and `command` is
+only valid on machine jobs; `--worker machine` at run level is refused,
+because the planner and reviewer have no command to run. The brief stays
+prose for humans and evidence — it is recorded, never executed.
 
 If a worker crashes, times out, or throws an error, the engine retries it as
 a fresh attempt in a fresh worktree, up to `--max-attempts` per candidate.
@@ -192,7 +201,7 @@ decided.
 
 | Interface | File | What it does | Implementation |
 |---|---|---|---|
-| `WorkerAdapter` | `src/types.ts` | runs a prompt in a working directory and collects the exit code and log | `OpenCodeWorker` |
+| `WorkerAdapter` | `src/types.ts` | runs a prompt in a working directory and collects the exit code and log | `OpenCodeWorker`, `MachineWorker` |
 | `WorkspaceProvider` | `src/types.ts` | provides an isolated working copy per candidate and captures its diff | `WorktreeProvider` (git worktrees) |
 | `Gate` | `src/types.ts` | a pass/fail check: a shell command whose exit code decides | `CommandGate` |
 | `Probe` | `src/probe.ts` | runs a command or test and records what happened | `CommandProbe`, `TestProbe` (TAP) |

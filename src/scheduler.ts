@@ -57,6 +57,13 @@ export interface JobSpec {
   model?: string
   /** Override the run-level --worker adapter id for this job. */
   worker?: string
+  /** The deterministic argv a `worker: "machine"` job executes (T-017) —
+   *  list-form, spawned directly in the leased worktree, never re-tokenized
+   *  from a string. Only valid on jobs whose resolved worker is 'machine'
+   *  (job field, else the --worker default); the pairing is enforced by
+   *  `commandPairingRefusal` below, which the CLI calls before any side
+   *  effect (never inside resolveJobs, which runs after the checkout lock). */
+  command?: string[]
   /** Override the run-level --timeout-min for this job. */
   timeoutMs?: number
   /** Override the run-level --gate set for this job (replaces, not merges). */
@@ -155,7 +162,7 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
   const seenJobs = new Set<string>()
   for (const j of raw.jobs) {
     if (!isPlainObject(j)) refuse('every job must be a JSON object')
-    unknownField('job', j, ['id', 'phase', 'dependencies', 'brief', 'model', 'worker', 'timeoutMs', 'gates', 'probes'])
+    unknownField('job', j, ['id', 'phase', 'dependencies', 'brief', 'model', 'worker', 'command', 'timeoutMs', 'gates', 'probes'])
     const id = parseId('job', j.id)
     if (seenJobs.has(id)) refuse(`duplicate job id '${id}'`)
     seenJobs.add(id)
@@ -163,6 +170,17 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
     if (typeof j.brief !== 'string' || j.brief.length === 0) refuse(`job '${id}' brief must be a non-empty string`)
     if (j.model !== undefined && typeof j.model !== 'string') refuse(`job '${id}' model must be a string (a model ID as configuration, never engine code)`)
     if (j.worker !== undefined && typeof j.worker !== 'string') refuse(`job '${id}' worker must be a string (a worker adapter id)`)
+    let command: string[] | undefined
+    if (j.command !== undefined) {
+      // T-017: a list-form argv, validated once here — anything but a
+      // non-empty array of non-empty strings is refused. The command is
+      // never re-tokenized from a string (AGENTS.md #4).
+      if (!Array.isArray(j.command) || j.command.length === 0
+        || j.command.some((c) => typeof c !== 'string' || c.length === 0)) {
+        refuse(`job '${id}' command must be a non-empty array of non-empty strings (a list-form argv, e.g. ["node", "scripts/codemod.mjs"] — never a shell string)`)
+      }
+      command = j.command as string[]
+    }
     if (j.timeoutMs !== undefined && (typeof j.timeoutMs !== 'number' || !Number.isInteger(j.timeoutMs) || j.timeoutMs <= 0)) {
       refuse(`job '${id}' timeoutMs must be a positive integer`)
     }
@@ -221,6 +239,7 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
       brief: j.brief,
       model: j.model as string | undefined,
       worker: j.worker as string | undefined,
+      command,
       timeoutMs: j.timeoutMs as number | undefined,
       gates,
       probes,
@@ -259,6 +278,30 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
     phases,
     jobs: jobs.map((j, i) => ({ ...j, dependencies: [...expanded[i]!.dependencies] })),
   }
+}
+
+/**
+ * T-017 pairing rules between a job's `worker` and its `command`: a
+ * `command` is the machine worker's argv, so it is refused on a job whose
+ * resolved worker (job field, else the `--worker` default) is not 'machine',
+ * and a job resolving to 'machine' without one is refused too. Pure: takes
+ * the already-parsed specs, returns a refusal message or null — no I/O, no
+ * side effects. Called from the CLI immediately after `loadJobsSpec`
+ * (BEFORE repo validation and the checkout lock, the T-007 parse-refusal
+ * pattern), deliberately never inside `resolveJobs`, which runs after the
+ * checkout lock and would break the zero-side-effects refusal pattern.
+ */
+export function commandPairingRefusal(jobs: readonly JobSpec[], defaultWorker: string): string | null {
+  for (const j of jobs) {
+    const resolved = j.worker ?? defaultWorker
+    if (resolved !== 'machine' && j.command !== undefined) {
+      return `job '${j.id}' sets command but its worker resolves to '${resolved}' — command is the machine worker's argv and is only valid on worker: "machine" jobs`
+    }
+    if (resolved === 'machine' && j.command === undefined) {
+      return `job '${j.id}' resolves to the machine worker but sets no command — a machine job must carry a non-empty command argv`
+    }
+  }
+  return null
 }
 
 /**
