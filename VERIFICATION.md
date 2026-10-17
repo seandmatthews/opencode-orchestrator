@@ -137,15 +137,16 @@ node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs
 ```
 
 Pins the durable run records (T-003), the derived job DAG (T-006), the
-attempt records (T-007), and the recorded schedule (T-009):
-`src/store/index.ts` ingests a finished `RunReport`
-into SQLite (`node:sqlite`, schema v4: `runs`, `candidates`, `gate_results`,
-`events`, T-006's `phases`/`jobs`/`job_dependencies`, T-007's `attempts`, and
-T-008's `approval_gates` — which ingest never writes; Gate 1.9 owns it)
+attempt records (T-007), the recorded schedule (T-009), and the filesystem
+artifact store (T-016): `src/store/index.ts` ingests a finished `RunReport`
+into SQLite (`node:sqlite`, schema v5: `runs`, `candidates`, `gate_results`,
+`events`, T-006's `phases`/`jobs`/`job_dependencies`, T-007's `attempts`,
+T-008's `approval_gates` — which ingest never writes; Gate 1.9 owns it — and
+T-016's `artifacts`/`probe_runs`)
 — zero npm dependencies. All tables are `CREATE TABLE IF NOT EXISTS`, so an
-existing v1/v2/v3 `refinery.db` gains the newer tables on its next use — no
-migration machinery, no backfill: old runs gain DAG/attempt rows only when
-re-ingested, which appends a fresh event block by design.
+existing v1/v2/v3/v4 `refinery.db` gains the newer tables on its next use — no
+migration machinery, no backfill: old runs gain DAG/attempt/artifact rows only
+when re-ingested, which appends a fresh event block by design.
 One call site in `src/cli.ts` immediately after `runSkeleton` returns, behind
 `--db <path>` (default `C:\swarm\refinery.db`). Failure policy is
 log-and-continue: a failed DB write prints one loud `PERSISTENCE FAILED` line
@@ -208,6 +209,49 @@ a verbatim copy of run 20261011022419) into a fresh temp DB and asserts:
   terminal success on every job — every `at` a pure function of the report
   (never `Date.now()`); re-ingest leaves the DAG rows idempotent while
   events append a fresh deterministic block,
+- the artifact store (T-016, schema v5): the table census — a fresh ingest
+  materializes exactly 11 tables (the prior 9 + `artifacts` + `probe_runs`;
+  internal `sqlite_*` tables excluded) — and the columns are exactly the
+  producer-narrowed sets (`media_type`/`lineage`/`metadata`/
+  `retention_class` omitted, not pre-defined; `probe_runs`
+  field-for-field the `ProbeRunSummary` shape); on the main fixture (which
+  predates attempts and probes) exactly 6 `artifacts` rows derive —
+  `report.json` recovered via the existing reportPathOf heuristic, the
+  planner raw output, and per candidate the diff + review raw output —
+  paths verbatim, candidate-scoped rows carrying `job_id` with null
+  `attempt_number`, zero `probe_runs` rows; the `artifact_id` scheme is
+  pinned twice over — fixed-input literals over the exported function
+  (`run/…`, `j:<id>/…`, `j:<id>@a<n>/…` scopes over a sha256 digest of the
+  producer triple) and the report.json row's full literal id — stable
+  across re-ingest; on a hand-built retried variant the attempt-scoped
+  rows carry their own attempt numbers while `diffPath`/review attribute
+  the FINAL attempt (so one path named by both is two producer rows, and
+  inside one producer triple it is ONE deduplicated row); a probes variant
+  (the elim-variant pattern, sandbox-local bundle files) derives one
+  `probe_runs` row per summary plus a matching probe-bundle `artifacts` row
+  (`attempt_number` = the final attempt) and no row for bundle-internal
+  `.log` files — the bundle is the addressable unit,
+- hash-at-ingest (the documented third scoping case in the store module
+  header — ingest is deterministic as a function of *(report, the evidence
+  files it names)*, reads evidence, never writes it, the wall clock never
+  enters a stamp), pinned ONLY on a controlled sandbox variant (the main
+  fixture's real run-dir files may or may not exist on a given machine, so
+  its rows are pinned on paths/kinds/ids but never hash values):
+  `size_bytes`/`content_hash` equal the byte length/sha256 of controlled
+  file content; a report-named path with no file on disk records NULL for
+  both — never fabricated; every controlled evidence file is byte-identical
+  after ingestion and re-ingest recomputes identical rows,
+- `ARTIFACT_CREATED` events (§28:1854): exactly one per artifacts row,
+  appended after every existing derived block (per-candidate, schedule) in
+  derivation order, payloads naming artifactId/path/kind/jobId/
+  attemptNumber, every `at` a pure function of the report's stamps —
+  run-level artifacts at `finishedAt`, candidate-scoped ones at the shared
+  job finish-stamp derivation (the retried variant pins `at` at the final
+  attempt's own `endedAt`; the sandbox variant pins that `endedAt` wins
+  over the ladder derivation) — never `Date.now()`; re-ingest leaves ALL
+  state rows idempotent (runs/candidates/gate_results/phases/jobs/
+  attempts/artifacts/probe_runs) while `events` appends a fresh
+  deterministic block,
 - `PRAGMA integrity_check` returns `ok`,
 - the source fixture is byte-identical after ingestion (persistence is
   read-only over evidence — T-002 rule),
@@ -961,9 +1005,12 @@ Not pinned here and carved by the ticket: the pipeline distiller stage
 (§7.3:546-563 — jobs still cannot receive artifacts: `inputArtifacts`/
 `contextPlan`/`role` remain refused job-spec fields, `src/scheduler.ts:153`,
 and dependencies gate dispatch order only, `src/runner.ts:173-189`), real
-anchor resolution (needs the filesystem artifact store, §34:2028), the
-`artifacts`/`artifact_lineage`/`context_plans`/`context_packets` store
-tables (§27:1825-1827 — blocked on that store and a pipeline producer),
+anchor resolution (§7.4:565-578 — still unimplemented; T-016's artifact
+store makes artifact rows and content hashes exist and checkable, but
+resolves no anchors), the `artifact_lineage`/`context_plans`/
+`context_packets` store tables (§27:1825-1827 — still no pipeline
+producer; `artifacts`/`probe_runs` landed with T-016, pinned by the
+extended Gate 1.6 and Gate 1.16),
 §7.5 rule 4 ("show source chain" is Milestone-7 UI — the inspector's
 lineage render stays the token-free precursor), and any advisory-ness
 change. Gate 2 is not required and not run: neither slice touches any of
@@ -1055,9 +1102,10 @@ Not pinned here and carved by the ticket: benchmark/screenshot-artifact
 probes (§34:2068-2069), Godot/Web/Blender probes (§12.1:911-947), Static
 Diff probe (§12.1:949-951 — mostly exists as worktree diff capture),
 probe persistence (§27:1831 `probe_runs` / §28:1854 `ARTIFACT_CREATED` —
-both producerless, blocked on the unclaimed filesystem artifact store
-§34:2028; the store stays schema v4), the §13:986-996 project-manifest
-`probes:` block and any scenario/environment file format beyond job-spec
+landed since by T-016, schema v5: the extended Gate 1.6 pins the rows and
+the derived events, Gate 1.16 the tamper evidence), the §13:986-996
+project-manifest `probes:` block and any scenario/environment file format
+beyond job-spec
 config, run-level `--probe` CLI flags, probe evidence feeding the context
 system's selectors (T-012's hand-built `type: 'probe'` fixtures are the
 ready consumer — a successor ticket's relationship), and probes on a
@@ -1069,6 +1117,47 @@ the pipeline without probes behaves exactly as today, never probe
 emission — that is this gate's `--jobs` leg), recorded in T-015's Landed
 section — not a permanent Gate 2 extension. Gate 3 n/a (no adapter
 touched).
+
+## Gate 1.16 — artifact store persistence + tamper evidence (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-artifacts.mjs
+```
+
+Pins the T-016 re-verification primitive — `verifyRunArtifacts(runId,
+dbPath)` in `src/store/index.ts`, spec §29:1877's "validate artifact
+files/hashes" face: re-hash a run's recorded `artifacts` rows against the
+files on disk. The store hashes at ingest (the documented third scoping
+case in the store module header: ingest is deterministic as a function of
+*(report, the evidence files it names)* — it reads evidence, never writes
+it, and the wall clock never enters a stamp), so this primitive is what
+makes the recorded hashes *checkable*. Deliberately no CLI this slice — a
+later recovery slice integrates it into `npm run recover` (the T-016
+carve; the T-006/T-008 defaults precedent applies if one ever lands).
+
+No existing gate pins tamper evidence — Gate 1.15 pins bundle writing, not
+store persistence, and Gate 2 spends model tokens — so this gate builds a
+sandbox run with controlled evidence files (one report-named path
+deliberately never written), ingests it, and asserts:
+
+- hash-at-ingest measured the controlled content: every existing file's
+  `size_bytes`/`content_hash` equal its byte length and sha256; a
+  report-named path with no file on disk records NULL for both — never
+  fabricated (AGENTS.md #7); a path named by two report fields (`diffPath`
+  and the final attempt's `outputArtifacts`) yields ONE deduplicated row;
+  the `probe_runs` row matches the report summary field-for-field with a
+  matching probe-bundle artifacts row;
+- re-verification of intact files reports every row `verified` (except the
+  null-hash row), results ordered by `artifact_id`;
+- flipping one file's bytes is detected as `mutated`, with no other row's
+  status disturbed;
+- deleting one file reports `missing`;
+- a null-hash row reports `unverified` — never `mutated`, not `missing` —
+  and stays `unverified` even once its file appears on disk (nothing
+  recorded, nothing claimed);
+- verification is read-only over both sides: the DB file is byte-identical
+  across repeated verifications (sha256) and evidence files are only ever
+  read; an unknown run verifies to an empty result, never a throw.
 
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 

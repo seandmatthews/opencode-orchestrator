@@ -29,26 +29,48 @@
 // itself (`ended_at` and the event's `at`) is the moment of recovery. No
 // report exists to derive from, so the deviation is documented, not
 // smoothed: `ingest` is untouched and stays a pure function of the report.
+//
+// Hash-at-ingest scoping, third case (T-016): ingest is deterministic as a
+// function of *(report, the evidence files it names)*. Every report-named
+// artifact path (report.json, the planner raw output; per candidate: the
+// diff, every attempt's outputArtifacts, the review raw output, probe
+// bundles) is stat-ed and sha256-hashed at ingest — a READ of evidence,
+// never a write; a missing or unreadable file records NULL in both
+// `size_bytes` and `content_hash`, never a fabricated value (AGENTS.md #7,
+// the diffBytes-null precedent). The wall clock still never enters any
+// stamp: re-ingest over unchanged files reproduces byte-identical rows.
+// The alternative — hashes captured into the report at capture time — is a
+// report-shape change that owns its own Gate 2 run; deliberately not this
+// slice. Recorded hashes and artifact rows are evidence only: they never
+// enter promotion or elimination (decisions.md 2026-10-10: gates decide
+// survival).
 
+import { createHash } from 'node:crypto'
+import { closeSync, fstatSync, openSync, readSync } from 'node:fs'
 import { userInfo } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { Attempt, CandidateReport, RunReport, RunSchedule } from '../types.js'
 
-export const SCHEMA_VERSION = 4
+export const SCHEMA_VERSION = 5
 
-// Schema v4 (T-008): the v3 tables plus spec §27's `approval_gates`, narrowed
-// to the columns with a producer (spec §21's `cancelled` state and the
-// `APPROVAL_CANCELLED` event have none until an abort/cancel slice — not
-// pre-defined, the T-007 'abandoned' precedent). Everything is CREATE TABLE IF
-// NOT EXISTS, so an existing v1/v2/v3 refinery.db gains the new table on its
-// next use — no migration machinery, no backfill. The §6.5 columns without a
-// producer the attempts slice (`prompt_version`, `process_identity_json`,
-// `worker_session_id`) are nullable and written null — stated honestly, not
-// smoothed over. Schema v2 (T-006) added `phases`/`jobs`/`job_dependencies`,
-// schema v3 (T-007) `attempts`. The §6.3/§6.4 policy columns are nullable and
-// stay null this slice: RunReport/CandidateReport carry none of those fields,
-// so there is no producer — stated honestly, not smoothed over.
+// Schema v5 (T-016): the v4 tables plus spec §27's `artifacts` and
+// `probe_runs`, narrowed to the columns with a producer. §6.8's
+// `producerAttemptId` narrows to the `(job_id, attempt_number)` pair (the
+// T-007 attempts PK; probes attach to the final attempt, src/types.ts) —
+// nullable: run-level artifacts (report.json, the planner raw output) have
+// no producer attempt, and pre-T-007 reports carry no attempts array. The
+// §6.8 columns without a producer are OMITTED, not pre-defined (the
+// documented-narrowing precedent, T-006's policy columns): `media_type`,
+// `lineage`, `metadata`, `retention_class` — stated honestly, not smoothed
+// over. Everything is CREATE TABLE IF NOT EXISTS, so an existing
+// v1/v2/v3/v4 refinery.db gains the new tables on its next use — no
+// migration machinery, no backfill. Schema v2 (T-006) added
+// `phases`/`jobs`/`job_dependencies`, schema v3 (T-007) `attempts`,
+// schema v4 (T-008) `approval_gates`. The §6.3/§6.4 policy columns are
+// nullable and stay null this slice: RunReport/CandidateReport carry none
+// of those fields, so there is no producer — stated honestly, not smoothed
+// over.
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS runs (
   run_id       TEXT PRIMARY KEY,
@@ -155,6 +177,27 @@ CREATE TABLE IF NOT EXISTS approval_gates (
   note         TEXT,
   PRIMARY KEY (run_id, phase_id, job_id)
 );
+CREATE TABLE IF NOT EXISTS artifacts (
+  run_id         TEXT NOT NULL REFERENCES runs(run_id),
+  artifact_id    TEXT NOT NULL,
+  kind           TEXT NOT NULL,
+  job_id         TEXT,
+  attempt_number INTEGER,
+  path           TEXT NOT NULL,
+  size_bytes     INTEGER,
+  content_hash   TEXT,
+  PRIMARY KEY (run_id, artifact_id)
+);
+CREATE TABLE IF NOT EXISTS probe_runs (
+  run_id      TEXT NOT NULL REFERENCES runs(run_id),
+  job_id      TEXT NOT NULL,
+  probe_id    TEXT NOT NULL,
+  scenario_id TEXT NOT NULL,
+  success     INTEGER NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  bundle_path TEXT NOT NULL,
+  PRIMARY KEY (run_id, job_id, probe_id)
+);
 `
 
 // Event vocabulary — spec §28. This slice emits ATTEMPT_STARTED (T-007,
@@ -175,7 +218,194 @@ CREATE TABLE IF NOT EXISTS approval_gates (
 // here and pinned by the extended Gate 1.6. Never-dispatched jobs get no
 // events: they are recorded as not-dispatched, never fabricated as
 // terminal. node:sqlite binds null/number/bigint/string/Buffer only, hence
-// 1|0 booleans.
+// 1|0 booleans. T-016 adds ARTIFACT_CREATED (§28:1854), ingest-derived
+// post-hoc: exactly one per `artifacts` row, appended after every existing
+// derived block, every `at` a pure function of the report's stamps (never
+// `Date.now()`), so re-ingest appends a fresh deterministic block.
+
+// ---------- T-016: the filesystem artifact store ----------
+
+/**
+ * Kind of one recorded artifact (§6.8's `ArtifactType` narrowed to this
+ * slice's producers). The report names evidence only as path strings — no
+ * producer carries a kind — so the kind derives from the named path:
+ * `.patch` → 'diff' (the worktree diff capture), `.json` → 'report'
+ * (report.json, probe evidence bundles), anything else → 'log'
+ * (worker.log, the planner/review raw model output). One deterministic
+ * rule covers exactly what the runner writes (src/runner.ts) and stays
+ * stable no matter which report field derived the row first: a path named
+ * twice under the same producer triple (diffPath also inside a final
+ * attempt's outputArtifacts) yields ONE deduplicated row with one kind.
+ */
+export type ArtifactKind = 'diff' | 'log' | 'report'
+
+export function artifactKindOf(path: string): ArtifactKind {
+  if (path.endsWith('.patch')) return 'diff'
+  if (path.endsWith('.json')) return 'report'
+  return 'log'
+}
+
+/**
+ * Deterministic artifact id over the producer triple (candidateId, attempt
+ * number, path) — stable across re-ingest. Shape:
+ * `<scope>/<basename>-<sha256(triple).slice(0,16)>`, where scope is `run`
+ * for run-level artifacts (report.json, the planner raw output), `j:<id>`
+ * for candidate-scoped ones with no recorded attempt, and `j:<id>@a<n>`
+ * for attempt-scoped ones. Job ids are charset-restricted to
+ * `[a-z0-9][a-z0-9-]*` (src/scheduler.ts), so the `:`/`@` punctuation
+ * keeps the three scopes collision-free; the 16-hex digest over the FULL
+ * triple keeps same-named basenames and one path under different producers
+ * apart. Pinned by exact literal in Gate 1.6.
+ */
+export function artifactId(candidateId: string | null, attemptNumber: number | null, path: string): string {
+  const scope = candidateId === null
+    ? 'run'
+    : attemptNumber === null
+      ? `j:${candidateId}`
+      : `j:${candidateId}@a${attemptNumber}`
+  const digest = createHash('sha256')
+    .update(`${candidateId ?? ''}\u0000${attemptNumber ?? ''}\u0000${path}`)
+    .digest('hex')
+    .slice(0, 16)
+  return `${scope}/${basename(path)}-${digest}`
+}
+
+/** 1 MiB read chunks — evidence files (worker logs, diffs, bundles) hash
+ *  without being loaded whole into memory. */
+const HASH_CHUNK_BYTES = 1024 * 1024
+
+/**
+ * stat + sha256 one evidence file, reading ONLY (never writing — evidence
+ * is read-only over, the T-002 rule). A missing, unreadable, or
+ * non-regular file records NULL in both fields — never a fabricated value
+ * (AGENTS.md #7, the diffBytes-null precedent). `sizeBytes` is the byte
+ * count actually hashed, so size and hash always describe the same read.
+ */
+function measureEvidenceFile(path: string): { sizeBytes: number | null; contentHash: string | null } {
+  let fd: number
+  try {
+    fd = openSync(path, 'r')
+  } catch {
+    return { sizeBytes: null, contentHash: null }
+  }
+  try {
+    if (!fstatSync(fd).isFile()) return { sizeBytes: null, contentHash: null }
+    const hash = createHash('sha256')
+    const chunk = Buffer.alloc(HASH_CHUNK_BYTES)
+    let total = 0
+    for (;;) {
+      const n = readSync(fd, chunk, 0, HASH_CHUNK_BYTES, null)
+      if (n === 0) break
+      hash.update(chunk.subarray(0, n))
+      total += n
+    }
+    return { sizeBytes: total, contentHash: hash.digest('hex') }
+  } catch {
+    return { sizeBytes: null, contentHash: null }
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** One row of the artifacts derivation, before its evidence file is
+ *  measured. Internal — the shape the upsert writes. */
+interface DerivedArtifact {
+  artifactId: string
+  kind: ArtifactKind
+  jobId: string | null
+  attemptNumber: number | null
+  path: string
+}
+
+/** The final attempt's number for a candidate report — the attempt the
+ *  candidate's top-level fields (diffPath, review) and its probes belong to
+ *  (src/types.ts: top-level fields keep the FINAL attempt's values; probes
+ *  run on the final completed attempt). Null for pre-T-007 reports that
+ *  carry no attempts array. */
+function finalAttemptNumber(c: CandidateReport): number | null {
+  const arr = c.attempts ?? []
+  return arr.length > 0 ? arr[arr.length - 1]!.number : null
+}
+
+/**
+ * The artifacts derivation (T-016): one row per evidence path the finished
+ * RunReport itself names — never path guessing. In derivation order:
+ * report.json (recovered via the reportPathOf heuristic), the planner raw
+ * output, then per candidate in report order: the diff, every recorded
+ * attempt's outputArtifacts (attempt order, then array order), the review
+ * raw output, the probe bundles (summary order). A path named twice under
+ * the same producer triple yields ONE deduplicated row (first occurrence
+ * wins — the only overlap the runner writes is diffPath also inside the
+ * final attempt's outputArtifacts, same triple, same id). Files the report
+ * does not name (dispatch.jsonl, planner.log, review.json, probe .log
+ * artifacts living inside bundles) get no row.
+ */
+function deriveArtifacts(report: RunReport): DerivedArtifact[] {
+  const out: DerivedArtifact[] = []
+  const seen = new Set<string>()
+  const push = (candidateId: string | null, attemptNumber: number | null, path: string): void => {
+    const id = artifactId(candidateId, attemptNumber, path)
+    if (seen.has(id)) return
+    seen.add(id)
+    out.push({ artifactId: id, kind: artifactKindOf(path), jobId: candidateId, attemptNumber, path })
+  }
+  const reportPath = reportPathOf(report)
+  if (reportPath) push(null, null, reportPath)
+  if (report.planner?.rawOutputPath) push(null, null, report.planner.rawOutputPath)
+  for (const c of report.candidates) {
+    const fin = finalAttemptNumber(c)
+    if (c.diffPath) push(c.id, fin, c.diffPath)
+    for (const a of c.attempts ?? []) {
+      for (const p of a.outputArtifacts ?? []) push(c.id, a.number, p)
+    }
+    if (c.review?.rawOutputPath) push(c.id, fin, c.review.rawOutputPath)
+    for (const pr of c.probes ?? []) push(c.id, fin, pr.bundlePath)
+  }
+  return out
+}
+
+/**
+ * Re-verification primitive (spec §29:1877's "validate artifact files/
+ * hashes" face): re-hashes one run's recorded artifacts against the files
+ * on disk. Per row: 'verified' (the file's hash matches the recorded one),
+ * 'mutated' (the file exists but its hash differs), 'missing' (the named
+ * file is gone), 'unverified' (the row was recorded null — nothing to
+ * check, never readable as 'mutated'). Read-only over both sides: the DB
+ * opens readOnly and evidence files are only read. A later recovery slice
+ * integrates this into `npm run recover`; deliberately no CLI this slice
+ * (T-016). Rows come back ordered by artifact_id, so the result is
+ * deterministic.
+ */
+export type ArtifactVerificationStatus = 'verified' | 'mutated' | 'missing' | 'unverified'
+
+export interface ArtifactVerification {
+  artifactId: string
+  path: string
+  status: ArtifactVerificationStatus
+}
+
+export function verifyRunArtifacts(runId: string, dbPath: string): ArtifactVerification[] {
+  const db = new DatabaseSync(dbPath, { readOnly: true })
+  try {
+    const rows = db.prepare(
+      'SELECT artifact_id, path, content_hash FROM artifacts WHERE run_id = ? ORDER BY artifact_id',
+    ).all(runId) as { artifact_id: string; path: string; content_hash: string | null }[]
+    return rows.map((r) => {
+      let status: ArtifactVerificationStatus
+      if (r.content_hash === null) {
+        status = 'unverified'
+      } else {
+        const measured = measureEvidenceFile(r.path)
+        status = measured.contentHash === null
+          ? 'missing'
+          : measured.contentHash === r.content_hash ? 'verified' : 'mutated'
+      }
+      return { artifactId: r.artifact_id, path: r.path, status }
+    })
+  } finally {
+    db.close()
+  }
+}
 
 // ---------- T-008: approval gates ----------
 
@@ -624,15 +854,18 @@ export function cycleRefusal(jobs: readonly DagJobSpec[]): string | null {
 /**
  * Persist one finished run. The only DB writer in the store.
  *
- * `runs`/`candidates`/`gate_results`/`phases`/`jobs`/`attempts` upsert by
- * natural key; `job_dependencies` is re-derived (delete + insert) so re-ingest
- * stays idempotent; `events` is append-only and never rewrites prior rows.
- * The DAG is derived from the report — a pure function, validated before any
- * DB side effect. A report carrying a schedule block (T-009 --jobs mode)
- * derives the REAL phases/jobs/edges from it; otherwise T-006's flat
- * derivation stands. Attempt and schedule stamps are copied from
- * report-carried values, never `Date.now()`. Throws on failure — the caller
- * (src/cli.ts) logs loudly and continues.
+ * `runs`/`candidates`/`gate_results`/`phases`/`jobs`/`attempts`/`artifacts`/
+ * `probe_runs` upsert by natural key; `job_dependencies` is re-derived
+ * (delete + insert) so re-ingest stays idempotent; `events` is append-only
+ * and never rewrites prior rows. The DAG is derived from the report — a
+ * pure function, validated before any DB side effect. A report carrying a
+ * schedule block (T-009 --jobs mode) derives the REAL phases/jobs/edges
+ * from it; otherwise T-006's flat derivation stands. Attempt and schedule
+ * stamps are copied from report-carried values, never `Date.now()`.
+ * Artifact rows (T-016) are measured at ingest — the header's third
+ * scoping case: a read of the evidence files the report names, NULL when a
+ * file is missing, never a fabricated value. Throws on failure — the
+ * caller (src/cli.ts) logs loudly and continues.
  */
 export function ingest(report: RunReport, dbPath: string): void {
   const schedule = report.schedule
@@ -644,6 +877,21 @@ export function ingest(report: RunReport, dbPath: string): void {
     : report.candidates.map((c) => ({ id: c.id, phaseId: DERIVED_PHASE_ID, dependencies: [] }))
   const refusal = unknownDependencyRefusal(dagJobs) ?? cycleRefusal(dagJobs)
   if (refusal) throw new Error(`derived job DAG for run ${report.runId} refused: ${refusal}`)
+
+  // T-016 hash-at-ingest: every report-named evidence path is measured
+  // BEFORE the DB opens (the header's third scoping case — ingest is a
+  // function of the report and the evidence files it names; the wall clock
+  // enters nowhere).
+  const artifacts: (DerivedArtifact & { sizeBytes: number | null; contentHash: string | null })[] =
+    deriveArtifacts(report).map((a) => ({ ...a, ...measureEvidenceFile(a.path) }))
+  const probeRuns = report.candidates.flatMap((c) => (c.probes ?? []).map((p) => ({
+    jobId: c.id,
+    probeId: p.probeId,
+    scenarioId: p.scenarioId,
+    success: p.success,
+    durationMs: p.durationMs,
+    bundlePath: p.bundlePath,
+  })))
 
   const db = new DatabaseSync(dbPath)
   try {
@@ -707,6 +955,34 @@ export function ingest(report: RunReport, dbPath: string): void {
       // re-ingest stays deterministic and a DB failure can never influence a
       // run. Appended after the per-candidate block, in schedule order.
       if (schedule) insertScheduleEvents(db, report, schedule)
+      // T-016: the artifacts + probe_runs rows (upserts; hash columns
+      // recompute from the files, which are immutable-by-convention),
+      // then the derived ARTIFACT_CREATED block (§28:1854) — one event per
+      // artifacts row, appended after every existing derived block in
+      // derivation order, every `at` a pure function of the report's stamps
+      // (never `Date.now()`): run-level artifacts at finishedAt,
+      // candidate-scoped ones at the shared job finish-stamp derivation.
+      // Re-ingest leaves the rows idempotent while events append a fresh
+      // deterministic block. Recorded evidence only — never a verdict input
+      // (decisions.md: gates decide survival).
+      const byCandidateId = new Map(report.candidates.map((c) => [c.id, c]))
+      for (const a of artifacts) {
+        upsertArtifact(db, report.runId, a)
+      }
+      for (const p of probeRuns) {
+        upsertProbeRun(db, report.runId, p)
+      }
+      for (const a of artifacts) {
+        const c = a.jobId === null ? undefined : byCandidateId.get(a.jobId)
+        const at = c === undefined ? report.finishedAt : jobFinishAt(report, c)
+        insertEvent(db, report.runId, 'ARTIFACT_CREATED', at, {
+          artifactId: a.artifactId,
+          path: a.path,
+          kind: a.kind,
+          jobId: a.jobId,
+          attemptNumber: a.attemptNumber,
+        })
+      }
       db.exec('COMMIT')
     } catch (e) {
       try {
@@ -968,6 +1244,45 @@ function insertEvent(
 ): void {
   db.prepare('INSERT INTO events (run_id, type, at, payload) VALUES (?, ?, ?, ?)')
     .run(runId, type, at, JSON.stringify(payload))
+}
+
+/** One row per report-named evidence path (T-016): `artifact_id` is the
+ *  deterministic producer-triple id (`artifactId`), `kind` the path-derived
+ *  `ArtifactKind`, `size_bytes`/`content_hash` what hash-at-ingest measured
+ *  (NULL when the file was missing — never fabricated). Upsert by natural
+ *  key, so re-ingest recomputes the hashes from unchanged files and the
+ *  rows come out identical. */
+function upsertArtifact(
+  db: DatabaseSync,
+  runId: string,
+  a: DerivedArtifact & { sizeBytes: number | null; contentHash: string | null },
+): void {
+  db.prepare(
+    `INSERT INTO artifacts (run_id, artifact_id, kind, job_id, attempt_number, path, size_bytes, content_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(run_id, artifact_id) DO UPDATE SET
+       kind = excluded.kind, job_id = excluded.job_id, attempt_number = excluded.attempt_number,
+       path = excluded.path, size_bytes = excluded.size_bytes, content_hash = excluded.content_hash`,
+  ).run(runId, a.artifactId, a.kind, a.jobId, a.attemptNumber, a.path, a.sizeBytes, a.contentHash)
+}
+
+/** One row per probe summary the report carries (T-016), field-for-field
+ *  the `ProbeRunSummary` shape (src/types.ts) keyed (run_id, job_id,
+ *  probe_id) — the bundle's own artifacts row lives in `artifacts` (the
+ *  bundle is the addressable evidence unit; its internal .log files get no
+ *  row this slice). */
+function upsertProbeRun(
+  db: DatabaseSync,
+  runId: string,
+  p: { jobId: string; probeId: string; scenarioId: string; success: boolean; durationMs: number; bundlePath: string },
+): void {
+  db.prepare(
+    `INSERT INTO probe_runs (run_id, job_id, probe_id, scenario_id, success, duration_ms, bundle_path)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(run_id, job_id, probe_id) DO UPDATE SET
+       scenario_id = excluded.scenario_id, success = excluded.success,
+       duration_ms = excluded.duration_ms, bundle_path = excluded.bundle_path`,
+  ).run(runId, p.jobId, p.probeId, p.scenarioId, p.success ? 1 : 0, p.durationMs, p.bundlePath)
 }
 
 /** Report's own clock: worker finished at startedAt + its duration; gates and
