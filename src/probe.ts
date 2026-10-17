@@ -49,6 +49,27 @@
 //     gate outcomes — evidence about failures is evidence). A thrown final
 //     attempt has no completed workspace pass to probe; it records no probe
 //     evidence this slice.
+//   - Benchmark semantics (T-018, §12.1:907-909 — the spec names the
+//     Benchmark Probe in one line, "Produces structured performance results",
+//     and defines nothing; chosen and documented here, the
+//     T-007/T-012/T-013 precedent). A benchmark probe runs its command
+//     `repeats` times, SEQUENTIALLY, each through the shared
+//     executeProbeCommand core (one spawn path, AGENTS.md #4) — each repeat
+//     gets the FULL timeoutMs budget (a per-repeat budget; total wall time
+//     bounded by repeats × timeoutMs). Every requested repeat runs regardless
+//     of earlier outcomes, and one `run-<i> duration` measurement (unit ms,
+//     i 1-based) is recorded per repeat that actually RAN — a repeat that
+//     exited non-zero or timed out still ran and its durationMs is real
+//     wall-clock evidence; a repeat whose spawn was REFUSED produced no run
+//     and gets no duration. Summary measurements min/median/p95 (unit ms)
+//     over the recorded durations: each the NEAREST-RANK order statistic of
+//     the ascending-sorted durations — sorted[ceil(q·n)−1] for median
+//     (q = 0.5) and p95 (q = 0.95), sorted[0] for min; no interpolation,
+//     stdlib sort only (zero new deps, decisions.md 2026-10-10). The probe
+//     carries NO threshold/assertion input of any kind: it records, never
+//     judges (decisions.md 2026-10-10) — a success:false benchmark bundle
+//     changes nothing downstream. Its 'report'-kind results artifact
+//     (<probeId>.results.json) is that kind's first producer.
 //
 // Every probe subprocess is list-form `spawn` (never `exec` — AGENTS.md #4,
 // stricter than CommandGate's operator-typed shell strings), with the T-011
@@ -61,13 +82,16 @@ import { join } from 'node:path'
 import { killFailureLines, killTreeVerified } from './kill-tree.js'
 import type { GateResult, WorkspaceLease } from './types.js'
 
-/** The two generic probe types of this slice (§34:2061-2072 first list).
- *  Benchmark, screenshot, Godot/Web/Blender probes are successor slices. */
-export type ProbeType = 'command' | 'test'
+/** The generic probe types landed so far (§34:2061-2072's start list;
+ *  `benchmark` landed with T-018 — the first Measurement producer).
+ *  Screenshot, Godot/Web/Blender probes are successor slices. */
+export type ProbeType = 'command' | 'test' | 'benchmark'
 
 /** Kind of an evidence artifact file (§12.1 names logs, screenshots, video).
- *  This slice's producers write `log` only; the vocabulary is documented,
- *  not grown speculatively. */
+ *  Producers so far write `log` (every probe's combined output) and — since
+ *  T-018's BenchmarkProbe — `report` (the benchmark's machine-readable
+ *  per-run results table, that kind's first producer); the vocabulary is
+ *  documented, not grown speculatively. */
 export type EvidenceArtifactKind = 'log' | 'report'
 
 /** The probe's configuration, as written in the --jobs spec (§12:891-893's
@@ -81,6 +105,13 @@ export interface ScenarioSpec {
   command: { exe: string; args: string[] }
   /** Wall-clock limit; defaults to DEFAULT_PROBE_TIMEOUT_MS. */
   timeoutMs?: number
+  /** Repetition count. REQUIRED on a benchmark probe (a positive integer
+   *  >= 1 — a benchmark with no repetition count is not a benchmark) and
+   *  REFUSED on every other probe type: the field exists only where it
+   *  means something (the T-009 unknown-field posture). Enforced by
+   *  parseJobsSpec (src/scheduler.ts); this type carries it optionally
+   *  because the union is shared. */
+  repeats?: number
 }
 
 /** The run-level context a probe needs beyond the workspace (§12:891-893's
@@ -350,14 +381,18 @@ function executeProbeCommand(
   })
 }
 
-function toGateResult(probeId: string, e: ProbeExecution, extra: { passed: boolean }): GateResult {
+/** One probe execution as a recorded GateResult entry — evidence inside a
+ *  bundle, never a verdict. `name` is the entry's self-naming name: the
+ *  probe id for command/test probes, '<probeId>#run-<i>' for a benchmark
+ *  probe's per-repeat entries (T-018). */
+function toGateResult(name: string, e: ProbeExecution, extra: { passed: boolean }): GateResult {
   // A spawn refusal produced no output — the refusal itself is the only
   // thing the entry's tail can record (the bundle's `error` names it too).
   const tail = e.spawnError !== undefined && e.output.length === 0
     ? `spawn refused: ${e.spawnError}`
     : e.output
   return {
-    name: probeId,
+    name,
     passed: extra.passed,
     exitCode: e.exitCode,
     durationMs: e.durationMs,
@@ -377,6 +412,31 @@ function logArtifact(
   const path = join(dir, `${probeId}.log`)
   writeFileSync(path, output)
   return { name: `${probeId}.log`, path, kind: 'log', sizeBytes: Buffer.byteLength(output) }
+}
+
+/** The machine-readable per-run table of a benchmark probe (T-018) — the
+ *  FIRST producer of the 'report' evidence-artifact kind: written beside the
+ *  bundle as <probeId>.results.json. When no repeat ran (every spawn
+ *  refused) the table carries an empty durationsMs and no summary fields —
+ *  nothing fabricated. */
+function resultsArtifact(
+  environment: EnvironmentSpec,
+  results: {
+    probeId: string
+    scenarioId: string
+    repeats: number
+    durationsMs: number[]
+    minMs?: number
+    medianMs?: number
+    p95Ms?: number
+  },
+): EvidenceArtifactRef {
+  const dir = probeEvidenceDir(environment.artifactsDir, environment.candidateId)
+  mkdirSync(dir, { recursive: true })
+  const path = join(dir, `${results.probeId}.results.json`)
+  const body = JSON.stringify(results, null, 2)
+  writeFileSync(path, body)
+  return { name: `${results.probeId}.results.json`, path, kind: 'report', sizeBytes: Buffer.byteLength(body) }
 }
 
 // ---------- CommandProbe: the exit-0 evidence probe ----------
@@ -513,8 +573,141 @@ export class TestProbe implements Probe {
   }
 }
 
+/** The nearest-rank order statistic (the documented percentile convention,
+ *  module docblock): for quantile q over the ascending-sorted durations the
+ *  value is sorted[ceil(q·n)−1] — no interpolation, stdlib sort only. */
+function nearestRank(sorted: number[], q: number): number {
+  return sorted[Math.ceil(q * sorted.length) - 1]!
+}
+
+/** §12.1's Benchmark Probe (T-018; §12.1:907-909 names it in one line and
+ *  defines nothing — the semantics are the module-docblock choices):
+ *  runs the scenario's command `repeats` times, sequentially, each through
+ *  the shared executeProbeCommand core (list-form spawn, T-011 verified tree
+ *  kill — no second spawn path), and records QUANTITATIVE measurements —
+ *  the first probe producing structured numbers rather than pass/fail
+ *  evidence. It RECORDS, never JUDGES: no threshold/assertion input exists
+ *  on the scenario or here (decisions.md 2026-10-10), and the verdict
+ *  ladder is gate-only, untouched by construction.
+ *
+ *   - repeats: required positive integer >= 1 on a benchmark scenario
+ *     (parseJobsSpec enforces; refused on other probe types). Each repeat
+ *     gets the FULL timeoutMs budget (default DEFAULT_PROBE_TIMEOUT_MS) —
+ *     a per-repeat budget, total wall time bounded by repeats × timeoutMs.
+ *   - Every requested repeat runs, sequentially, regardless of earlier
+ *     outcomes — evidence about failures is evidence. Measurements are
+ *     recorded regardless of success: one `run-<i> duration` (unit ms)
+ *     per repeat that actually ran (a non-zero exit or a timeout still
+ *     ran — its durationMs is real wall-clock evidence), plus min/median/
+ *     p95 (unit ms) over the recorded durations, each the nearest-rank
+ *     order statistic. A spawn-refused repeat produced no run: no
+ *     `run-<i>` duration for it.
+ *   - Success = EVERY requested repeat spawned cleanly, exited 0, and did
+ *     not time out. `error` names the FIRST failing repeat with counts
+ *     ("run 2/5 exited with code 3" / "run 3/5 timed out after Nms" /
+ *     "run 1/5 could not be spawned: ENOENT"). A benchmark that completes
+ *     zero repeats is success: false, never a pass (AGENTS.md #7 applied
+ *     to bundles).
+ *   - Artifacts: the combined output of all repeats in one .log artifact
+ *     with `=== run <i> ===` separators, plus the 'report'-kind results
+ *     artifact <probeId>.results.json — the machine-readable per-run table
+ *     {probeId, scenarioId, repeats, durationsMs, minMs, medianMs, p95Ms}.
+ *   - gateResults: one GateResult entry per repeat, in run order, named
+ *     '<probeId>#run-<i>' so each repeat's evidence row is self-naming. */
+export class BenchmarkProbe implements Probe {
+  readonly id: string
+  readonly scenario: ScenarioSpec
+
+  constructor(scenario: ScenarioSpec) {
+    this.id = scenario.id
+    this.scenario = scenario
+  }
+
+  async run(input: ProbeInput): Promise<EvidenceBundle> {
+    const s = input.scenario
+    const repeats = s.repeats ?? 0
+    const timeoutMs = s.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS
+    const durations: number[] = []
+    const measurements: Measurement[] = []
+    const gateResults: GateResult[] = []
+    const logParts: string[] = []
+    let firstError: string | undefined
+    for (let i = 1; i <= repeats; i++) {
+      logParts.push(`=== run ${i} ===`)
+      const execution = await executeProbeCommand(s.command, input.workspace.path, timeoutMs)
+      logParts.push(execution.output)
+      const repeatPassed = execution.spawnError === undefined && !execution.timedOut && execution.exitCode === 0
+      gateResults.push(toGateResult(`${this.id}#run-${i}`, execution, { passed: repeatPassed }))
+      if (execution.spawnError === undefined) {
+        // The repeat ran — its wall-clock duration is evidence even when it
+        // failed or timed out. A spawn refusal produced no run: no duration.
+        durations.push(execution.durationMs)
+        measurements.push({ name: `run-${i} duration`, value: execution.durationMs, unit: 'ms' })
+      }
+      if (firstError === undefined) {
+        if (execution.spawnError !== undefined) {
+          firstError = `run ${i}/${repeats} could not be spawned: ${execution.spawnError}`
+        } else if (execution.timedOut) {
+          firstError = `run ${i}/${repeats} timed out after ${timeoutMs}ms`
+        } else if (execution.exitCode !== 0) {
+          firstError = `run ${i}/${repeats} exited with code ${execution.exitCode}`
+        }
+      }
+    }
+    // Nearest-rank summaries over the recorded durations — omitted entirely
+    // when no repeat ran (nothing measured, nothing fabricated).
+    let minMs: number | undefined
+    let medianMs: number | undefined
+    let p95Ms: number | undefined
+    if (durations.length > 0) {
+      const sorted = [...durations].sort((a, b) => a - b)
+      minMs = sorted[0]!
+      medianMs = nearestRank(sorted, 0.5)
+      p95Ms = nearestRank(sorted, 0.95)
+      measurements.push(
+        { name: 'min', value: minMs, unit: 'ms' },
+        { name: 'median', value: medianMs, unit: 'ms' },
+        { name: 'p95', value: p95Ms, unit: 'ms' },
+      )
+    }
+    // Zero completed repeats is never a pass (AGENTS.md #7 applied to
+    // bundles): repeats >= 1 && durations.length === repeats is exactly
+    // "every requested repeat spawned cleanly", which success also requires.
+    const success = firstError === undefined && repeats >= 1 && durations.length === repeats
+    const bundle: EvidenceBundle = {
+      probeId: this.id,
+      scenarioId: s.id,
+      success,
+      artifacts: [
+        logArtifact(input.environment, this.id, logParts.join('\n')),
+        resultsArtifact(input.environment, {
+          probeId: this.id,
+          scenarioId: s.id,
+          repeats,
+          durationsMs: durations,
+          ...(minMs !== undefined ? { minMs } : {}),
+          ...(medianMs !== undefined ? { medianMs } : {}),
+          ...(p95Ms !== undefined ? { p95Ms } : {}),
+        }),
+      ],
+      measurements,
+      gateResults,
+      ...(firstError !== undefined ? { error: firstError } : {}),
+    }
+    return bundle
+  }
+}
+
 /** The --jobs probe factory: the parsed ScenarioSpec's type has already been
- *  narrowed to 'command' | 'test' by parseJobsSpec (src/scheduler.ts). */
+ *  narrowed to 'command' | 'test' | 'benchmark' by parseJobsSpec
+ *  (src/scheduler.ts). */
 export function createProbe(scenario: ScenarioSpec): Probe {
-  return scenario.type === 'test' ? new TestProbe(scenario) : new CommandProbe(scenario)
+  switch (scenario.type) {
+    case 'test':
+      return new TestProbe(scenario)
+    case 'benchmark':
+      return new BenchmarkProbe(scenario)
+    default:
+      return new CommandProbe(scenario)
+  }
 }

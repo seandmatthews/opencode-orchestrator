@@ -201,14 +201,14 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
       probes = j.probes.map((p, i) => {
         const where = `job '${id}' probes[${i}]`
         if (!isPlainObject(p)) refuse(`${where} must be an object`)
-        unknownField(where, p, ['id', 'type', 'command', 'timeoutMs'])
+        unknownField(where, p, ['id', 'type', 'command', 'timeoutMs', 'repeats'])
         if (typeof p.id !== 'string' || !SPEC_ID_PATTERN.test(p.id)) {
           refuse(`${where} id ${JSON.stringify(p.id)} does not match [a-z0-9][a-z0-9-]* — it names the probe's evidence files`)
         }
         if (seenProbes.has(p.id)) refuse(`job '${id}' has duplicate probe id '${p.id}' — probe ids must be unique per job`)
         seenProbes.add(p.id)
-        if (p.type !== 'command' && p.type !== 'test') {
-          refuse(`${where} type must be "command" or "test" (got ${JSON.stringify(p.type)}) — unknown probe types are refused, not ignored`)
+        if (p.type !== 'command' && p.type !== 'test' && p.type !== 'benchmark') {
+          refuse(`${where} type must be "command", "test", or "benchmark" (got ${JSON.stringify(p.type)}) — unknown probe types are refused, not ignored`)
         }
         if (!isPlainObject(p.command)) refuse(`${where} command must be an object with "exe" and "args"`)
         unknownField(`${where} command`, p.command, ['exe', 'args'])
@@ -221,11 +221,23 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
         if (p.timeoutMs !== undefined && (typeof p.timeoutMs !== 'number' || !Number.isInteger(p.timeoutMs) || p.timeoutMs <= 0)) {
           refuse(`${where} timeoutMs must be a positive integer`)
         }
+        // T-018: repeats is REQUIRED (positive integer >= 1) on a benchmark
+        // probe — a benchmark with no repetition count is not a benchmark —
+        // and REFUSED on every other probe type: the field exists only where
+        // it means something (the T-009 unknown-field posture).
+        if (p.type === 'benchmark') {
+          if (typeof p.repeats !== 'number' || !Number.isInteger(p.repeats) || p.repeats < 1) {
+            refuse(`${where} repeats must be a positive integer >= 1 on a benchmark probe (got ${JSON.stringify(p.repeats)})`)
+          }
+        } else if (p.repeats !== undefined) {
+          refuse(`${where} repeats is only valid on a benchmark probe (got type ${JSON.stringify(p.type)})`)
+        }
         return {
           id: p.id,
           type: p.type,
           command: { exe: p.command.exe, args: p.command.args as string[] },
           ...(p.timeoutMs !== undefined ? { timeoutMs: p.timeoutMs } : {}),
+          ...(p.type === 'benchmark' ? { repeats: p.repeats as number } : {}),
         }
       })
     }

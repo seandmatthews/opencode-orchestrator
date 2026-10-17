@@ -1,9 +1,9 @@
 # T-018 — Benchmark probe: repeated measured command → quantitative EvidenceBundle (per-run durations + min/median/p95)
 
-**Status:** proposed
+**Status:** done 2026-10-17
 **Category:** engine
 **Value (1-5):** 3 · **Risk (1-5):** 2
-**Depends on:** T-015 (done 2026-10-17 — the Probe seam + EvidenceBundle contract this extends). T-016 (proposed) is an **ordering note, not a build dependency**: `probe_runs` persistence is T-016's claim and `ProbeRunSummary` (src/types.ts:279-285) is type-agnostic, so a benchmark probe's summary persists through it unchanged whenever it lands; this ticket touches no store code.
+**Depends on:** T-015 (done 2026-10-17 — the Probe seam + EvidenceBundle contract this extends). T-016 (done 2026-10-17, as this ticket's ordering note anticipated) is an **ordering note, not a build dependency**: `probe_runs` persistence is T-016's claim and `ProbeRunSummary` (src/types.ts:279-285) is type-agnostic, so a benchmark probe's summary persists through it unchanged whenever it lands; this ticket touches no store code.
 
 ## What
 
@@ -167,7 +167,7 @@ alone, pins it.
 
 ## Acceptance criteria
 
-- [ ] `ProbeType` includes `'benchmark'`; `BenchmarkProbe` exists behind the landed
+- [x] `ProbeType` includes `'benchmark'`; `BenchmarkProbe` exists behind the landed
       Probe seam with the documented contract above (required positive-integer
       `repeats` on benchmark and refused elsewhere, per-repeat full timeout budget,
       nearest-rank min/median/p95, the `'report'` results artifact, one GateResult
@@ -175,36 +175,36 @@ alone, pins it.
       never a pass, **no threshold field**); zero model/harness knowledge in the
       module (decisions.md:11-15) — pinned by **Gate 0** (`tsc --noEmit`) plus the
       **Gate 1.15 P3** contract legs.
-- [ ] The parser accepts a benchmark probe with `repeats` verbatim and refuses: a
+- [x] The parser accepts a benchmark probe with `repeats` verbatim and refuses: a
       genuinely-unknown type with the updated message; missing/zero/negative/
       non-integer/non-number `repeats` on benchmark; `repeats` on a `command`/`test`
       probe — pinned by **Gate 1.15 P2** (contract fixtures over `parseJobsSpec`,
       token-free).
-- [ ] **The scripts/check-probe.mjs:291-292 benchmark-refusal pin is explicitly
+- [x] **The scripts/check-probe.mjs:291-292 benchmark-refusal pin is explicitly
       flipped** to positive-coverage-plus-genuine-unknown-refusal in this
       change-set — recorded here as the change-set's one intentional invalidation
       of an existing assertion; no other existing check is weakened — pinned by the
       full fast tier, **`npm run verify` ALL GREEN** with the flipped Gate 1.15.
-- [ ] Happy path, token-free: `BenchmarkProbe{node build.js, repeats: 5}` on a fresh
+- [x] Happy path, token-free: `BenchmarkProbe{node build.js, repeats: 5}` on a fresh
       demo-target fixture yields success true; exactly 5 `run-<i> duration`
       measurements + `min`/`median`/`p95` (unit `'ms'`); min ≤ median ≤ p95; the
       summaries exactly equal the nearest-rank recomputation over the recorded
       durations; each per-run duration equals its GateResult entry's durationMs; a
       `'report'`-kind results artifact with sizeBytes > 0 carrying the 5 durations;
       the bundle passes `validateEvidenceBundle` — pinned by **Gate 1.15 P3**.
-- [ ] Failure faces: non-zero exit (repeats 3) → success false with the failing run
+- [x] Failure faces: non-zero exit (repeats 3) → success false with the failing run
       named in `error` and all 3 durations recorded; non-existent exe → success
       false with zero `run-*` measurements, never a pass; a timing-out repeat →
       exitCode null, durationMs ≥ timeoutMs, the spawned tree verified dead on the
       real process table, kill evidence on that repeat's GateResult entry — pinned
       by **Gate 1.15 P3** (timeout leg per the P4 process-table pattern).
-- [ ] Evidence emission in a real pipeline: a `--jobs` run carrying a benchmark
+- [x] Evidence emission in a real pipeline: a `--jobs` run carrying a benchmark
       probe writes its bundle under `<artifactsDir>/probes/<candidateId>/`, the
       report's `probes[]` names its `bundlePath` and agrees with the bundle
       (probeId/scenarioId/success), and survival is untouched by the benchmark
       outcome (a passing-gates/failing-benchmark job still passes) — pinned by
       **Gate 1.15 P5** (the fake-WorkerAdapter `runSkeleton` drive).
-- [ ] Zero runner/CLI/report-shape drift: no `src/runner.ts` or `src/cli.ts` edits
+- [x] Zero runner/CLI/report-shape drift: no `src/runner.ts` or `src/cli.ts` edits
       (the pipeline is type-agnostic, src/runner.ts:554-555, :608-619);
       `CandidateReport.probes`/`ProbeRunSummary` shapes unchanged (src/types.ts:
       279-285); the verdict ladder byte-identical (src/runner.ts:544) — pinned by
@@ -212,20 +212,132 @@ alone, pins it.
       `git diff --stat`: exactly `src/probe.ts`, `src/scheduler.ts`,
       `scripts/check-probe.mjs`, `VERIFICATION.md`, `docs/ROADMAP.md`, `README.md`,
       the ticket file + index).
-- [ ] No new npm dependencies (decisions.md:6-10); every repeat is a list-form spawn
+- [x] No new npm dependencies (decisions.md:6-10); every repeat is a list-form spawn
       through `executeProbeCommand` (never `exec`, never a second spawn path) —
       pinned by **Gate 0** and the package.json/package-lock.json diff-free
       change-set.
-- [ ] Docs extended in the same change-set: VERIFICATION.md's Gate 1.15 section
+- [x] Docs extended in the same change-set: VERIFICATION.md's Gate 1.15 section
       (type list :1000, carve list :1054-1055, new legs), docs/ROADMAP.md:16's
       stage-4 row, README's `--jobs` probes doc (README.md:129-137) — pinned by
       **`npm run verify` ALL GREEN** with the updated sections present.
-- [ ] **Gate 2 NOT owed — recorded, not silently skipped** (the T-012:327-335
+- [x] **Gate 2 NOT owed — recorded, not silently skipped** (the T-012:327-335
       trigger-analysis precedent): the change-set touches no `src/runner.ts`, no
       adapter, no gate code, no workspace handling, and no report shape — none of
       VERIFICATION.md:1097-1098's triggers; Gate 2 is additionally a `--goal`-mode
       run that executes no probe code (VERIFICATION.md:1008-1010), so it could not
       pin any benchmark criterion anyway. **Gate 3 n/a** (no adapter touched).
+
+## Landed
+
+2026-10-17, lane branch `ticket/T-018-benchmark-probe`.
+
+What changed:
+
+- **`src/probe.ts`** — `ProbeType` gains `'benchmark'` (its docblock no
+  longer calls benchmark a successor slice); `ScenarioSpec` gains
+  `repeats?: number` carrying the required-on-benchmark/refused-elsewhere
+  contract in its docblock; the module docblock gains the
+  benchmark-semantics block (sequential repeats, per-repeat FULL `timeoutMs`
+  budget, nearest-rank min/median/p95 = `sorted[ceil(q·n)−1]` for q 0.5/0.95
+  and `sorted[0]` for min, no threshold field, the `'report'` kind's first
+  producer). New `BenchmarkProbe implements Probe`: runs the command
+  `repeats` times SEQUENTIALLY, each through the landed
+  `executeProbeCommand` (one spawn path, T-011 verified tree kill — no
+  second path); one `run-<i> duration` measurement (unit ms) per repeat
+  that actually RAN (non-zero exit and timeout repeats included; a
+  spawn-refused repeat gets none); min/median/p95 summaries only when
+  durations exist (nothing fabricated); one GateResult per repeat, in run
+  order, self-named `<probeId>#run-<i>` — `toGateResult`'s first parameter
+  generalized from `probeId` to `name` for that, behavior identical for the
+  existing callers; success = every requested repeat spawned cleanly +
+  exited 0 + no timeout AND `repeats >= 1` (zero completed repeats never a
+  pass — the parser refuses repeats < 1, and the class holds the contract
+  too for a directly constructed scenario); `error` names the FIRST failing
+  repeat with counts (`run 2/5 exited with code 3` / `run 3/5 timed out
+  after Nms` / `run 1/5 could not be spawned: ENOENT`); artifacts = the
+  combined `.log` with `=== run <i> ===` separators plus the
+  `<probeId>.results.json` 'report' artifact
+  `{probeId, scenarioId, repeats, durationsMs, minMs, medianMs, p95Ms}`
+  (summaries omitted when no repeat ran). `createProbe` gains the benchmark
+  branch (switch, docblock updated).
+- **`src/scheduler.ts`** — the `parseJobsSpec` probes map: `repeats` joins
+  the allowed probe-field list; the type refusal now reads `type must be
+  "command", "test", or "benchmark"`; `repeats` required positive integer
+  ≥ 1 on benchmark (missing/0/negative/non-integer/non-number all refused
+  naming the offense) and refused on command/test probes; the parsed spec
+  carries `repeats` only on benchmark probes.
+- **`scripts/check-probe.mjs`** (Gate 1.15 extended in place — no new gate
+  number, no collision with 1.16/1.17): the :291-292 benchmark-refusal pin
+  EXPLICITLY FLIPPED (recorded in VERIFICATION.md too) to positive coverage
+  (a benchmark probe with `repeats` parses and is preserved verbatim) plus
+  refusal of a genuinely-unknown type (`'screenshot'`) with the updated
+  message; new P2 `repeats` legs (the five bad shapes on benchmark;
+  `repeats` on command/test); new P3 benchmark direct-execution legs —
+  happy `{node build.js, repeats: 5}` (exactly 5 run-* durations + 3
+  summaries, unit ms; min ≤ median ≤ p95; GateResult parity per repeat;
+  nearest-rank summaries recomputed in the check and compared exactly; the
+  'report' results artifact parsed and pinned field-for-field; validator;
+  separators), failure face (repeats 3, all durations recorded, error
+  names run 1/3), spawn-refusal face (repeats 2, zero measurements, never
+  a pass); the P4 benchmark timeout face on the sleeper pattern (repeat
+  exitCode null, durationMs ≥ timeoutMs, duration still recorded, tree
+  verified dead on the real process table, kill evidence on
+  `bench-slow#run-1`); the P5 drive extended — a passing benchmark probe
+  (repeats 2) on job-a and a FAILING benchmark (repeats 1, exit 9) on
+  job-b, pinning probes[] ↔ bundlePath correspondence, validator-clean
+  bundles, the on-disk results artifact, and survival untouched by the
+  benchmark outcome. 59 assertions, 0 FAIL, zero model tokens, zero
+  opencode involvement.
+- **`VERIFICATION.md`** — Gate 1.15 section: three generic probes, the
+  `--jobs` probes shape with `repeats` (required ≥ 1 on benchmark,
+  refused elsewhere, per-repeat timeout budget), the recorded T-018 flip
+  paragraph, all three legs extended with the benchmark pins, and the
+  carve list updated — benchmark moves from carved to pinned; the
+  screenshot probe stays carved (T-019); the measurement→verdict bridge,
+  statistical sophistication, and benchmark `probe_runs` consumption are
+  recorded as carves so they are neither silently assumed nor silently
+  owed.
+- **`README.md`** — the `--jobs` probes doc: type list gains
+  `"benchmark"`, `repeats` documented, nearest-rank min/median/p95, the
+  per-repeat `timeoutMs` budget, the `.results.json` table, and the
+  no-threshold recording posture.
+- **`docs/ROADMAP.md`** — stage-4 row: benchmark probe landed (T-018),
+  Gate 1.15 extended; remaining: screenshot probe, Godot/Web/Blender (the
+  row's stale "artifact store + `probe_runs`" remainder — landed by
+  T-016 — dropped in the same rewrite of the row).
+- **`docs/tickets/`** — this ticket flipped to done with the boxes
+  checked, index row updated, in the same change-set.
+
+Change-set exactly as pinned (`git status --porcelain`):
+`src/probe.ts`, `src/scheduler.ts`, `scripts/check-probe.mjs`,
+`VERIFICATION.md`, `docs/ROADMAP.md`, `README.md`, this ticket + the
+index. Zero edits to `src/runner.ts`, `src/cli.ts`, `src/types.ts`,
+`package.json`, or `package-lock.json` — no runner/CLI/report-shape drift
+(`CandidateReport.probes`/`ProbeRunSummary` untouched), no new npm
+dependencies, every repeat through the landed list-form
+`executeProbeCommand` (never `exec`, never a second spawn path).
+
+Gate 2 NOT owed (recorded, the T-012 trigger-analysis precedent): the
+change-set touches no `src/runner.ts`, no adapter, no gate code, no
+workspace handling, and no report shape — none of VERIFICATION.md's Gate 2
+triggers; Gate 2 is additionally a `--goal`-mode run that executes no
+probe code, so it could not pin a benchmark criterion anyway.
+**Gate 3 n/a** (no adapter touched).
+
+Measured gates (this lane, this change-set):
+
+- Gate 0 `npm run typecheck` → exit 0 (baseline at lane HEAD before the
+  edits, and again after the src edits).
+- Gate 1.15 `node node_modules/tsx/dist/cli.mjs scripts/check-probe.mjs`
+  → `check-probe: ALL GREEN`, 59 `ok:` assertion lines, 0 `FAIL` (the
+  baseline at lane HEAD was green before the flip; the flipped pin is the
+  change-set's one intentional invalidation, recorded above and in
+  VERIFICATION.md).
+- Full fast tier `npm run verify` → `=== verify (fast) complete:
+  ALL GREEN ===`, exit 0 — Gate 1 fixture regeneration green inside the
+  tier; every other gate untouched and green (0.5, 1.5, 1.6, 1.7, 1.8,
+  1.9, 1.10, 1.11, 1.12, 1.13, 1.14, 1.16, 1.17).
+- Gate 2 not run (not owed — analysis above). Gate 3 not run (n/a).
 
 ## Verification
 
