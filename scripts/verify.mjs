@@ -525,6 +525,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.15: probe layer first slice (T-015) ----------
+section('Gate 1.15 — probe layer first slice (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-probe.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'probe self-check exit 0')
+} catch (e) {
+  fail(`probe self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

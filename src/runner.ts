@@ -2,10 +2,12 @@ import { createHash } from 'node:crypto'
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseBriefs, parseReview } from './parse.js'
+import { evidenceBundlePath, failedBundle, writeEvidenceBundle } from './probe.js'
+import type { Probe } from './probe.js'
 import { buildSchedule, readyJobs } from './scheduler.js'
 import type { PhaseSpec } from './scheduler.js'
 import { DERIVED_PHASE_ID } from './store/index.js'
-import type { Attempt, CandidateReport, FailureRecord, Gate, GateResult, PlannerReport, ReviewReport, RunReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
+import type { Attempt, CandidateReport, FailureRecord, Gate, GateResult, PlannerReport, ProbeRunSummary, ReviewReport, RunReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
 
 /**
  * Best-effort append to <runDir>/dispatch.jsonl (T-010) — the in-run evidence
@@ -47,6 +49,9 @@ export interface ResolvedJob {
   worker: WorkerAdapter
   timeoutMs: number
   gates: Gate[]
+  /** Evidence probes (T-015, spec §12) behind the Probe seam. Absent when
+   *  the job has none — default-mode jobs never carry probes. */
+  probes?: Probe[]
 }
 
 /** The validated spec a --jobs run drives: the declared phases (for the
@@ -538,6 +543,18 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
       }
       base.passedAllGates = base.gates.length > 0 && base.gates.every((g) => g.passed) && base.diffBytes > 0
 
+      // T-015: probes ride beside the ladder as a parallel evidence seam —
+      // run on the final completed attempt immediately after the gate loop,
+      // before review and workspace dispose, REGARDLESS of gate outcomes
+      // (evidence about failures is evidence). The expression above is
+      // byte-identical to the pre-probe ladder and stays the only verdict
+      // input: a probe result, including a success:false bundle, never
+      // changes a verdict or a gate PASS/FAIL (decisions.md 2026-10-10:
+      // machine gates decide survival; probes advise/record).
+      if (job.probes && job.probes.length > 0) {
+        base.probes = await runProbes(job, opts, lease)
+      }
+
       if (opts.reviewerModel && base.passedAllGates) {
         base.review = await runReview(opts, {
           id,
@@ -586,6 +603,46 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
   if (cleanupFailures.length > 0) base.cleanupFailures = cleanupFailures
 
   return base
+}
+
+/** Execute one job's probes on its final completed attempt (T-015, spec
+ *  §12): each probe runs behind the Probe seam, its EvidenceBundle is
+ *  validated and written to <artifactsDir>/probes/<candidateId>/<probeId>.json
+ *  under the run's artifacts dir (decisions.md 2026-10-10: run root
+ *  C:\swarm\; never the worktree as the durable copy), and the summary
+ *  lands on the candidate report. A probe that throws records a
+ *  success:false bundle with the error and never breaks the run; a bundle
+ *  that cannot be written is logged and skipped (no summary ever names a
+ *  file that is not on disk). Nothing here touches any verdict. */
+async function runProbes(job: ResolvedJob, opts: SkeletonOptions, lease: WorkspaceLease): Promise<ProbeRunSummary[]> {
+  const summaries: ProbeRunSummary[] = []
+  for (const probe of job.probes ?? []) {
+    const started = Date.now()
+    let bundle
+    try {
+      bundle = await probe.run({
+        workspace: lease,
+        scenario: probe.scenario,
+        environment: { artifactsDir: opts.artifactsDir, candidateId: job.id },
+      })
+    } catch (e) {
+      bundle = failedBundle(probe.id, probe.scenario.id, errorMessage(e))
+    }
+    console.log(`[${job.id}] probe ${probe.id}: ${bundle.success ? 'PASS' : 'FAIL'} (${((Date.now() - started) / 1000).toFixed(1)}s)`)
+    try {
+      const bundlePath = writeEvidenceBundle(bundle, { artifactsDir: opts.artifactsDir, candidateId: job.id })
+      summaries.push({
+        probeId: probe.id,
+        scenarioId: probe.scenario.id,
+        success: bundle.success,
+        durationMs: Date.now() - started,
+        bundlePath,
+      })
+    } catch (e) {
+      console.log(`[${job.id}] probe ${probe.id}: evidence write failed: ${errorMessage(e)}`)
+    }
+  }
+  return summaries
 }
 
 function errorMessage(e: unknown): string {

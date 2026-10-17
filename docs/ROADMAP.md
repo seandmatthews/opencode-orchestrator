@@ -13,7 +13,7 @@ moves a milestone.
 | 1.5 | Integration replay: survivor's diff.patch re-verified at current HEAD (spec §17 slice; prepares only — humans merge) | done 2026-10-11 — T-005 (pulled forward from stage 6; token-free) |
 | 2 | Context system: ContextPlan/ContextPacket, budgets, distillation, lineage | core landed 2026-10-16 — T-012 (ContextPlan/Packet, budgets, selectors, fingerprints, `context inspect`); remaining: shard distillation, source lineage |
 | 3 | Windows reliability: worktree leases/GC, process-tree kill hardening, crash recovery | partial 2026-10-16 — T-010 startup reconciliation, T-011 process-tree kill; remaining: worktree leases/GC, retention policies, disposable clones, short-path run roots |
-| 4 | Probe layer: command/test/benchmark/screenshot probes, then Godot | spec Milestone 4 |
+| 4 | Probe layer: command/test/benchmark/screenshot probes, then Godot | first slice landed 2026-10-17 — T-015 (Probe seam, EvidenceBundle contract, command + test probes, `--jobs` `probes` wiring, Gate 1.15); remaining: benchmark/screenshot probes, Godot/Web/Blender, artifact store + `probe_runs` |
 | 5 | Codex/Sol worker adapter (read-only verifiers first) | spec Milestone 5 |
 | 6 | First full R&D loop (small fan-out per spec Milestone 6) | spec Milestone 6 |
 | 7 | UI (run dashboard, DAG, context inspector, approval queue) | spec Milestone 7 — last |

@@ -25,6 +25,7 @@
 import { cycleRefusal, unknownDependencyRefusal } from './store/index.js'
 import type { DagJobSpec } from './store/index.js'
 import type { RunSchedule } from './types.js'
+import type { ScenarioSpec } from './probe.js'
 
 /** Phase id charset — same rule as job ids: the ids key schedule records and
  *  store rows, and an unrestricted id could collide or smuggle separators. */
@@ -60,6 +61,10 @@ export interface JobSpec {
   timeoutMs?: number
   /** Override the run-level --gate set for this job (replaces, not merges). */
   gates?: { name: string; command: string }[]
+  /** Evidence probes for this job (T-015, spec §12): named, reusable,
+   *  evidence-emitting checks that run on the final attempt regardless of
+   *  gate outcomes. Survival stays with the gates — probes advise/record. */
+  probes?: ScenarioSpec[]
 }
 
 /** A parsed, validated --jobs spec. Job dependencies are already expanded:
@@ -150,7 +155,7 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
   const seenJobs = new Set<string>()
   for (const j of raw.jobs) {
     if (!isPlainObject(j)) refuse('every job must be a JSON object')
-    unknownField('job', j, ['id', 'phase', 'dependencies', 'brief', 'model', 'worker', 'timeoutMs', 'gates'])
+    unknownField('job', j, ['id', 'phase', 'dependencies', 'brief', 'model', 'worker', 'timeoutMs', 'gates', 'probes'])
     const id = parseId('job', j.id)
     if (seenJobs.has(id)) refuse(`duplicate job id '${id}'`)
     seenJobs.add(id)
@@ -171,6 +176,41 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
         return { name: g.name, command: g.command }
       })
     }
+    let probes: ScenarioSpec[] | undefined
+    if (j.probes !== undefined) {
+      if (!Array.isArray(j.probes)) refuse(`job '${id}' probes must be an array`)
+      const seenProbes = new Set<string>()
+      probes = j.probes.map((p, i) => {
+        const where = `job '${id}' probes[${i}]`
+        if (!isPlainObject(p)) refuse(`${where} must be an object`)
+        unknownField(where, p, ['id', 'type', 'command', 'timeoutMs'])
+        if (typeof p.id !== 'string' || !SPEC_ID_PATTERN.test(p.id)) {
+          refuse(`${where} id ${JSON.stringify(p.id)} does not match [a-z0-9][a-z0-9-]* — it names the probe's evidence files`)
+        }
+        if (seenProbes.has(p.id)) refuse(`job '${id}' has duplicate probe id '${p.id}' — probe ids must be unique per job`)
+        seenProbes.add(p.id)
+        if (p.type !== 'command' && p.type !== 'test') {
+          refuse(`${where} type must be "command" or "test" (got ${JSON.stringify(p.type)}) — unknown probe types are refused, not ignored`)
+        }
+        if (!isPlainObject(p.command)) refuse(`${where} command must be an object with "exe" and "args"`)
+        unknownField(`${where} command`, p.command, ['exe', 'args'])
+        if (typeof p.command.exe !== 'string' || p.command.exe.length === 0) {
+          refuse(`${where} command exe must be a non-empty string`)
+        }
+        if (!Array.isArray(p.command.args) || p.command.args.some((a) => typeof a !== 'string')) {
+          refuse(`${where} command args must be an array of strings`)
+        }
+        if (p.timeoutMs !== undefined && (typeof p.timeoutMs !== 'number' || !Number.isInteger(p.timeoutMs) || p.timeoutMs <= 0)) {
+          refuse(`${where} timeoutMs must be a positive integer`)
+        }
+        return {
+          id: p.id,
+          type: p.type,
+          command: { exe: p.command.exe, args: p.command.args as string[] },
+          ...(p.timeoutMs !== undefined ? { timeoutMs: p.timeoutMs } : {}),
+        }
+      })
+    }
     if (!seenPhases.has(j.phase)) {
       refuse(`job '${id}' references phase '${String(j.phase)}', which is not in the phase set`)
     }
@@ -183,6 +223,7 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
       worker: j.worker as string | undefined,
       timeoutMs: j.timeoutMs as number | undefined,
       gates,
+      probes,
     })
   }
 
