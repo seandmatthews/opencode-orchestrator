@@ -71,6 +71,18 @@ npm run integrate -- --run <runId> --candidate c01 \
 Artifacts land in `C:\swarm\<runId>\`: `report.json`, per-candidate `worker.log` and
 `diff.patch`, and the candidate worktrees themselves (unless `--clean`).
 
+`--jobs <spec.json>` replaces the planner with a validated job spec
+(`phases` + `jobs`, `src/scheduler.ts`): deterministic DAG-driven dispatch
+under `--concurrency`, per-job `model`/`worker`/`timeoutMs`/`gates` defaulting
+to the run-level flags. Each job may also carry a `probes` array — named
+evidence probes (`{"id", "type": "command"|"test", "command": {"exe", "args"},
+"timeoutMs"?}`) that run on the final attempt regardless of gate outcomes and
+write a validated EvidenceBundle to `probes/<candidateId>/<probeId>.json`
+under the run artifacts (`command` probes record what happened and parse
+nothing; `test` probes parse TAP into tests/pass/fail). Probes produce
+evidence; survival still belongs to the gates — a probe result never changes
+a verdict.
+
 Every finished run is also persisted as durable records into a cross-run SQLite
 store (default `C:\swarm\refinery.db`, override with `--db <path>`): `runs`,
 `candidates`, `gate_results`, and an append-only `events` stream

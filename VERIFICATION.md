@@ -974,6 +974,102 @@ workspace handling, no report-shape change (everything lives in
 and docs). Gate 3 n/a (no adapter; the model enters only as a CLI/config
 string).
 
+## Gate 1.15 — probe layer first slice (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-probe.mjs
+```
+
+Pins T-015 (the first slice of Milestone 4, spec §34:2061-2072): the Probe
+seam and the structured probe-output contract (§12.2) in `src/probe.ts`, the
+two generic probes — `CommandProbe` (exit-0 evidence probe; parses nothing)
+and `TestProbe` (parses TAP into tests/pass/fail measurements) — the bundle
+validator, the evidence writer, and the minimal `--jobs` wiring. The seam
+module's docblock chooses and documents the vocabulary the spec uses but
+never defines (`ScenarioSpec`/`EnvironmentSpec`/`Measurement`/
+`EvidenceBundle`) and states the three reconciliations: the
+`EvidenceArtifactRef` rename vs the context system's landed `ArtifactRef`
+(src/context.ts — probe.ts never imports context.ts), the `WorkspaceLease`
+binding vs §16:1114-1123's lease shape, and the command-vs-test split.
+Probes produce evidence; survival still belongs to machine gates
+(decisions.md 2026-10-10) — by construction the verdict ladder
+(`src/runner.ts`, `passedAllGates = gates.length > 0 && every passed &&
+diffBytes > 0`) is byte-identical and a probe result, including a
+success:false bundle, never enters any verdict. No new CLI flags: probes
+attach via the `--jobs` spec's per-job `probes` array
+(`{id, type: "command"|"test", command: {exe, args}, timeoutMs?}`; ids match
+the job-id charset because they name evidence files; default timeout 5 min,
+the CommandGate default); default `--goal` mode has none, so default-mode
+reports are unchanged. Zero new npm dependencies; every probe subprocess is
+list-form `spawn` (never `exec`) with the T-011 verified tree kill at
+timeout — unproven kill outcomes land on the bundle's GateResult
+`cleanupFailures`, evidence only.
+
+No existing gate can pin any probe criterion — Gate 2 is a `--goal`-mode run
+that exercises no probe code (probe emission rides `--jobs` runs), so this
+gate has three legs, all token-free:
+
+- **contract fixtures** (the Gate 0.5 hand-built-input pattern): the
+  validator accepts a well-formed EvidenceBundle and refuses missing
+  probeId/scenarioId, non-boolean success, non-array
+  artifacts/measurements/gateResults, malformed entries (artifact kind,
+  measurement value, gateResult passed/exitCode/durationMs), and non-object
+  bundles, each naming the offense; `parseJobsSpec` accepts a well-formed
+  `probes` array verbatim, parses a probe-less spec to output byte-identical
+  JSON to today, and refuses unknown probe types, malformed entries
+  (non-object, probes non-array, missing exe, non-string args, bad
+  timeoutMs), duplicate probe ids per job, probe-id charset violations, and
+  unknown fields inside a probe or its command (the T-009 posture);
+- **direct token-free executions**: on a fresh demo-target fixture
+  (scripts/demo-target.mjs, Gate 1's own generator) `CommandProbe{node
+  build.js}` yields success true, exitCode 0, exactly one GateResult entry,
+  and a `.log` artifact at
+  `<artifactsDir>/probes/<candidateId>/<probeId>.log` referenced with
+  sizeBytes > 0; a failing command yields success false, non-zero exitCode,
+  captured tail; a non-existent exe yields success false with the spawn
+  error recorded in the bundle (and in the GateResult tail), never success
+  true. On temp TAP fixtures in the verify sandbox, `TestProbe` pins:
+  all-pass TAP (real `node --test`) → success true with tests/pass/fail
+  measurements (pass == tests); counted `ok`/`not ok` lines when no summary
+  lines are present; any `not ok` → success false, fail ≥ 1 even at exit 0;
+  TAP 14 summary numbers on a failing `node --test`; exit 0 with
+  unparseable output → success false (parsed-nothing is never a pass,
+  AGENTS.md #7 applied to bundles); timeout → success false, exitCode null,
+  durationMs ≥ timeoutMs, the whole spawned tree (parent + spawned child)
+  verified dead on the real process table, and kill evidence on the
+  GateResult — a verified kill leaves `cleanupFailures` absent, an unproven
+  one records loud `CLEANUP FAIL` lines;
+- **evidence emission in a real pipeline** (the Gate 1.8/1.10 pattern —
+  `runSkeleton` driven end-to-end with a fake `WorkerAdapter` and fake
+  gates against throwaway fixture repos): a `--jobs` run carrying probes
+  writes `<artifactsDir>/probes/<candidateId>/<probeId>.json` per executed
+  probe, each a validator-clean bundle; `CandidateReport.probes[]` names
+  every bundlePath with the on-disk path, probeId, scenarioId, and success
+  agreeing with the bundle, and the same arrays ride `report.json` on disk;
+  a job whose gate FAILS still runs and records its probes (evidence about
+  failures is evidence); survival is untouched — a passing-gates/
+  failing-probe job still passes, a failing-gates/passing-probe job still
+  fails; default mode records no `probes` field and no `probes/` dir.
+
+Not pinned here and carved by the ticket: benchmark/screenshot-artifact
+probes (§34:2068-2069), Godot/Web/Blender probes (§12.1:911-947), Static
+Diff probe (§12.1:949-951 — mostly exists as worktree diff capture),
+probe persistence (§27:1831 `probe_runs` / §28:1854 `ARTIFACT_CREATED` —
+both producerless, blocked on the unclaimed filesystem artifact store
+§34:2028; the store stays schema v4), the §13:986-996 project-manifest
+`probes:` block and any scenario/environment file format beyond job-spec
+config, run-level `--probe` CLI flags, probe evidence feeding the context
+system's selectors (T-012's hand-built `type: 'probe'` fixtures are the
+ready consumer — a successor ticket's relationship), and probes on a
+thrown final attempt (no completed workspace pass to probe — recorded as
+absent, never fabricated). Gate 2 runs once at landing as the
+no-regression obligation (`src/runner.ts` and report shape are on its
+trigger list; the slice gives default mode no probes, so Gate 2 pins that
+the pipeline without probes behaves exactly as today, never probe
+emission — that is this gate's `--jobs` leg), recorded in T-015's Landed
+section — not a permanent Gate 2 extension. Gate 3 n/a (no adapter
+touched).
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash

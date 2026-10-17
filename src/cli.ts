@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CommandGate } from './gate/command.js'
 import { acquireCheckoutLock, releaseCheckoutLock } from './lock.js'
+import { createProbe } from './probe.js'
 import { runSkeleton } from './runner.js'
 import type { ResolvedJob } from './runner.js'
 import { parseJobsSpec } from './scheduler.js'
@@ -202,6 +203,9 @@ function resolveJobs(jobsSpec: JobsSpec, opts: Options): ResolvedJob[] {
     worker: workerFor(j.worker ?? opts.workerId),
     timeoutMs: j.timeoutMs ?? opts.timeoutMs,
     gates: (j.gates ?? opts.gates).map((g) => new CommandGate(g.name, g.command)),
+    // T-015: probes attach via the --jobs spec only — no run-level flag this
+    // slice, and default --goal mode carries none. Absent stays absent.
+    ...(j.probes !== undefined ? { probes: j.probes.map(createProbe) } : {}),
   }))
 }
 

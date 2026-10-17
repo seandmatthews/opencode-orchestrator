@@ -51,4 +51,4 @@ Rules:
 | T-012 | Context system core: ContextPlan/ContextPacket, budgets, selectors, fingerprints, `context inspect` CLI | high | done 2026-10-16 |
 | T-013 | Shard distillation core: DistillationPlan semantics, distilled-claim records, §7.5 no-untraceable-chain refusal | high | done 2026-10-17 |
 | T-014 | Packet-level source lineage: builder-input ref enforcement + claim-chain inspection | medium | done 2026-10-17 |
-| T-015 | Probe layer first slice: Probe seam, EvidenceBundle contract, command + test probes | high | proposed |
+| T-015 | Probe layer first slice: Probe seam, EvidenceBundle contract, command + test probes | high | done 2026-10-17 |

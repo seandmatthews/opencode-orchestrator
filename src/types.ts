@@ -255,9 +255,33 @@ export interface CandidateReport {
    * survival).
    */
   cleanupFailures?: string[]
+  /**
+   * Evidence summary for the probes that ran on the final attempt (T-015,
+   * spec §12) — pointers at the validated EvidenceBundle artifacts the run
+   * wrote under <artifactsDir>/probes/<id>/. Present only when the job had
+   * probes; absent otherwise, so default-mode reports are unchanged. A probe
+   * summary is evidence, never a verdict input: probes advise/record, gates
+   * decide survival (decisions.md 2026-10-10).
+   */
+  probes?: ProbeRunSummary[]
   /** Present only for candidates that passed all gates (when review is enabled). */
   review?: ReviewReport
   error?: string
+}
+
+/**
+ * One executed probe's summary in the report (T-015, spec §12): who ran,
+ * whether it succeeded, how long it took, and where its validated
+ * EvidenceBundle artifact lives on disk. The bundle itself carries the full
+ * evidence (artifacts, measurements, gateResults) — the summary only points
+ * at it. Never a verdict input.
+ */
+export interface ProbeRunSummary {
+  probeId: string
+  scenarioId: string
+  success: boolean
+  durationMs: number
+  bundlePath: string
 }
 
 // ---------- Schedule (T-009, spec §22:1329 — deterministic, persisted transitions) ----------
