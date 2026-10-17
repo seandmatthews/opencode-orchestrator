@@ -1,14 +1,19 @@
-// Probe-layer self-check (Gate 1.15, fast tier, T-015) — run under tsx:
+// Probe-layer self-check (Gate 1.15, fast tier, T-015; extended in place by
+// T-018 — the benchmark probe) — run under tsx:
 //   node node_modules/tsx/dist/cli.mjs scripts/check-probe.mjs
-// Three legs, zero model tokens (the ticket's Verification section):
+// Three legs, zero model tokens (the tickets' Verification sections):
 //   1. contract fixtures — the EvidenceBundle validator's accept/refuse faces
-//      and parseJobsSpec's probes wiring (the Gate 0.5 hand-built-input
-//      pattern: no pipeline, no subprocess),
-//   2. direct token-free CommandProbe/TestProbe executions against a fresh
-//      demo-target fixture (scripts/demo-target.mjs, Gate 1) and temp TAP
-//      fixtures in the verify sandbox — real list-form spawns, real
-//      process-table assertions on the timeout tree kill (the Gate 1.12
-//      style),
+//      and parseJobsSpec's probes wiring, including the benchmark `repeats`
+//      validation (the Gate 0.5 hand-built-input pattern: no pipeline, no
+//      subprocess),
+//   2. direct token-free CommandProbe/TestProbe/BenchmarkProbe executions
+//      against a fresh demo-target fixture (scripts/demo-target.mjs, Gate 1)
+//      and temp TAP fixtures in the verify sandbox — real list-form spawns,
+//      real process-table assertions on the timeout tree kill (the Gate 1.12
+//      style), and for the benchmark probe the quantitative measurement
+//      invariants (exactly N run-* durations, nearest-rank min/median/p95
+//      recomputed in this check and compared exactly, the 'report'-kind
+//      results artifact),
 //   3. a token-free end-to-end --jobs drive of runSkeleton with a FAKE
 //      WorkerAdapter and fake gates (the Gate 1.8/1.10 pattern,
 //      scripts/check-scheduler.mjs) against throwaway fixture repos,
@@ -288,8 +293,35 @@ async function main() {
       }
     }
     const base = (probes) => ({ phases: [{ id: 'p' }], jobs: [{ id: 'j1', phase: 'p', brief: 'b', probes }] })
-    t('P2: an unknown probe type is refused with a clear message',
-      throwsWith(base([{ id: 'x', type: 'benchmark', command: { exe: 'node', args: [] } }]), 'type must be "command" or "test"'))
+    // T-018 flip (recorded in the ticket as the change-set's one intentional
+    // invalidation of an existing assertion): Gate 1.15's P2 leg actively
+    // pinned `type: 'benchmark'` as refused ("type must be \"command\" or
+    // \"test\""). The benchmark probe now EXISTS, so the pin becomes positive
+    // coverage (a benchmark probe with repeats parses and is preserved
+    // verbatim) plus refusal of a genuinely-unknown type with the updated
+    // message — one refusal becomes positive-coverage-plus-refusal, net
+    // strictness increases (the T-013 flip precedent). No other existing
+    // assertion is weakened.
+    t('P2: a benchmark probe with repeats validates and is preserved verbatim (the T-018 flip: benchmark moved from refused type to pinned type)',
+      eq(parseJobsSpec({
+        phases: [{ id: 'p' }],
+        jobs: [{ id: 'j1', phase: 'p', brief: 'b', probes: [
+          { id: 'bench-check', type: 'benchmark', command: { exe: 'node', args: ['bench.js'] }, repeats: 5 },
+        ] }],
+      }).jobs[0]?.probes, [
+        { id: 'bench-check', type: 'benchmark', command: { exe: 'node', args: ['bench.js'] }, repeats: 5 },
+      ]))
+    t('P2: a genuinely-unknown probe type is refused with the updated message',
+      throwsWith(base([{ id: 'x', type: 'screenshot', command: { exe: 'node', args: [] } }]), 'type must be "command", "test", or "benchmark"'))
+    t('P2: repeats validation on a benchmark probe — missing, 0, negative, non-integer, non-number all refused naming the offense',
+      throwsWith(base([{ id: 'x', type: 'benchmark', command: { exe: 'node', args: [] } }]), 'repeats must be a positive integer >= 1')
+      && throwsWith(base([{ id: 'x', type: 'benchmark', command: { exe: 'node', args: [] }, repeats: 0 }]), 'repeats must be a positive integer >= 1')
+      && throwsWith(base([{ id: 'x', type: 'benchmark', command: { exe: 'node', args: [] }, repeats: -1 }]), 'repeats must be a positive integer >= 1')
+      && throwsWith(base([{ id: 'x', type: 'benchmark', command: { exe: 'node', args: [] }, repeats: 1.5 }]), 'repeats must be a positive integer >= 1')
+      && throwsWith(base([{ id: 'x', type: 'benchmark', command: { exe: 'node', args: [] }, repeats: 'three' }]), 'repeats must be a positive integer >= 1'))
+    t('P2: repeats on a command/test probe is refused — the field exists only where it means something',
+      throwsWith(base([{ id: 'x', type: 'command', command: { exe: 'node', args: [] }, repeats: 3 }]), 'repeats is only valid on a benchmark probe')
+      && throwsWith(base([{ id: 'x', type: 'test', command: { exe: 'node', args: [] }, repeats: 3 }]), 'repeats is only valid on a benchmark probe'))
     t('P2: malformed probe entries are refused (non-object, probes non-array, missing exe, non-string args, bad timeoutMs)',
       throwsWith(base(['nope']), 'must be an object')
       && throwsWith(base('nope'), 'probes must be an array')
@@ -344,6 +376,70 @@ async function main() {
       refused.success === false && typeof refused.error === 'string' && refused.error.length > 0
       && refused.gateResults[0]?.passed === false && refused.gateResults[0]?.exitCode === null
       && refused.gateResults[0]?.outputTail.length > 0)
+
+    // T-018: the benchmark probe — quantitative measurements with
+    // nearest-rank summaries, pinned against the same fresh fixture.
+    const bench = await runDirect({ id: 'bench-check', type: 'benchmark', command: { exe: 'node', args: ['build.js'] }, repeats: 5 }, ws, env)
+    const runDurations = bench.measurements.filter((m) => /^run-\d+ duration$/.test(m.name))
+    const summaryOf = Object.fromEntries(bench.measurements
+      .filter((m) => m.name === 'min' || m.name === 'median' || m.name === 'p95')
+      .map((m) => [m.name, m.value]))
+    const recorded = runDurations.map((m) => m.value)
+    const sorted = [...recorded].sort((a, b) => a - b)
+    const nearest = (q) => sorted[Math.ceil(q * sorted.length) - 1]
+    t('P3: BenchmarkProbe happy path — success true, exactly 5 run-* duration measurements + min/median/p95, every measurement unit ms',
+      bench.success === true
+      && runDurations.length === 5 && bench.measurements.length === 8
+      && runDurations.every((m, i) => m.name === `run-${i + 1} duration`)
+      && bench.measurements.every((m) => m.unit === 'ms')
+      && 'min' in summaryOf && 'median' in summaryOf && 'p95' in summaryOf)
+    t('P3: benchmark durations — min <= median <= p95; one GateResult entry per repeat, in run order, self-named <probeId>#run-<i>, each equal to its run duration',
+      summaryOf.min <= summaryOf.median && summaryOf.median <= summaryOf.p95
+      && bench.gateResults.length === 5
+      && bench.gateResults.every((g, i) => g.name === `bench-check#run-${i + 1}`)
+      && bench.gateResults.every((g, i) => g.durationMs === runDurations[i]?.value)
+      && bench.gateResults.every((g) => g.passed === true && g.exitCode === 0))
+    t('P3: benchmark summaries exactly equal the nearest-rank recomputation over the recorded durations (sorted[ceil(q*n)-1], no interpolation)',
+      summaryOf.min === sorted[0]
+      && summaryOf.median === nearest(0.5)
+      && summaryOf.p95 === nearest(0.95))
+    const resultsRef = bench.artifacts.find((a) => a.kind === 'report')
+    const results = resultsRef !== undefined && existsSync(resultsRef.path)
+      ? JSON.parse(read(resultsRef.path))
+      : null
+    t('P3: the report-kind results artifact — bench-check.results.json beside the bundle, sizeBytes > 0, parses, carries the 5 durations + nearest-rank summaries',
+      resultsRef !== undefined && resultsRef.kind === 'report' && resultsRef.sizeBytes > 0
+      && resultsRef.name === 'bench-check.results.json'
+      && resultsRef.path === join(artifactsDir, 'probes', 'direct', 'bench-check.results.json')
+      && eq(results, {
+        probeId: 'bench-check', scenarioId: 'bench-check', repeats: 5,
+        durationsMs: recorded, minMs: summaryOf.min, medianMs: summaryOf.median, p95Ms: summaryOf.p95,
+      }))
+    t('P3: the benchmark bundle passes the validator and its combined .log carries the === run <i> === separators',
+      validateEvidenceBundle(JSON.parse(JSON.stringify(bench))).success === true
+      && bench.artifacts[0]?.kind === 'log' && bench.artifacts[0]?.sizeBytes > 0
+      && read(bench.artifacts[0]?.path).includes('=== run 1 ===')
+      && read(bench.artifacts[0]?.path).includes('=== run 5 ==='))
+
+    const benchFail = await runDirect({ id: 'bench-fail', type: 'benchmark', command: { exe: 'node', args: ['-e', "console.log('boom'); process.exit(3)"] }, repeats: 3 }, ws, env)
+    const failDurations = benchFail.measurements.filter((m) => /^run-\d+ duration$/.test(m.name))
+    t('P3: benchmark failure face — non-zero exit (repeats 3): success false, error names the FIRST failing run with counts, all 3 durations still recorded',
+      benchFail.success === false
+      && benchFail.error === 'run 1/3 exited with code 3'
+      && failDurations.length === 3
+      && benchFail.gateResults.length === 3
+      && benchFail.gateResults.every((g) => g.passed === false && g.exitCode === 3)
+      && benchFail.gateResults.every((g) => g.outputTail.includes('boom')))
+
+    const benchRefused = await runDirect({ id: 'bench-refused', type: 'benchmark', command: { exe: 'definitely-not-a-real-exe-4f8a2b', args: [] }, repeats: 2 }, ws, env)
+    t('P3: benchmark spawn-refusal face — success false with ZERO run-* measurements and zero summaries, never a pass',
+      benchRefused.success === false
+      && benchRefused.measurements.length === 0
+      && benchRefused.gateResults.length === 2
+      && benchRefused.gateResults.every((g) => g.passed === false && g.exitCode === null)
+      && typeof benchRefused.error === 'string'
+      && benchRefused.error.startsWith('run 1/2 could not be spawned: ')
+      && benchRefused.error.length > 'run 1/2 could not be spawned: '.length)
   }
 
   // ---------- P4: TestProbe TAP contract on temp TAP fixtures ----------
@@ -436,11 +532,41 @@ async function main() {
     t('P4: timeout — kill evidence is on the GateResult: a verified kill leaves cleanupFailures absent, an unproven one records loud CLEANUP FAIL lines',
       timedOut.gateResults[0]?.cleanupFailures === undefined
       || (Array.isArray(timedOut.gateResults[0]?.cleanupFailures) && timedOut.gateResults[0]?.cleanupFailures.every((l) => l.startsWith('CLEANUP FAIL'))))
+
+    // T-018: the benchmark timeout face — the same sleeper tree, one repeat
+    // (repeats: 1 is valid; the repeat that times out still RAN, so its
+    // duration is recorded even though success is false).
+    const benchTimeoutMs = 1200
+    const benchTimedOut = await runDirect({ id: 'bench-slow', type: 'benchmark', command: { exe: 'node', args: ['sleeper.js'] }, repeats: 1, timeoutMs: benchTimeoutMs }, ws, env)
+    const benchLog = benchTimedOut.artifacts.find((a) => a.kind === 'log')
+    const benchPids = (benchLog !== undefined && existsSync(benchLog.path))
+      ? [...read(benchLog.path).matchAll(/(?:PARENT|CHILD)_PID=(\d+)/g)].map((m) => Number(m[1]))
+      : []
+    const benchParentDead = benchPids[0] !== undefined && await untilDead(benchPids[0])
+    const benchChildDead = benchPids[1] !== undefined && await untilDead(benchPids[1])
+    if (benchPids[0] !== undefined && !benchParentDead) sweep(benchPids[0])
+    if (benchPids[1] !== undefined && !benchChildDead) sweep(benchPids[1])
+    t('P4: benchmark timeout — success false, error names the timing-out run, the repeat exitCode null with durationMs >= timeoutMs and its duration still recorded',
+      benchTimedOut.success === false
+      && typeof benchTimedOut.error === 'string' && benchTimedOut.error.includes('run 1/1 timed out')
+      && benchTimedOut.gateResults.length === 1
+      && benchTimedOut.gateResults[0]?.name === 'bench-slow#run-1'
+      && benchTimedOut.gateResults[0]?.exitCode === null
+      && benchTimedOut.gateResults[0]?.durationMs >= benchTimeoutMs
+      && benchTimedOut.measurements.filter((m) => /^run-\d+ duration$/.test(m.name)).length === 1
+      && benchTimedOut.measurements.every((m) => m.value >= benchTimeoutMs))
+    t('P4: benchmark timeout — the whole spawned tree is verified dead on the real process table',
+      benchPids.length === 2 && benchParentDead && benchChildDead)
+    t('P4: benchmark timeout — kill evidence is on that repeat\'s GateResult entry: a verified kill leaves cleanupFailures absent, an unproven one records loud CLEANUP FAIL lines',
+      benchTimedOut.gateResults[0]?.cleanupFailures === undefined
+      || (Array.isArray(benchTimedOut.gateResults[0]?.cleanupFailures) && benchTimedOut.gateResults[0]?.cleanupFailures.every((l) => l.startsWith('CLEANUP FAIL'))))
   }
 
   // ---------- P5: evidence emission in a real pipeline (--jobs drives) ----------
   {
-    // Scenario A: passing gates; one job with a PASSING and a FAILING probe.
+    // Scenario A: passing gates; one job with a PASSING and a FAILING probe
+    // plus a PASSING benchmark probe (T-018); its sibling job carries a
+    // FAILING benchmark — survival must stay untouched by benchmark outcomes.
     const a = makeRepo('e2e')
     const specA = {
       phases: [{ id: 'p' }],
@@ -450,11 +576,15 @@ async function main() {
           probes: [
             { id: 'build-check', type: 'command', command: { exe: 'node', args: ['build.js'] } },
             { id: 'tap-fail-check', type: 'test', command: { exe: 'node', args: ['tap-fail.js'] } },
+            { id: 'bench-check', type: 'benchmark', command: { exe: 'node', args: ['build.js'] }, repeats: 2 },
           ],
         },
         {
           id: 'job-b', phase: 'p', brief: 'do B',
-          probes: [{ id: 'tap-pass-check', type: 'test', command: { exe: 'node', args: ['tap-pass.js'] } }],
+          probes: [
+            { id: 'tap-pass-check', type: 'test', command: { exe: 'node', args: ['tap-pass.js'] } },
+            { id: 'bench-fail-check', type: 'benchmark', command: { exe: 'node', args: ['-e', "console.log('slow-boom'); process.exit(9)"] }, repeats: 1 },
+          ],
         },
       ],
     }
@@ -463,12 +593,13 @@ async function main() {
     const cA = rA.report.candidates.find((c) => c.id === 'job-a')
     const cB = rA.report.candidates.find((c) => c.id === 'job-b')
     t('P5: a passing-gates/failing-probe job still PASSES — probe results never enter a verdict',
-      cA?.passedAllGates === true && cA?.gates.every((g) => g.passed) === true && cA?.probes?.length === 2)
-    t('P5: the report carries per-probe summaries {probeId, scenarioId, success, durationMs, bundlePath} in spec order',
+      cA?.passedAllGates === true && cA?.gates.every((g) => g.passed) === true && cA?.probes?.length === 3)
+    t('P5: the report carries per-probe summaries {probeId, scenarioId, success, durationMs, bundlePath} in spec order (benchmark included, T-018)',
       eq(cA?.probes?.map((p) => [p.probeId, p.scenarioId, p.success]),
-        [['build-check', 'build-check', true], ['tap-fail-check', 'tap-fail-check', false]])
+        [['build-check', 'build-check', true], ['tap-fail-check', 'tap-fail-check', false], ['bench-check', 'bench-check', true]])
       && typeof cA?.probes?.[0]?.durationMs === 'number'
-      && typeof cA?.probes?.[1]?.durationMs === 'number')
+      && typeof cA?.probes?.[1]?.durationMs === 'number'
+      && typeof cA?.probes?.[2]?.durationMs === 'number')
     assertBundleCorrespondence('P5: every probes[] entry names an on-disk bundle that parses, passes the validator, and agrees with the summary (probes[] <-> bundlePath)', rA.report, rA.artifactsDir)
     const bundleA1 = JSON.parse(read(join(rA.artifactsDir, 'probes', 'job-a', 'build-check.json')))
     const bundleA2 = JSON.parse(read(join(rA.artifactsDir, 'probes', 'job-a', 'tap-fail-check.json')))
@@ -486,9 +617,34 @@ async function main() {
       && bundleB.measurements.some((m) => m.name === 'tests' && m.value === 2)
       && bundleB.measurements.some((m) => m.name === 'fail' && m.value === 0))
     t('P5: the on-disk report.json carries the probes[] arrays (the artifact the store and humans read)',
-      JSON.parse(read(join(rA.artifactsDir, 'report.json'))).candidates.find((c) => c.id === 'job-a')?.probes?.length === 2)
+      JSON.parse(read(join(rA.artifactsDir, 'report.json'))).candidates.find((c) => c.id === 'job-a')?.probes?.length === 3)
     t('P5: a passing job with only passing probes records success:true bundles',
-      cB?.passedAllGates === true && cB?.probes?.length === 1 && cB?.probes?.[0]?.success === true)
+      cB?.passedAllGates === true && cB?.probes?.length === 2 && cB?.probes?.[0]?.success === true)
+
+    // T-018: the benchmark probe in a real pipeline — bundle correspondence,
+    // validator-clean contents, the report artifact, and survival untouched.
+    const benchBundleA = JSON.parse(read(join(rA.artifactsDir, 'probes', 'job-a', 'bench-check.json')))
+    const benchReportA = benchBundleA.artifacts?.find((a2) => a2.kind === 'report')
+    t('P5: the benchmark bundle is validator-clean, carries its 2 run durations + min/median/p95, and its report-kind artifact is real on disk',
+      validateEvidenceBundle(benchBundleA).success === true
+      && benchBundleA.measurements.filter((m) => /^run-\d+ duration$/.test(m.name)).length === 2
+      && ['min', 'median', 'p95'].every((n) => benchBundleA.measurements.some((m) => m.name === n && m.unit === 'ms'))
+      && benchBundleA.gateResults.length === 2
+      && benchBundleA.gateResults.every((g, i) => g.name === `bench-check#run-${i + 1}`)
+      && benchReportA !== undefined && benchReportA.sizeBytes > 0 && existsSync(benchReportA.path)
+      && eq(JSON.parse(read(benchReportA.path)), {
+        probeId: 'bench-check', scenarioId: 'bench-check', repeats: 2,
+        durationsMs: benchBundleA.measurements.filter((m) => /^run-\d+ duration$/.test(m.name)).map((m) => m.value),
+        minMs: benchBundleA.measurements.find((m) => m.name === 'min')?.value,
+        medianMs: benchBundleA.measurements.find((m) => m.name === 'median')?.value,
+        p95Ms: benchBundleA.measurements.find((m) => m.name === 'p95')?.value,
+      }))
+    const benchFailBundleB = JSON.parse(read(join(rA.artifactsDir, 'probes', 'job-b', 'bench-fail-check.json')))
+    t('P5: a passing-gates/FAILING-benchmark job still PASSES — the benchmark outcome never enters a verdict',
+      cB?.passedAllGates === true && cB?.probes?.[1]?.success === false
+      && validateEvidenceBundle(benchFailBundleB).success === false
+      && benchFailBundleB.error === 'run 1/1 exited with code 9'
+      && benchFailBundleB.measurements.filter((m) => /^run-\d+ duration$/.test(m.name)).length === 1)
 
     // Scenario B: a FAILING gate; its probes must still run and record
     // (evidence about failures is evidence).

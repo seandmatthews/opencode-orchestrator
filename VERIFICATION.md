@@ -1029,9 +1029,11 @@ node node_modules/tsx/dist/cli.mjs scripts/check-probe.mjs
 
 Pins T-015 (the first slice of Milestone 4, spec §34:2061-2072): the Probe
 seam and the structured probe-output contract (§12.2) in `src/probe.ts`, the
-two generic probes — `CommandProbe` (exit-0 evidence probe; parses nothing)
-and `TestProbe` (parses TAP into tests/pass/fail measurements) — the bundle
-validator, the evidence writer, and the minimal `--jobs` wiring. The seam
+generic probes — `CommandProbe` (exit-0 evidence probe; parses nothing),
+`TestProbe` (parses TAP into tests/pass/fail measurements), and, since
+T-018, `BenchmarkProbe` (the first Measurement producer: a repeated measured
+command recording quantitative durations) — the bundle validator, the
+evidence writer, and the minimal `--jobs` wiring. The seam
 module's docblock chooses and documents the vocabulary the spec uses but
 never defines (`ScenarioSpec`/`EnvironmentSpec`/`Measurement`/
 `EvidenceBundle`) and states the three reconciliations: the
@@ -1044,13 +1046,25 @@ Probes produce evidence; survival still belongs to machine gates
 diffBytes > 0`) is byte-identical and a probe result, including a
 success:false bundle, never enters any verdict. No new CLI flags: probes
 attach via the `--jobs` spec's per-job `probes` array
-(`{id, type: "command"|"test", command: {exe, args}, timeoutMs?}`; ids match
+(`{id, type: "command"|"test"|"benchmark", command: {exe, args}, timeoutMs?,
+repeats?}` — `repeats` is required positive integer ≥ 1 on a benchmark
+probe and refused on command/test probes, the field existing only where it
+means something; ids match
 the job-id charset because they name evidence files; default timeout 5 min,
-the CommandGate default); default `--goal` mode has none, so default-mode
+the CommandGate default, a PER-REPEAT budget on a benchmark); default
+`--goal` mode has none, so default-mode
 reports are unchanged. Zero new npm dependencies; every probe subprocess is
 list-form `spawn` (never `exec`) with the T-011 verified tree kill at
 timeout — unproven kill outcomes land on the bundle's GateResult
 `cleanupFailures`, evidence only.
+
+T-018's flip, recorded: Gate 1.15's P2 leg previously ACTIVELY PINNED
+`type: 'benchmark'` as refused (`type must be "command" or "test"`). The
+benchmark probe now exists, so that one assertion was flipped explicitly in
+T-018's change-set — the refusal became positive coverage (a benchmark
+probe with `repeats` parses and is preserved verbatim) plus refusal of a
+genuinely-unknown type with the updated message (net strictness increases,
+the T-013 precedent); no other existing check was weakened.
 
 No existing gate can pin any probe criterion — Gate 2 is a `--goal`-mode run
 that exercises no probe code (probe emission rides `--jobs` runs), so this
@@ -1062,11 +1076,17 @@ gate has three legs, all token-free:
   artifacts/measurements/gateResults, malformed entries (artifact kind,
   measurement value, gateResult passed/exitCode/durationMs), and non-object
   bundles, each naming the offense; `parseJobsSpec` accepts a well-formed
-  `probes` array verbatim, parses a probe-less spec to output byte-identical
-  JSON to today, and refuses unknown probe types, malformed entries
+  `probes` array verbatim — since T-018 including a benchmark probe with
+  `repeats`, preserved verbatim — parses a probe-less spec to output
+  byte-identical JSON to today, and refuses a genuinely-unknown probe type
+  with the updated message (`type must be "command", "test", or
+  "benchmark"`), malformed entries
   (non-object, probes non-array, missing exe, non-string args, bad
-  timeoutMs), duplicate probe ids per job, probe-id charset violations, and
-  unknown fields inside a probe or its command (the T-009 posture);
+  timeoutMs), duplicate probe ids per job, probe-id charset violations,
+  unknown fields inside a probe or its command (the T-009 posture), and
+  T-018's `repeats` shape rule: missing/zero/negative/non-integer/
+  non-number on a benchmark probe all refused naming the offense, and
+  `repeats` on a command/test probe refused;
 - **direct token-free executions**: on a fresh demo-target fixture
   (scripts/demo-target.mjs, Gate 1's own generator) `CommandProbe{node
   build.js}` yields success true, exitCode 0, exactly one GateResult entry,
@@ -1085,7 +1105,25 @@ gate has three legs, all token-free:
   durationMs ≥ timeoutMs, the whole spawned tree (parent + spawned child)
   verified dead on the real process table, and kill evidence on the
   GateResult — a verified kill leaves `cleanupFailures` absent, an unproven
-  one records loud `CLEANUP FAIL` lines;
+  one records loud `CLEANUP FAIL` lines. T-018's `BenchmarkProbe` pins, on
+  the same fixtures: `BenchmarkProbe{node build.js, repeats: 5}` → success
+  true with EXACTLY 5 `run-<i> duration` measurements plus min/median/p95
+  (every measurement unit ms); min ≤ median ≤ p95; one GateResult entry per
+  repeat, in run order, self-named `<probeId>#run-<i>`, each equal to its
+  run duration; the summaries EXACTLY equal the nearest-rank recomputation
+  over the recorded durations (`sorted[ceil(q·n)−1]`, no interpolation,
+  recomputed in the check); a `'report'`-kind results artifact
+  `<probeId>.results.json` beside the bundle (sizeBytes > 0) that parses and
+  carries the durations + summaries; the bundle passes
+  `validateEvidenceBundle`; the combined `.log` carries the
+  `=== run <i> ===` separators. Failure faces: a non-zero-exiting command
+  (repeats 3) → success false, `error` names the first failing run with
+  counts, all 3 durations still recorded; a non-existent exe → success
+  false with ZERO run-*/summary measurements, never a pass; timeout
+  (the P4 sleeper pattern) → success false, `error` names the timing-out
+  run, the repeat exitCode null with durationMs ≥ timeoutMs and its
+  duration still recorded, the spawned tree verified dead on the real
+  process table, kill evidence on that repeat's GateResult entry;
 - **evidence emission in a real pipeline** (the Gate 1.8/1.10 pattern —
   `runSkeleton` driven end-to-end with a fake `WorkerAdapter` and fake
   gates against throwaway fixture repos): a `--jobs` run carrying probes
@@ -1096,10 +1134,15 @@ gate has three legs, all token-free:
   a job whose gate FAILS still runs and records its probes (evidence about
   failures is evidence); survival is untouched — a passing-gates/
   failing-probe job still passes, a failing-gates/passing-probe job still
-  fails; default mode records no `probes` field and no `probes/` dir.
+  fails, and since T-018 a passing-gates/FAILING-benchmark job still passes
+  (the benchmark probe rides the same correspondence pin: bundle on disk,
+  validator-clean, durations + summaries + a real on-disk 'report' artifact,
+  success agreeing with the summary); default mode records no `probes`
+  field and no `probes/` dir.
 
-Not pinned here and carved by the ticket: benchmark/screenshot-artifact
-probes (§34:2068-2069), Godot/Web/Blender probes (§12.1:911-947), Static
+Not pinned here and carved by the ticket(s): the screenshot-artifact probe
+(§34:2069 — T-019; the benchmark probe at §34:2068 landed with T-018 and is
+pinned above), Godot/Web/Blender probes (§12.1:911-947), Static
 Diff probe (§12.1:949-951 — mostly exists as worktree diff capture),
 probe persistence (§27:1831 `probe_runs` / §28:1854 `ARTIFACT_CREATED` —
 landed since by T-016, schema v5: the extended Gate 1.6 pins the rows and
@@ -1110,7 +1153,14 @@ config, run-level `--probe` CLI flags, probe evidence feeding the context
 system's selectors (T-012's hand-built `type: 'probe'` fixtures are the
 ready consumer — a successor ticket's relationship), and probes on a
 thrown final attempt (no completed workspace pass to probe — recorded as
-absent, never fabricated). Gate 2 runs once at landing as the
+absent, never fabricated). T-018 additionally carves: any
+measurement→verdict bridge (perf bars as gates that read bundles — a
+Gate-seam question: `Gate.run(cwd)` carries no evidence-path context, and
+decisions.md 2026-10-10 keeps verdicts gate-only), statistical
+sophistication (warmup runs, outlier rejection, cross-candidate
+comparison — each owns its ticket), and benchmark `probe_runs` consumption
+(the rows persist through T-016's store untouched — `ProbeRunSummary` is
+type-agnostic). Gate 2 runs once at landing as the
 no-regression obligation (`src/runner.ts` and report shape are on its
 trigger list; the slice gives default mode no probes, so Gate 2 pins that
 the pipeline without probes behaves exactly as today, never probe
