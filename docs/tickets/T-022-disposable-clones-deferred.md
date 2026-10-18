@@ -1,6 +1,6 @@
 # T-022 — Disposable clones deferred: WorktreeProvider stays the only WorkspaceProvider (spec §3.6, §14, §34 M3)
 
-**Status:** proposed
+**Status:** done 2026-10-18
 **Category:** docs
 **Value (1-5):** 3 · **Risk (1-5):** 1
 **Depends on:** —
@@ -112,25 +112,79 @@ either way (decisions.md:19-21).
 
 ## Acceptance criteria
 
-- [ ] The change-set touches exactly four paths — `docs/decisions.md`,
+- [x] The change-set touches exactly four paths — `docs/decisions.md`,
       `docs/ROADMAP.md`, `docs/tickets/T-022-disposable-clones-deferred.md`,
       `docs/tickets/README.md` (index row) — and nothing under `src/` or
       `scripts/`. Human-judgement item, named manual check: `git diff --stat`
       against the base reviewed in change-set review; any extra path fails it.
-- [ ] The decisions entry carries its date, the single-implementation rule,
+- [x] The decisions entry carries its date, the single-implementation rule,
       both re-entry conditions (stage-5 read-only role; demonstrated worktree
       failure class), and the integration-cost inventory with the file:line
       anchors listed under What. Human-judgement item, named manual check: the
       entry is read against the What section in change-set review.
-- [ ] The ROADMAP stage-3 row no longer lists "disposable clones" under
+- [x] The ROADMAP stage-3 row no longer lists "disposable clones" under
       remaining, and the deliberately-deferred line names it with the stage-5
       pointer. Pinned by the same named manual check (diff read).
-- [ ] Gate 0 (`npm run typecheck`) green in the same change-set — trivially, no
+- [x] Gate 0 (`npm run typecheck`) green in the same change-set — trivially, no
       `src/` file is touched; run via `npm run verify`. No behavioral claim.
 
 No new check is added: no gate can pin decision prose, and adding one would be
 ceremony — docs/tickets/README.md:29-30 sends human-judgement items to a named
 manual check instead.
+
+## Landed
+
+2026-10-18, lane branch `ticket/T-022-disposable-clones-deferred` (base
+c604b2a). Docs-only, exactly the four paths this ticket names — `git diff
+--stat c604b2a` at landing names `docs/decisions.md`, `docs/ROADMAP.md`,
+`docs/tickets/README.md`, and this ticket file, and nothing under `src/` or
+`scripts/` (the named manual check re-runs it in change-set review).
+
+What changed:
+
+- **docs/decisions.md** — one dated entry (2026-10-18): the
+  single-implementation rule (`WorkspaceProvider` at `src/types.ts:78-85`
+  keeps exactly `WorktreeProvider` at `src/workspace/worktree.ts:61-86`,
+  hard-wired at its single construction site `src/cli.ts:333`; no clone
+  provider, no provider factory, no `--workspace` flag until a consumer
+  exists), both re-entry conditions (a stage-5 read-only role lands — §10's
+  verifiers :769/788/809, §14.1:1016's researchers, §14.2:1023's
+  `disposable-clone-readonly` policy, §34:2094's M5 "read-only workspace
+  where applicable"; or a demonstrated worktree failure class the worktree
+  machinery cannot absorb — neither exists today), and the five-item
+  integration-cost inventory (disposal: `src/clean.ts:198` + the
+  evidence-never-deleted / dirty-refusal rule `src/clean.ts:6-8` pinned by
+  Gate 1.5; recovery: `sniffRepo` `src/workspace/worktree.ts:24-32` →
+  `src/recover.ts:452-456`, with the predicted-not-yet-reproduced flag
+  carried; evidence: `branch` at `src/runner.ts:428-436` consumed at
+  `src/recover.ts:543-547`; gates: 1.5 / 1.8 / 1.10 / 1.11 plus T-021's Gate
+  1.19 lease-path shape (T-021:52-55); GC: T-020:112-113's clone carve).
+  Every anchor was re-verified against the tree at the base commit before
+  landing.
+- **docs/ROADMAP.md** — the stage-3 row drops "disposable clones" from its
+  remaining list; the deliberately-deferred line names it with the decision
+  pointer (decisions.md 2026-10-18) and the stage-5 re-entry pointer (the
+  memoization precedent).
+- **docs/tickets/README.md** — this ticket's index row → `done 2026-10-18`.
+  Nothing else in the index changed.
+- **This ticket file** — status flipped, boxes checked, this section added.
+
+Deviations: none in substance. One wording note: inside decisions.md the
+What-section's "the decisions.md:3-4 mechanism" self-reference became "the
+mechanism at the top of this file" — a file cannot cite its own line numbers
+stably; the rule cited is verbatim decisions.md:3-4 (a contradicting decision
+must first rewrite the entry, with a date and a reason). Per this ticket's
+own Does-NOT-claim, no `src/`/`scripts/` file changed, VERIFICATION.md is
+deliberately NOT extended, and no gate script was added (no behavior added;
+no gate can pin decision prose) — the fast tier runs unchanged.
+
+Gates measured (all run in the lane on this change-set):
+
+- `npm run verify` (fast tier) — exit 0, all built-in checks green (Gate 0
+  typecheck + Gate 1 fixture baseline + the fast-tier gate suite; none of
+  them touched by this docs-only change-set).
+- `git diff --stat c604b2a` — exactly the four paths above, nothing under
+  `src/` or `scripts/`.
 
 ## Verification
 

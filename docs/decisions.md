@@ -28,3 +28,41 @@ contradicts one of these must first rewrite its entry here, with a date and a re
   culture:** README + AGENTS.md + VERIFICATION.md split, tickets as the durable
   record, verification extended in the same change-set, Windows-first hygiene
   (list-form subprocess, .gitattributes, known-issues ledger).
+- **2026-10-18 — Disposable clones are deferred; `WorktreeProvider` is the only
+  `WorkspaceProvider` (T-022).** The `WorkspaceProvider` seam (`src/types.ts:78-85`,
+  the lease/diff/dispose interface) keeps exactly one implementation,
+  `WorktreeProvider` (`src/workspace/worktree.ts:61-86`), hard-wired at its single
+  construction site (`src/cli.ts:333`). No clone provider, no provider factory, no
+  `--workspace` flag until a consumer exists. Re-entry conditions — either one
+  reopens this through a new dated entry that rewrites this one (the mechanism at
+  the top of this file), never a relitigation: (a) a read-only role lands — spec
+  §10's verifiers (`:769` deep code verifier "Read-only", `:788` security auditor,
+  `:809` UI/visual verifier), §14.1:1016's researchers, §14.2:1023's
+  `{ type: "disposable-clone-readonly" }` policy, §34:2094's Milestone-5
+  "read-only workspace where applicable" — i.e. ROADMAP stage 5; or (b) a
+  demonstrated worktree failure class the worktree machinery cannot absorb.
+  Neither exists today. A future clone ticket must reconcile this
+  integration-cost inventory:
+  - **Disposal**: `clean` refuses a target that "exists but is not a registered
+    git worktree" (`src/clean.ts:198`) — a clone workspace is not one, so a clone
+    dispose face is new code in every disposal path, and it must re-implement the
+    evidence-never-deleted / dirty-refusal rule (`src/clean.ts:6-8`, pinned by
+    Gate 1.5, VERIFICATION.md:43-47).
+  - **Recovery**: `sniffRepo` reads the worktree `.git` pointer *file*
+    (`src/workspace/worktree.ts:24-32`); a clone's `.git` is a directory, the
+    read throws, the catch returns null, and `recover` exits 1 "cannot determine
+    the target repository" (`src/recover.ts:452-456`). Predicted from read code,
+    not yet reproduced against a real clone — the successor ticket builds that
+    fixture first.
+  - **Evidence**: dispatch/recovery records carry `branch`
+    (`src/runner.ts:428-436`, consumed at `src/recover.ts:543-547`) — a clone has
+    no `swarm/*` answer.
+  - **Gates**: Gate 1.5 (cleanup semantics, VERIFICATION.md:36-59), Gate 1.8
+    (fresh workspace per attempt with `swarm/wt-*` branches,
+    VERIFICATION.md:323-328), Gate 1.10 (default-mode lease/branch/evidence
+    shapes, VERIFICATION.md:514-518), Gate 1.11 (report-only inspection incl.
+    branch, VERIFICATION.md:621-625) all pin worktree behavior; T-021's Gate 1.19
+    additionally pins the lease-path shape `<runDir>\wt\<leaseId>`
+    (T-021:52-55).
+  - **GC**: T-020's orphan classification is worktree/branch-evidence shaped by
+    construction and explicitly carves clones out (T-020:112-113).
