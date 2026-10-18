@@ -70,6 +70,43 @@
 //     judges (decisions.md 2026-10-10) — a success:false benchmark bundle
 //     changes nothing downstream. Its 'report'-kind results artifact
 //     (<probeId>.results.json) is that kind's first producer.
+//   - Screenshot semantics (T-019, §34:2069 — the spec defines NO Screenshot
+//     Probe; screenshots appear only as capabilities of the Godot probe
+//     (§12.1:919) and Web probe (§12.1:931) and as an Artifact example
+//     (§6.8:479); chosen and documented here, the
+//     T-007/T-012/T-013/T-018 precedent). The scenario carries `capture`: a
+//     REQUIRED, non-empty, workspace-relative path naming the PNG file the
+//     capture command must have written INSIDE the disposable workspace by
+//     the time it exits (absolute paths and any '..' segment are refused —
+//     the evidence contract stays local to the worktree; the durable copy is
+//     the probe's job, not the command's). The seam runs the capture command
+//     ONCE through the shared executeProbeCommand core (one spawn path,
+//     AGENTS.md #4, one full timeoutMs budget, the T-011 verified tree kill
+//     at expiry): there is NO target-lifecycle concept and no "capture at a
+//     given point" — launch, timing, and readiness are encapsulated inside
+//     the operator's capture command (a command serving a URL then
+//     screenshotting, or an inbox-OS screen capture, are both just
+//     commands). Success = the command exited 0 AND the capture-named file
+//     exists AND is at least MIN_PNG_BYTES (33 — the smallest
+//     syntactically-possible PNG: the 8-byte signature + one 25-byte IHDR
+//     chunk) AND starts with the 8-byte PNG signature — PNG-ONLY this
+//     slice. A zero-byte, missing, truncated, or non-PNG capture is
+//     success: false, NEVER a pass (AGENTS.md #7 applied to image evidence
+//     — the T-015 posture); `error` names the first failed face (spawn
+//     refused / timed out / exit N / capture file missing / below floor /
+//     bad magic). The durable copy is the point: on success the image is
+//     COPIED to <artifactsDir>/probes/<candidateId>/<probeId>.png and
+//     referenced as a kind-'screenshot' EvidenceArtifactRef — the workspace
+//     is disposed immediately after the attempt loop (src/runner.ts), so an
+//     image left at its scenario-named path would be destroyed. This is the
+//     'screenshot' artifact kind's first producer. Measurements:
+//     `capture duration` (unit ms — the execution's durationMs, recorded
+//     whenever the command actually ran) and `image bytes` (unit bytes,
+//     recorded whenever the capture file exists — even on success:false
+//     faces; evidence about failures is evidence). Dimensions and any
+//     pixel-content assertion are successor slices (§6.8:480-481). No
+//     verdict input of any kind: a success:false screenshot bundle changes
+//     nothing downstream (decisions.md 2026-10-10).
 //
 // Every probe subprocess is list-form `spawn` (never `exec` — AGENTS.md #4,
 // stricter than CommandGate's operator-typed shell strings), with the T-011
@@ -77,22 +114,24 @@
 // land on the bundle's GateResult `cleanupFailures` — evidence only.
 
 import { spawn } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { killFailureLines, killTreeVerified } from './kill-tree.js'
 import type { GateResult, WorkspaceLease } from './types.js'
 
 /** The generic probe types landed so far (§34:2061-2072's start list;
- *  `benchmark` landed with T-018 — the first Measurement producer).
- *  Screenshot, Godot/Web/Blender probes are successor slices. */
-export type ProbeType = 'command' | 'test' | 'benchmark'
+ *  `benchmark` landed with T-018 — the first Measurement producer — and
+ *  `screenshot` with T-019 — the first directly human-reviewable evidence).
+ *  Godot/Web/Blender probes are successor slices. */
+export type ProbeType = 'command' | 'test' | 'benchmark' | 'screenshot'
 
 /** Kind of an evidence artifact file (§12.1 names logs, screenshots, video).
- *  Producers so far write `log` (every probe's combined output) and — since
- *  T-018's BenchmarkProbe — `report` (the benchmark's machine-readable
- *  per-run results table, that kind's first producer); the vocabulary is
- *  documented, not grown speculatively. */
-export type EvidenceArtifactKind = 'log' | 'report'
+ *  Producers so far write `log` (every probe's combined output), `report`
+ *  (T-018's benchmark per-run results table — that kind's first producer),
+ *  and `screenshot` (T-019's durable image copy under the run artifacts
+ *  dir — that kind's first producer); the vocabulary is documented, not
+ *  grown speculatively. */
+export type EvidenceArtifactKind = 'log' | 'report' | 'screenshot'
 
 /** The probe's configuration, as written in the --jobs spec (§12:891-893's
  *  ScenarioSpec, chosen here): what to run, where its id lives, and the
@@ -112,6 +151,16 @@ export interface ScenarioSpec {
    *  parseJobsSpec (src/scheduler.ts); this type carries it optionally
    *  because the union is shared. */
   repeats?: number
+  /** Screenshot probes only (T-019): REQUIRED, non-empty, workspace-relative
+   *  path naming the PNG file the capture command must have written INSIDE
+   *  the disposable workspace by the time it exits. Absolute paths and any
+   *  '..' segment are refused — the evidence contract stays local to the
+   *  worktree; the durable copy is the probe's job, not the command's.
+   *  REFUSED on every other probe type: the field exists only where it
+   *  means something (the `repeats` precedent). Enforced by parseJobsSpec
+   *  (src/scheduler.ts); this type carries it optionally because the union
+   *  is shared. */
+  capture?: string
 }
 
 /** The run-level context a probe needs beyond the workspace (§12:891-893's
@@ -176,6 +225,16 @@ export interface EvidenceBundle {
 /** Default wall-clock limit — the CommandGate default (src/gate/command.ts). */
 export const DEFAULT_PROBE_TIMEOUT_MS = 5 * 60_000
 
+/** The PNG size floor (T-019, pinned by Gate 1.15): 33 bytes — the smallest
+ *  syntactically-possible PNG (the 8-byte signature + one 25-byte IHDR
+ *  chunk). Anything smaller cannot be a PNG, so the floor is checked BEFORE
+ *  the signature: a zero-byte, truncated, or otherwise undersized capture is
+ *  success: false, never a pass (AGENTS.md #7 applied to image evidence). */
+export const MIN_PNG_BYTES = 33
+
+/** The 8-byte PNG signature every captured image must start with. */
+export const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
 /** Tail length for a GateResult's outputTail — the CommandGate shape. */
 const TAIL_BYTES = 4000
 
@@ -198,8 +257,8 @@ function validateArtifactRef(where: string, v: unknown): void {
   if (!isPlainObject(v)) refuse(`${where} must be an object`)
   needString(where, v.name, 'name')
   needString(where, v.path, 'path')
-  if (v.kind !== 'log' && v.kind !== 'report') {
-    refuse(`${where} kind must be "log" or "report" (got ${JSON.stringify(v.kind)})`)
+  if (v.kind !== 'log' && v.kind !== 'report' && v.kind !== 'screenshot') {
+    refuse(`${where} kind must be "log", "report", or "screenshot" (got ${JSON.stringify(v.kind)})`)
   }
   if (typeof v.sizeBytes !== 'number' || !Number.isFinite(v.sizeBytes) || v.sizeBytes < 0) {
     refuse(`${where} sizeBytes must be a finite number >= 0`)
@@ -698,15 +757,131 @@ export class BenchmarkProbe implements Probe {
   }
 }
 
+/** §12.1's Screenshot Probe (T-019; §34:2069 names `screenshot artifact
+ *  probe` in Milestone 4's start list and the spec defines nothing — the
+ *  semantics are the module-docblock choices): runs the scenario's capture
+ *  command ONCE through the shared executeProbeCommand core (list-form
+ *  spawn, full timeoutMs budget, the T-011 verified tree kill at expiry —
+ *  no second spawn path, no target lifecycle: launch, timing, and readiness
+ *  are encapsulated inside the operator's capture command), then requires
+ *  that command to have written a PNG at the scenario's `capture`
+ *  workspace-relative path.
+ *
+ *   - capture: required non-empty workspace-relative path (parseJobsSpec
+ *     enforces; absolute paths and '..' segments refused there, and the
+ *     class holds the contract too for a directly constructed scenario —
+ *     a refusal here is a thrown Error, recorded by the runner's
+ *     failedBundle path, never a crash of the run).
+ *   - Success = the command exited 0 AND the capture file exists AND is
+ *     >= MIN_PNG_BYTES AND starts with PNG_MAGIC — PNG-only this slice.
+ *     `error` names the FIRST failed face, in that order.
+ *   - The durable copy is the point: on success the image is COPIED to
+ *     <artifactsDir>/probes/<candidateId>/<probeId>.png (the workspace is
+ *     disposed right after the attempt loop) and referenced as a
+ *     kind-'screenshot' artifact whose sizeBytes is the copied file's.
+ *   - Measurements (recorded regardless of success whenever their face
+ *     applies — evidence about failures is evidence): `capture duration`
+ *     (unit ms) whenever the command actually ran (a spawn refusal
+ *     produced no run), `image bytes` (unit bytes) whenever the capture
+ *     file exists.
+ *   - gateResults: one GateResult entry for the one execution. */
+export class ScreenshotProbe implements Probe {
+  readonly id: string
+  readonly scenario: ScenarioSpec
+
+  constructor(scenario: ScenarioSpec) {
+    this.id = scenario.id
+    this.scenario = scenario
+  }
+
+  async run(input: ProbeInput): Promise<EvidenceBundle> {
+    const s = input.scenario
+    const capture = s.capture ?? ''
+    const captureError = this.captureRefusal(capture)
+    if (captureError !== null) throw new Error(`screenshot probe '${this.id}': ${captureError}`)
+    const timeoutMs = s.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS
+    const execution = await executeProbeCommand(s.command, input.workspace.path, timeoutMs)
+    const capturePath = join(input.workspace.path, capture)
+    let captureBytes: number | null = null
+    if (existsSync(capturePath)) {
+      captureBytes = statSync(capturePath).size
+    }
+    const measurements: Measurement[] = []
+    if (execution.spawnError === undefined) {
+      // The command ran — its wall-clock duration is evidence even when it
+      // failed or timed out. A spawn refusal produced no run: no duration.
+      measurements.push({ name: 'capture duration', value: execution.durationMs, unit: 'ms' })
+    }
+    if (captureBytes !== null) {
+      measurements.push({ name: 'image bytes', value: captureBytes, unit: 'bytes' })
+    }
+    let success = false
+    let error: string | undefined
+    if (execution.spawnError !== undefined) {
+      error = `capture command could not be spawned: ${execution.spawnError}`
+    } else if (execution.timedOut) {
+      error = `capture command timed out after ${timeoutMs}ms`
+    } else if (execution.exitCode !== 0) {
+      error = `capture command exited with code ${execution.exitCode}`
+    } else if (captureBytes === null) {
+      error = `capture file missing: no file at '${capture}' inside the workspace after the capture command exited 0`
+    } else if (captureBytes < MIN_PNG_BYTES) {
+      error = `capture file below the PNG size floor: ${captureBytes} bytes < ${MIN_PNG_BYTES} (zero-byte, truncated, or undersized captures are never a pass)`
+    } else if (!readFileSync(capturePath).subarray(0, PNG_MAGIC.length).equals(PNG_MAGIC)) {
+      error = `capture file at '${capture}' is not a PNG (bad magic bytes)`
+    } else {
+      success = true
+    }
+    const logRef = logArtifact(input.environment, this.id, execution.output)
+    let imageRef: EvidenceArtifactRef | undefined
+    if (success && captureBytes !== null) {
+      // The durable copy (the workspace goes away at dispose — this copy is
+      // what outlives it): <artifactsDir>/probes/<candidateId>/<probeId>.png
+      const dir = probeEvidenceDir(input.environment.artifactsDir, input.environment.candidateId)
+      mkdirSync(dir, { recursive: true })
+      const imagePath = join(dir, `${this.id}.png`)
+      copyFileSync(capturePath, imagePath)
+      imageRef = {
+        name: `${this.id}.png`,
+        path: imagePath,
+        kind: 'screenshot',
+        sizeBytes: statSync(imagePath).size,
+      }
+    }
+    const bundle: EvidenceBundle = {
+      probeId: this.id,
+      scenarioId: s.id,
+      success,
+      artifacts: imageRef !== undefined ? [logRef, imageRef] : [logRef],
+      measurements,
+      gateResults: [toGateResult(this.id, execution, { passed: success })],
+      ...(error !== undefined ? { error } : {}),
+    }
+    return bundle
+  }
+
+  /** The capture-path contract for a directly constructed scenario (the
+   *  parseJobsSpec refusals are the --jobs enforcement point; this keeps a
+   *  hand-built scenario from silently escaping the same rule). */
+  private captureRefusal(capture: string): string | null {
+    if (typeof capture !== 'string' || capture.length === 0) {
+      return 'capture must be a non-empty workspace-relative path'
+    }
+    return null
+  }
+}
+
 /** The --jobs probe factory: the parsed ScenarioSpec's type has already been
- *  narrowed to 'command' | 'test' | 'benchmark' by parseJobsSpec
- *  (src/scheduler.ts). */
+ *  narrowed to 'command' | 'test' | 'benchmark' | 'screenshot' by
+ *  parseJobsSpec (src/scheduler.ts). */
 export function createProbe(scenario: ScenarioSpec): Probe {
   switch (scenario.type) {
     case 'test':
       return new TestProbe(scenario)
     case 'benchmark':
       return new BenchmarkProbe(scenario)
+    case 'screenshot':
+      return new ScreenshotProbe(scenario)
     default:
       return new CommandProbe(scenario)
   }

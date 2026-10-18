@@ -55,4 +55,4 @@ Rules:
 | T-016 | Filesystem artifact store: artifacts + probe_runs records, hash-at-ingest, re-verification | high | done 2026-10-17 |
 | T-017 | MachineWorker adapter: deterministic-command worker behind WorkerAdapter (spec §5.3, §34) | high | done 2026-10-17 |
 | T-018 | Benchmark probe: repeated measured command → quantitative EvidenceBundle (per-run durations + min/median/p95) | medium | done 2026-10-17 |
-| T-019 | Screenshot artifact probe: capture-command → validated image EvidenceBundle (spec §34:2069, §12) | medium | proposed |
+| T-019 | Screenshot artifact probe: capture-command → validated image EvidenceBundle (spec §34:2069, §12) | medium | done 2026-10-17 |

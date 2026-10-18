@@ -1,19 +1,24 @@
 // Probe-layer self-check (Gate 1.15, fast tier, T-015; extended in place by
-// T-018 — the benchmark probe) — run under tsx:
+// T-018 — the benchmark probe — and T-019 — the screenshot probe) — run
+// under tsx:
 //   node node_modules/tsx/dist/cli.mjs scripts/check-probe.mjs
 // Three legs, zero model tokens (the tickets' Verification sections):
 //   1. contract fixtures — the EvidenceBundle validator's accept/refuse faces
 //      and parseJobsSpec's probes wiring, including the benchmark `repeats`
-//      validation (the Gate 0.5 hand-built-input pattern: no pipeline, no
-//      subprocess),
-//   2. direct token-free CommandProbe/TestProbe/BenchmarkProbe executions
-//      against a fresh demo-target fixture (scripts/demo-target.mjs, Gate 1)
-//      and temp TAP fixtures in the verify sandbox — real list-form spawns,
-//      real process-table assertions on the timeout tree kill (the Gate 1.12
-//      style), and for the benchmark probe the quantitative measurement
-//      invariants (exactly N run-* durations, nearest-rank min/median/p95
-//      recomputed in this check and compared exactly, the 'report'-kind
-//      results artifact),
+//      and screenshot `capture` validation (the Gate 0.5 hand-built-input
+//      pattern: no pipeline, no subprocess),
+//   2. direct token-free CommandProbe/TestProbe/BenchmarkProbe/
+//      ScreenshotProbe executions against a fresh demo-target fixture
+//      (scripts/demo-target.mjs, Gate 1) and temp TAP/screenshot fixtures in
+//      the verify sandbox — real list-form spawns, real process-table
+//      assertions on the timeout tree kill (the Gate 1.12 style), and for
+//      the benchmark probe the quantitative measurement invariants (exactly
+//      N run-* durations, nearest-rank min/median/p95 recomputed in this
+//      check and compared exactly, the 'report'-kind results artifact); the
+//      screenshot probe's capture target is the checked-in tiny valid PNG
+//      under scripts/fixtures/ (each leg's capture command copies it into
+//      the workspace — list-form — so no capture technology is a dependency
+//      of any pin),
 //   3. a token-free end-to-end --jobs drive of runSkeleton with a FAKE
 //      WorkerAdapter and fake gates (the Gate 1.8/1.10 pattern,
 //      scripts/check-scheduler.mjs) against throwaway fixture repos,
@@ -25,7 +30,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createProbe, evidenceBundlePath, parseTapSummary, validateEvidenceBundle } from '../src/probe.ts'
+import { MIN_PNG_BYTES, PNG_MAGIC, createProbe, evidenceBundlePath, parseTapSummary, validateEvidenceBundle } from '../src/probe.ts'
 import { parseJobsSpec } from '../src/scheduler.ts'
 import { runSkeleton } from '../src/runner.ts'
 import { WorktreeProvider } from '../src/workspace/worktree.ts'
@@ -41,6 +46,29 @@ const read = (p) => readFileSync(p, 'utf8')
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const sandbox = 'C:/swarm/verify-probe'
 const fixture = 'C:/swarm/demo-target'
+// T-019: the checked-in tiny valid PNG (magic-valid at authoring time, above
+// the probe's size floor) — every screenshot pin's capture target, so no
+// capture technology is a dependency of any pin.
+const shotFixture = join(root, 'scripts', 'fixtures', 'tiny-1x1.png')
+const shotFixtureBytes = readFileSync(shotFixture)
+// T-019's token-free capture command: mkdir -p the destination dir, copy the
+// checked-in fixture PNG to the scenario-named path, print one line (so the
+// probe's .log artifact carries the command's output). List-form argv — the
+// source travels as an argument, never a shell string.
+const copyCapture = (id, dst) => ({
+  id,
+  type: 'screenshot',
+  capture: dst,
+  command: {
+    exe: process.execPath,
+    args: [
+      '-e',
+      "require('node:fs').mkdirSync(require('node:path').dirname(process.argv[2]), { recursive: true }); require('node:fs').copyFileSync(process.argv[1], process.argv[2]); console.log('captured ' + process.argv[2])",
+      shotFixture,
+      dst,
+    ],
+  },
+})
 const IDENTITY = ['-c', 'user.name=check-probe', '-c', 'user.email=probe@local']
 
 rmSync(sandbox, { recursive: true, force: true })
@@ -250,9 +278,22 @@ async function main() {
     t('P1: non-array gateResults is refused',
       refusesWith((r) => { delete r.gateResults }, 'gateResults must be an array'))
     t('P1: malformed entries are refused (artifact kind, measurement value, gateResult passed)',
-      refusesWith((r) => { r.artifacts[0].kind = 'blob' }, 'kind must be "log" or "report"')
+      refusesWith((r) => { r.artifacts[0].kind = 'blob' }, 'kind must be "log", "report", or "screenshot"')
       && refusesWith((r) => { r.measurements[0].value = 'two' }, 'value must be a finite number')
       && refusesWith((r) => { r.gateResults[0].passed = 1 }, 'passed must be a boolean'))
+    // T-019 flip (recorded in the ticket as one of this change-set's two
+    // intentional invalidations of existing assertions): the kind-refusal
+    // message previously pinned `kind must be "log" or "report"` — the
+    // message gains "screenshot" (the ScreenshotProbe's durable image copy
+    // is that kind's first producer) and the flip gains positive coverage: a
+    // well-formed bundle carrying a kind-'screenshot' artifact VALIDATES.
+    // Net strictness increases in both dimensions (the T-013 flip
+    // precedent); no other existing assertion is weakened.
+    t('P1: a kind-"screenshot" artifact validates (the T-019 flip: screenshot moved from refused kind to pinned kind)',
+      validateEvidenceBundle({
+        ...wellFormed,
+        artifacts: [{ name: 'shot-check.png', path: 'C:/swarm/run/probes/c01/shot-check.png', kind: 'screenshot', sizeBytes: 67 }],
+      }).success === true)
     t('P1: a non-object bundle is refused',
       (() => {
         try {
@@ -311,8 +352,41 @@ async function main() {
       }).jobs[0]?.probes, [
         { id: 'bench-check', type: 'benchmark', command: { exe: 'node', args: ['bench.js'] }, repeats: 5 },
       ]))
-    t('P2: a genuinely-unknown probe type is refused with the updated message',
-      throwsWith(base([{ id: 'x', type: 'screenshot', command: { exe: 'node', args: [] } }]), 'type must be "command", "test", or "benchmark"'))
+    // T-019 flip (recorded in the ticket as one of this change-set's two
+    // intentional invalidations of existing assertions): Gate 1.15's P2 leg
+    // used `type: 'screenshot'` as its genuinely-unknown example
+    // (`type must be "command", "test", or "benchmark"` — the message
+    // T-018's landing left behind). The screenshot probe now EXISTS, and —
+    // T-018 having landed first — this second landing adjusts BOTH the
+    // message and the unknown-type example (the ticket's coordination note):
+    // the example becomes a type still unknown at this landing ('godot'),
+    // and the flip gains positive coverage (a screenshot probe with `capture`
+    // parses and is preserved verbatim). Net strictness increases (the
+    // T-013 flip precedent); no other existing assertion is weakened.
+    t('P2: a screenshot probe with capture validates and is preserved verbatim (the T-019 flip: screenshot moved from unknown-type example to pinned type)',
+      eq(parseJobsSpec({
+        phases: [{ id: 'p' }],
+        jobs: [{ id: 'j1', phase: 'p', brief: 'b', probes: [
+          { id: 'shot-check', type: 'screenshot', command: { exe: 'node', args: ['cap.js'] }, capture: 'shots/out.png' },
+        ] }],
+      }).jobs[0]?.probes, [
+        { id: 'shot-check', type: 'screenshot', command: { exe: 'node', args: ['cap.js'] }, capture: 'shots/out.png' },
+      ]))
+    t('P2: a genuinely-unknown probe type is refused with the updated message (the example re-adjusted to a type still unknown at this landing — the T-018 coordination note)',
+      throwsWith(base([{ id: 'x', type: 'godot', command: { exe: 'node', args: [] } }]), 'type must be "command", "test", "benchmark", or "screenshot"'))
+    t('P2: capture validation on a screenshot probe — missing, empty, non-string, absolute, and ..-segment all refused naming the offense',
+      throwsWith(base([{ id: 'x', type: 'screenshot', command: { exe: 'node', args: [] } }]), 'capture must be a non-empty workspace-relative path')
+      && throwsWith(base([{ id: 'x', type: 'screenshot', command: { exe: 'node', args: [] }, capture: '' }]), 'capture must be a non-empty workspace-relative path')
+      && throwsWith(base([{ id: 'x', type: 'screenshot', command: { exe: 'node', args: [] }, capture: 67 }]), 'capture must be a non-empty workspace-relative path')
+      && throwsWith(base([{ id: 'x', type: 'screenshot', command: { exe: 'node', args: [] }, capture: 'C:/swarm/escape.png' }]), 'capture must be workspace-relative; absolute paths are refused')
+      && throwsWith(base([{ id: 'x', type: 'screenshot', command: { exe: 'node', args: [] }, capture: 'C:\\swarm\\escape.png' }]), 'capture must be workspace-relative; absolute paths are refused')
+      && throwsWith(base([{ id: 'x', type: 'screenshot', command: { exe: 'node', args: [] }, capture: '\\\\server\\share\\escape.png' }]), 'capture must be workspace-relative; absolute paths are refused')
+      && throwsWith(base([{ id: 'x', type: 'screenshot', command: { exe: 'node', args: [] }, capture: '../escape.png' }]), "capture must not contain a '..' segment")
+      && throwsWith(base([{ id: 'x', type: 'screenshot', command: { exe: 'node', args: [] }, capture: 'shots/../../escape.png' }]), "capture must not contain a '..' segment"))
+    t('P2: capture on a command/test/benchmark probe is refused — the field exists only where it means something',
+      throwsWith(base([{ id: 'x', type: 'command', command: { exe: 'node', args: [] }, capture: 'a.png' }]), 'capture is only valid on a screenshot probe')
+      && throwsWith(base([{ id: 'x', type: 'test', command: { exe: 'node', args: [] }, capture: 'a.png' }]), 'capture is only valid on a screenshot probe')
+      && throwsWith(base([{ id: 'x', type: 'benchmark', command: { exe: 'node', args: [] }, capture: 'a.png', repeats: 2 }]), 'capture is only valid on a screenshot probe'))
     t('P2: repeats validation on a benchmark probe — missing, 0, negative, non-integer, non-number all refused naming the offense',
       throwsWith(base([{ id: 'x', type: 'benchmark', command: { exe: 'node', args: [] } }]), 'repeats must be a positive integer >= 1')
       && throwsWith(base([{ id: 'x', type: 'benchmark', command: { exe: 'node', args: [] }, repeats: 0 }]), 'repeats must be a positive integer >= 1')
@@ -440,6 +514,123 @@ async function main() {
       && typeof benchRefused.error === 'string'
       && benchRefused.error.startsWith('run 1/2 could not be spawned: ')
       && benchRefused.error.length > 'run 1/2 could not be spawned: '.length)
+
+    // T-019: the screenshot probe — direct token-free executions whose
+    // capture commands only copy the checked-in fixture PNG into the
+    // workspace (list-form spawn via executeProbeCommand; no capture
+    // technology is a dependency of any pin).
+    const shotFx = join(sandbox, 'shot-fx')
+    mkdirSync(shotFx, { recursive: true })
+    const shotArtifacts = join(shotFx, 'artifacts')
+    const shotEnv = directEnv(shotArtifacts)
+    const shotWs = directLease(shotFx)
+    t('P3: the checked-in fixture PNG is magic-valid and above the probe size floor (the pin basis)',
+      shotFixtureBytes.length > MIN_PNG_BYTES && shotFixtureBytes.subarray(0, 8).equals(PNG_MAGIC))
+    const shotHappy = await runDirect(copyCapture('shot-happy', 'shots/happy.png'), shotWs, shotEnv)
+    const shotImg = shotHappy.artifacts.find((a) => a.kind === 'screenshot')
+    t('P3: ScreenshotProbe happy path — success true, one GateResult entry (exit 0, passed), both measurements present (capture duration ms + image bytes = source size)',
+      shotHappy.success === true
+      && shotHappy.gateResults.length === 1
+      && shotHappy.gateResults[0]?.exitCode === 0
+      && shotHappy.gateResults[0]?.passed === true
+      && shotHappy.measurements.length === 2
+      && shotHappy.measurements.some((m) => m.name === 'capture duration' && m.unit === 'ms' && m.value >= 0)
+      && shotHappy.measurements.some((m) => m.name === 'image bytes' && m.unit === 'bytes' && m.value === shotFixtureBytes.length))
+    t('P3: the image is a kind-"screenshot" artifact copied to <artifactsDir>/probes/<candidateId>/<probeId>.png, sizeBytes equal to the source, PNG magic re-verified ON THE COPY',
+      shotImg !== undefined
+      && shotImg.name === 'shot-happy.png'
+      && shotImg.path === join(shotArtifacts, 'probes', 'direct', 'shot-happy.png')
+      && shotImg.sizeBytes === shotFixtureBytes.length
+      && existsSync(shotImg.path)
+      && readFileSync(shotImg.path).subarray(0, 8).equals(PNG_MAGIC))
+    t('P3: the happy screenshot bundle passes the validator and its .log artifact is real on disk',
+      validateEvidenceBundle(JSON.parse(JSON.stringify(shotHappy))).success === true
+      && shotHappy.artifacts[0]?.kind === 'log' && shotHappy.artifacts[0]?.sizeBytes > 0
+      && existsSync(shotHappy.artifacts[0]?.path))
+
+    const shotExit = await runDirect({ id: 'shot-exit', type: 'screenshot', capture: 'exit.png', command: { exe: process.execPath, args: ['-e', "console.log('cap-boom'); process.exit(3)"] } }, shotWs, shotEnv)
+    t('P3: screenshot failure face, non-zero exit — success false, error names the exit, capture duration still recorded, NO image bytes and NO screenshot artifact',
+      shotExit.success === false
+      && shotExit.error === 'capture command exited with code 3'
+      && shotExit.gateResults[0]?.exitCode === 3
+      && shotExit.measurements.some((m) => m.name === 'capture duration')
+      && !shotExit.measurements.some((m) => m.name === 'image bytes')
+      && shotExit.artifacts.every((a) => a.kind === 'log'))
+
+    const shotZero = await runDirect({ id: 'shot-zero', type: 'screenshot', capture: 'zero.png', command: { exe: process.execPath, args: ['-e', "require('node:fs').writeFileSync(process.argv[1], '')", 'zero.png'] } }, shotWs, shotEnv)
+    t('P3: screenshot failure face, zero-byte capture — success false, error names the size floor, image bytes 0 recorded (evidence about failures is evidence), never a pass',
+      shotZero.success === false
+      && shotZero.gateResults[0]?.exitCode === 0
+      && typeof shotZero.error === 'string' && shotZero.error.includes('below the PNG size floor') && shotZero.error.includes('0 bytes')
+      && shotZero.measurements.some((m) => m.name === 'image bytes' && m.value === 0)
+      && shotZero.artifacts.every((a) => a.kind === 'log'))
+
+    const shotMissing = await runDirect({ id: 'shot-missing', type: 'screenshot', capture: 'nothing.png', command: { exe: process.execPath, args: ['-e', 'process.exit(0)'] } }, shotWs, shotEnv)
+    t('P3: screenshot failure face, exit 0 having written nothing — success false, error names the missing capture file, no image bytes recorded',
+      shotMissing.success === false
+      && shotMissing.gateResults[0]?.exitCode === 0
+      && typeof shotMissing.error === 'string' && shotMissing.error.includes('capture file missing')
+      && shotMissing.measurements.some((m) => m.name === 'capture duration')
+      && !shotMissing.measurements.some((m) => m.name === 'image bytes'))
+
+    const shotMagic = await runDirect({ id: 'shot-magic', type: 'screenshot', capture: 'junk.png', command: { exe: process.execPath, args: ['-e', "require('node:fs').writeFileSync(process.argv[1], Buffer.alloc(64))", 'junk.png'] } }, shotWs, shotEnv)
+    t('P3: screenshot failure face, magic-less capture — success false, error names the bad magic (a 64-byte file clears the floor), image bytes recorded, never a pass',
+      shotMagic.success === false
+      && shotMagic.gateResults[0]?.exitCode === 0
+      && typeof shotMagic.error === 'string' && shotMagic.error.includes('not a PNG')
+      && shotMagic.measurements.some((m) => m.name === 'image bytes' && m.value === 64)
+      && shotMagic.artifacts.every((a) => a.kind === 'log'))
+
+    const shotRefused = await runDirect({ id: 'shot-refused', type: 'screenshot', capture: 'refused.png', command: { exe: 'definitely-not-a-real-exe-4f8a2b', args: [] } }, shotWs, shotEnv)
+    t('P3: screenshot spawn-refusal face — success false with the spawn error recorded, NO capture duration (the command never ran), no artifact beyond the .log, never a pass',
+      shotRefused.success === false
+      && typeof shotRefused.error === 'string' && shotRefused.error.startsWith('capture command could not be spawned: ')
+      && shotRefused.gateResults[0]?.passed === false && shotRefused.gateResults[0]?.exitCode === null
+      && !shotRefused.measurements.some((m) => m.name === 'capture duration')
+      && !shotRefused.measurements.some((m) => m.name === 'image bytes')
+      && shotRefused.artifacts.length === 1 && shotRefused.artifacts[0]?.kind === 'log')
+
+    let shotContractThrow = ''
+    try {
+      await runDirect({ id: 'shot-nocapture', type: 'screenshot', command: { exe: process.execPath, args: [] } }, shotWs, shotEnv)
+    } catch (e) {
+      shotContractThrow = e instanceof Error ? e.message : String(e)
+    }
+    t('P3: a directly constructed screenshot scenario without capture is refused by the class itself (never silently run)',
+      shotContractThrow.includes('capture must be a non-empty workspace-relative path'))
+
+    // Timeout face — the P4 sleeper pattern with its process-table
+    // assertions and sweep fallback: the tree kill is what reaps a launched
+    // server at timeout.
+    writeFileSync(join(shotFx, 'shot-sleeper.js'), [
+      "const { spawn } = require('node:child_process')",
+      "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { windowsHide: true })",
+      "console.log('PARENT_PID=' + process.pid)",
+      "console.log('CHILD_PID=' + child.pid)",
+      'setInterval(() => {}, 1000)',
+    ].join('\n') + '\n')
+    const shotTimeoutMs = 1200
+    const shotTimedOut = await runDirect({ id: 'shot-slow', type: 'screenshot', capture: 'slow.png', command: { exe: process.execPath, args: ['shot-sleeper.js'] }, timeoutMs: shotTimeoutMs }, shotWs, shotEnv)
+    const shotLog = shotTimedOut.artifacts.find((a) => a.kind === 'log')
+    const shotPids = (shotLog !== undefined && existsSync(shotLog.path))
+      ? [...read(shotLog.path).matchAll(/(?:PARENT|CHILD)_PID=(\d+)/g)].map((m) => Number(m[1]))
+      : []
+    const shotParentDead = shotPids[0] !== undefined && await untilDead(shotPids[0])
+    const shotChildDead = shotPids[1] !== undefined && await untilDead(shotPids[1])
+    if (shotPids[0] !== undefined && !shotParentDead) sweep(shotPids[0])
+    if (shotPids[1] !== undefined && !shotChildDead) sweep(shotPids[1])
+    t('P3: screenshot timeout — success false, error names the timeout, exitCode null, durationMs >= timeoutMs, the capture duration still recorded',
+      shotTimedOut.success === false
+      && typeof shotTimedOut.error === 'string' && shotTimedOut.error.includes(`timed out after ${shotTimeoutMs}ms`)
+      && shotTimedOut.gateResults.length === 1
+      && shotTimedOut.gateResults[0]?.exitCode === null
+      && shotTimedOut.gateResults[0]?.durationMs >= shotTimeoutMs
+      && shotTimedOut.measurements.some((m) => m.name === 'capture duration' && m.value >= shotTimeoutMs))
+    t('P3: screenshot timeout — the whole spawned tree is verified dead on the real process table',
+      shotPids.length === 2 && shotParentDead && shotChildDead)
+    t("P3: screenshot timeout — kill evidence is on the GateResult: a verified kill leaves cleanupFailures absent, an unproven one records loud CLEANUP FAIL lines",
+      shotTimedOut.gateResults[0]?.cleanupFailures === undefined
+      || (Array.isArray(shotTimedOut.gateResults[0]?.cleanupFailures) && shotTimedOut.gateResults[0]?.cleanupFailures.every((l) => l.startsWith('CLEANUP FAIL'))))
   }
 
   // ---------- P4: TestProbe TAP contract on temp TAP fixtures ----------
@@ -564,9 +755,10 @@ async function main() {
 
   // ---------- P5: evidence emission in a real pipeline (--jobs drives) ----------
   {
-    // Scenario A: passing gates; one job with a PASSING and a FAILING probe
-    // plus a PASSING benchmark probe (T-018); its sibling job carries a
-    // FAILING benchmark — survival must stay untouched by benchmark outcomes.
+    // Scenario A: passing gates; one job with a PASSING and a FAILING probe,
+    // a PASSING benchmark probe (T-018), and a PASSING screenshot probe
+    // (T-019); its sibling job carries a FAILING benchmark and a FAILING
+    // screenshot — survival must stay untouched by probe outcomes.
     const a = makeRepo('e2e')
     const specA = {
       phases: [{ id: 'p' }],
@@ -577,6 +769,7 @@ async function main() {
             { id: 'build-check', type: 'command', command: { exe: 'node', args: ['build.js'] } },
             { id: 'tap-fail-check', type: 'test', command: { exe: 'node', args: ['tap-fail.js'] } },
             { id: 'bench-check', type: 'benchmark', command: { exe: 'node', args: ['build.js'] }, repeats: 2 },
+            copyCapture('shot-check', 'shot-e2e.png'),
           ],
         },
         {
@@ -584,6 +777,7 @@ async function main() {
           probes: [
             { id: 'tap-pass-check', type: 'test', command: { exe: 'node', args: ['tap-pass.js'] } },
             { id: 'bench-fail-check', type: 'benchmark', command: { exe: 'node', args: ['-e', "console.log('slow-boom'); process.exit(9)"] }, repeats: 1 },
+            { id: 'shot-fail-check', type: 'screenshot', capture: 'never.png', command: { exe: process.execPath, args: ['-e', 'process.exit(7)'] } },
           ],
         },
       ],
@@ -593,13 +787,14 @@ async function main() {
     const cA = rA.report.candidates.find((c) => c.id === 'job-a')
     const cB = rA.report.candidates.find((c) => c.id === 'job-b')
     t('P5: a passing-gates/failing-probe job still PASSES — probe results never enter a verdict',
-      cA?.passedAllGates === true && cA?.gates.every((g) => g.passed) === true && cA?.probes?.length === 3)
-    t('P5: the report carries per-probe summaries {probeId, scenarioId, success, durationMs, bundlePath} in spec order (benchmark included, T-018)',
+      cA?.passedAllGates === true && cA?.gates.every((g) => g.passed) === true && cA?.probes?.length === 4)
+    t('P5: the report carries per-probe summaries {probeId, scenarioId, success, durationMs, bundlePath} in spec order (benchmark + screenshot included, T-018/T-019)',
       eq(cA?.probes?.map((p) => [p.probeId, p.scenarioId, p.success]),
-        [['build-check', 'build-check', true], ['tap-fail-check', 'tap-fail-check', false], ['bench-check', 'bench-check', true]])
+        [['build-check', 'build-check', true], ['tap-fail-check', 'tap-fail-check', false], ['bench-check', 'bench-check', true], ['shot-check', 'shot-check', true]])
       && typeof cA?.probes?.[0]?.durationMs === 'number'
       && typeof cA?.probes?.[1]?.durationMs === 'number'
-      && typeof cA?.probes?.[2]?.durationMs === 'number')
+      && typeof cA?.probes?.[2]?.durationMs === 'number'
+      && typeof cA?.probes?.[3]?.durationMs === 'number')
     assertBundleCorrespondence('P5: every probes[] entry names an on-disk bundle that parses, passes the validator, and agrees with the summary (probes[] <-> bundlePath)', rA.report, rA.artifactsDir)
     const bundleA1 = JSON.parse(read(join(rA.artifactsDir, 'probes', 'job-a', 'build-check.json')))
     const bundleA2 = JSON.parse(read(join(rA.artifactsDir, 'probes', 'job-a', 'tap-fail-check.json')))
@@ -617,9 +812,9 @@ async function main() {
       && bundleB.measurements.some((m) => m.name === 'tests' && m.value === 2)
       && bundleB.measurements.some((m) => m.name === 'fail' && m.value === 0))
     t('P5: the on-disk report.json carries the probes[] arrays (the artifact the store and humans read)',
-      JSON.parse(read(join(rA.artifactsDir, 'report.json'))).candidates.find((c) => c.id === 'job-a')?.probes?.length === 3)
-    t('P5: a passing job with only passing probes records success:true bundles',
-      cB?.passedAllGates === true && cB?.probes?.length === 2 && cB?.probes?.[0]?.success === true)
+      JSON.parse(read(join(rA.artifactsDir, 'report.json'))).candidates.find((c) => c.id === 'job-a')?.probes?.length === 4)
+    t('P5: a passing job\'s probes[] record each outcome while survival stays untouched',
+      cB?.passedAllGates === true && cB?.probes?.length === 3 && cB?.probes?.[0]?.success === true)
 
     // T-018: the benchmark probe in a real pipeline — bundle correspondence,
     // validator-clean contents, the report artifact, and survival untouched.
@@ -645,6 +840,34 @@ async function main() {
       && validateEvidenceBundle(benchFailBundleB).success === false
       && benchFailBundleB.error === 'run 1/1 exited with code 9'
       && benchFailBundleB.measurements.filter((m) => /^run-\d+ duration$/.test(m.name)).length === 1)
+
+    // T-019: the screenshot probe in a real pipeline — bundle
+    // correspondence, the durable copy under the artifacts dir (NEVER
+    // inside the worktree — the copy happens inside run(), before dispose),
+    // and survival untouched by the screenshot outcome.
+    const shotBundleA = JSON.parse(read(join(rA.artifactsDir, 'probes', 'job-a', 'shot-check.json')))
+    const shotImgA = shotBundleA.artifacts?.find((a2) => a2.kind === 'screenshot')
+    const worktreeA = cA?.workspacePath
+    t('P5: the screenshot bundle is validator-clean with one GateResult entry, and its success agrees with the summary',
+      validateEvidenceBundle(shotBundleA).success === true
+      && shotBundleA.success === true
+      && cA?.probes?.some((p) => p.probeId === 'shot-check' && p.success === true)
+      && shotBundleA.gateResults.length === 1
+      && shotBundleA.gateResults[0]?.exitCode === 0)
+    t('P5: the image artifact is a kind-"screenshot" copy at <artifactsDir>/probes/<candidateId>/<probeId>.png — under the artifacts dir, NEVER inside the worktree — and exists on disk at report time with the source size and the PNG magic re-verified',
+      shotImgA !== undefined
+      && shotImgA.name === 'shot-check.png'
+      && shotImgA.path === join(rA.artifactsDir, 'probes', 'job-a', 'shot-check.png')
+      && typeof worktreeA === 'string' && worktreeA.length > 0 && !shotImgA.path.startsWith(worktreeA)
+      && existsSync(shotImgA.path)
+      && shotImgA.sizeBytes === shotFixtureBytes.length
+      && readFileSync(shotImgA.path).subarray(0, 8).equals(PNG_MAGIC))
+    const shotFailBundleB = JSON.parse(read(join(rA.artifactsDir, 'probes', 'job-b', 'shot-fail-check.json')))
+    t('P5: a passing-gates/FAILING-screenshot job still PASSES — the screenshot outcome never enters a verdict',
+      cB?.passedAllGates === true
+      && cB?.probes?.[2]?.success === false
+      && validateEvidenceBundle(shotFailBundleB).success === false
+      && shotFailBundleB.error === 'capture command exited with code 7')
 
     // Scenario B: a FAILING gate; its probes must still run and record
     // (evidence about failures is evidence).

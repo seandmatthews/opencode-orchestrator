@@ -1,9 +1,9 @@
 # T-019 — Screenshot artifact probe: capture-command → validated image EvidenceBundle (spec §34:2069, §12)
 
-**Status:** proposed
+**Status:** done 2026-10-17
 **Category:** engine
 **Value (1-5):** 3 · **Risk (1-5):** 2
-**Depends on:** T-015 (done 2026-10-17 — the Probe seam + EvidenceBundle contract this extends). **T-016 (proposed) is an ordering note, not a build dependency**: `probe_runs`/`ARTIFACT_CREATED` persistence is T-016's claim (T-016:29-32) and it explicitly carves screenshot probes out as *consumers* of that substrate (T-016:82-84); `ProbeRunSummary` (src/types.ts:279-285) is type-agnostic, so a screenshot bundle persists through it unchanged whenever it lands — this ticket touches no store code. **T-018 (proposed) is a coordination note, not a dependency**: both tickets flip the same pin, scripts/check-probe.mjs:291-292 — whichever lands second adjusts both the refusal message and the unknown-type example (T-018:92 uses `'screenshot'` as its genuinely-unknown example); neither builds on the other.
+**Depends on:** T-015 (done 2026-10-17 — the Probe seam + EvidenceBundle contract this extends). **T-016 (done 2026-10-17, as this ticket's ordering note anticipated) is an ordering note, not a build dependency**: `probe_runs`/`ARTIFACT_CREATED` persistence is T-016's claim (T-016:29-32) and it explicitly carves screenshot probes out as *consumers* of that substrate (T-016:82-84); `ProbeRunSummary` (src/types.ts:279-285) is type-agnostic, so a screenshot bundle persists through it unchanged whenever it lands — this ticket touches no store code. **T-018 (done 2026-10-17 — landed first) was a coordination note, not a dependency, and it resolved as written**: both tickets flip the same pin, scripts/check-probe.mjs:291-292; this ticket landed second and adjusted both the refusal message and the unknown-type example (T-018's `'screenshot'` example became `'godot'` — see Landed).
 
 ## What
 
@@ -209,7 +209,7 @@ tribal memory.
 
 ## Acceptance criteria
 
-- [ ] `ProbeType` includes `'screenshot'`; `ScreenshotProbe` exists behind the
+- [x] `ProbeType` includes `'screenshot'`; `ScreenshotProbe` exists behind the
       landed Probe seam with the documented contract above (required relative
       `capture` on screenshot and refused elsewhere; one `executeProbeCommand`
       execution with the full timeout budget and the T-011 verified tree kill;
@@ -219,32 +219,32 @@ tribal memory.
       lifecycle, no threshold field, no verdict input**); zero model/harness
       knowledge in the module (decisions.md:11-15) — pinned by **Gate 0**
       (`tsc --noEmit`) plus the **Gate 1.15 P3** contract legs.
-- [ ] The parser accepts a screenshot probe with `capture` verbatim and refuses: a
+- [x] The parser accepts a screenshot probe with `capture` verbatim and refuses: a
       genuinely-unknown type with the updated message; missing/empty/non-string/
       absolute/`..`-segment `capture` on a screenshot probe; `capture` on a
       `command`/`test` probe — pinned by **Gate 1.15 P2** (contract fixtures over
       `parseJobsSpec`, token-free).
-- [ ] **Both flips are explicit in this change-set** — scripts/check-probe.mjs:291-292
+- [x] **Both flips are explicit in this change-set** — scripts/check-probe.mjs:291-292
       (coordinated with T-018: message + unknown-type example) and the :247-250
       artifact-kind message (gaining `"screenshot"` plus positive coverage) —
       recorded here as the change-set's only intentional invalidations of existing
       assertions; no other existing check is weakened — pinned by the full fast
       tier, **`npm run verify` ALL GREEN** with the flipped Gate 1.15.
-- [ ] Happy path, token-free: the capture command copies the checked-in fixture PNG
+- [x] Happy path, token-free: the capture command copies the checked-in fixture PNG
       (under `scripts/fixtures/`, added by this change-set, magic-valid, above the
       floor) to the scenario-named path → success true; a `'screenshot'`-kind image
       artifact at `<artifactsDir>/probes/<candidateId>/<probeId>.png` with
       sizeBytes equal to the source and the magic re-verified on the **copy**;
       `capture duration` + `image bytes` measurements present; the bundle passes
       `validateEvidenceBundle` — pinned by **Gate 1.15 P3**.
-- [ ] Failure faces, each `success: false` never a pass: non-zero exit; zero-byte
+- [x] Failure faces, each `success: false` never a pass: non-zero exit; zero-byte
       capture file; missing capture file at exit 0; magic-less file (error names
       the face); non-existent exe (spawn error, no image artifact); a timing-out
       capture → exitCode null, durationMs ≥ timeoutMs, the spawned tree verified
       dead on the real process table, kill evidence on the GateResult entry —
       pinned by **Gate 1.15 P3** (timeout leg per the P4 process-table pattern,
       scripts/check-probe.mjs:414-438; AGENTS.md #7 applied to image evidence).
-- [ ] Evidence emission in a real pipeline: a `--jobs` run carrying a screenshot
+- [x] Evidence emission in a real pipeline: a `--jobs` run carrying a screenshot
       probe writes its bundle under `<artifactsDir>/probes/<candidateId>/`, the
       report's `probes[]` names its `bundlePath` and agrees with the bundle, the
       image artifact's path is under the artifacts dir **never inside the
@@ -252,7 +252,7 @@ tribal memory.
       untouched by the screenshot outcome (a passing-gates/failing-screenshot job
       still passes) — pinned by **Gate 1.15 P5** (the fake-WorkerAdapter
       `runSkeleton` drive).
-- [ ] Zero runner/CLI/report-shape drift: no `src/runner.ts` or `src/cli.ts` edits
+- [x] Zero runner/CLI/report-shape drift: no `src/runner.ts` or `src/cli.ts` edits
       (the pipeline is type-agnostic, src/runner.ts:554-556, :617-646);
       `CandidateReport.probes`/`ProbeRunSummary` shapes unchanged (src/types.ts:
       279-285); the verdict ladder byte-identical (src/runner.ts:544) — pinned by
@@ -260,15 +260,15 @@ tribal memory.
       `git diff --stat`: exactly `src/probe.ts`, `src/scheduler.ts`,
       `scripts/check-probe.mjs`, the new `scripts/fixtures/` PNG,
       `VERIFICATION.md`, `docs/ROADMAP.md`, `README.md`, the ticket file + index).
-- [ ] No new npm dependencies (decisions.md:6-10); the capture command runs as a
+- [x] No new npm dependencies (decisions.md:6-10); the capture command runs as a
       list-form spawn through `executeProbeCommand` (never `exec`, never a second
       spawn path) — pinned by **Gate 0** and the package.json/package-lock.json
       diff-free change-set.
-- [ ] Docs extended in the same change-set: VERIFICATION.md's Gate 1.15 section
+- [x] Docs extended in the same change-set: VERIFICATION.md's Gate 1.15 section
       (type list :1000, carve list :1054-1055, new legs), docs/ROADMAP.md:16's
       stage-4 row, README's `--jobs` probes doc (README.md:129-137) — pinned by
       **`npm run verify` ALL GREEN** with the updated sections present.
-- [ ] **Gate 2 NOT owed — recorded, not silently skipped** (the T-018:223-228
+- [x] **Gate 2 NOT owed — recorded, not silently skipped** (the T-018:223-228
       trigger-analysis precedent): the change-set touches no `src/runner.ts`, no
       adapter, no gate code, no workspace handling, and no report shape — none of
       VERIFICATION.md:1097-1098's triggers; Gate 2 is additionally a `--goal`-mode
@@ -313,3 +313,138 @@ VERIFICATION.md:977-1071 (Gate 1.15; type list :1000, carve :1054-1055),
 :1008-1010 (Gate 2 exercises no probe code), :1097-1098 (Gate 2 triggers) ·
 README.md:129-137 · scripts/fixtures/ (holds only report-real.json today — the
 checked-in fixture PNG lands here in this change-set).
+
+## Landed
+
+2026-10-17, lane branch `ticket/T-019-screenshot-probe`.
+
+What changed:
+
+- **`src/probe.ts`** — `ProbeType` gains `'screenshot'`; `EvidenceArtifactKind`
+  gains `'screenshot'` (this probe is the kind's first producer — the
+  docblock's reserved vocabulary growth); `ScenarioSpec` gains `capture?:
+  string` carrying the required-non-empty-workspace-relative contract in its
+  docblock; the module docblock gains the screenshot-semantics block (the
+  spec defines no Screenshot Probe — chosen and documented: PNG-only, the
+  one-command seam with no target lifecycle, the size floor, the magic
+  check, the durable-copy rule, measurement policy, no verdict input). New
+  exported constants `MIN_PNG_BYTES = 33` (the smallest
+  syntactically-possible PNG: 8-byte signature + one 25-byte IHDR chunk;
+  checked BEFORE the signature, per the documented error-face order) and
+  `PNG_MAGIC` (the 8-byte signature), both pinned by the gate. New
+  `ScreenshotProbe implements Probe`: one `executeProbeCommand` execution
+  (list-form spawn, full `timeoutMs` budget, the T-011 verified tree kill —
+  no second spawn path); success = exit 0 AND the capture file exists AND is
+  ≥ 33 bytes AND starts with the PNG magic; `error` names the FIRST failed
+  face (spawn refused / timed out / exit N / capture file missing / below
+  floor / bad magic); on success the image is COPIED to
+  `<artifactsDir>/probes/<candidateId>/<probeId>.png` and referenced as a
+  kind-`'screenshot'` artifact (the durable copy is structural — the
+  workspace is disposed right after the attempt loop); measurements
+  `capture duration` (ms, whenever the command actually ran — a spawn
+  refusal produced no run) and `image bytes` (bytes, whenever the capture
+  file exists, even on success:false faces); one GateResult entry; a
+  directly constructed scenario without a valid `capture` is refused by the
+  class itself (thrown, recorded through the runner's `failedBundle` path).
+  The bundle validator's kind refusal now reads `kind must be "log",
+  "report", or "screenshot"` (flip b). `createProbe` gains the screenshot
+  branch (docblock updated).
+- **`src/scheduler.ts`** — the `parseJobsSpec` probes map: `capture` joins
+  the allowed probe-field list; the type refusal now reads `type must be
+  "command", "test", "benchmark", or "screenshot"` (flip a); `capture`
+  required non-empty workspace-relative on a screenshot probe (missing /
+  empty / non-string / absolute — drive-letter, backslash, and UNC forms
+  via `win32.isAbsolute` regardless of host OS — and `..`-segment all
+  refused naming the offense) and refused on command/test/benchmark probes;
+  the parsed spec carries `capture` only on screenshot probes.
+- **`scripts/check-probe.mjs`** (Gate 1.15 extended in place — no new gate
+  number, no collision with 1.16/1.17): BOTH flips executed as named in the
+  criteria — (a) the :291-292 unknown-type example `'screenshot'` (T-018's
+  landing) became `'godot'`, a type still unknown at this landing, with the
+  updated message, plus positive coverage (a screenshot probe with
+  `capture` parses and is preserved verbatim); (b) the artifact-kind pin
+  gained `"screenshot"` plus positive coverage (a well-formed bundle
+  carrying a kind-`'screenshot'` artifact validates). New P2 `capture`
+  legs (missing/''/non-string/absolute ×3 forms/`..`-segment on screenshot;
+  `capture` on command/test/benchmark). New P3 screenshot direct-execution
+  legs, token-free, every capture target the checked-in fixture PNG
+  (`scripts/fixtures/tiny-1x1.png`, added by this change-set — 67 bytes,
+  chunks IHDR(13)/IDAT(10)/IEND(0), CRC-verified and magic-verified at
+  authoring time, above the floor; each capture command copies it into the
+  workspace list-form): the fixture itself pinned magic-valid + above
+  floor; happy path (capture into a workspace-relative subdir → success
+  true, one GateResult, both measurements, the kind-`'screenshot'` copy at
+  `<artifactsDir>/probes/<candidateId>/<probeId>.png` with sizeBytes equal
+  to the source and the magic re-verified ON THE COPY, validator-clean);
+  failure faces non-zero exit / zero-byte / missing-at-exit-0 / magic-less
+  (64 bytes) / spawn-refused / no-`capture`-class-refusal, each success
+  false never a pass with the measurement policy pinned per face; the
+  timeout face per the P4 sleeper pattern (error names the timeout,
+  exitCode null, durationMs ≥ timeoutMs, capture duration still recorded,
+  the spawned tree verified dead on the real process table, kill evidence
+  on the GateResult). The P5 drive extended — a PASSING screenshot probe
+  on job-a and a FAILING one (exit 7) on job-b, pinning the probes[] ↔
+  bundlePath correspondence, validator-clean bundles, the image artifact at
+  exactly `<artifactsDir>/probes/<candidateId>/<probeId>.png` — under the
+  artifacts dir, NEVER inside the candidate worktree (pinned against the
+  report's `workspacePath`) — existing on disk at report time with source
+  size + re-verified magic, and survival untouched by the screenshot
+  outcome. One stale label corrected in the same edit (no assertion
+  weakened): the P5 leg "a passing job with only passing probes" had been
+  inaccurate since T-018 gave job-b a failing benchmark; it now reads "a
+  passing job's probes[] record each outcome while survival stays
+  untouched" (length pin 2 → 3, the passing-first-probe and
+  passedAllGates pins kept). 79 assertions, 0 FAIL, zero model tokens.
+- **`scripts/fixtures/tiny-1x1.png`** — the checked-in fixture PNG (67
+  bytes; `.gitattributes` already carried `*.png binary` and
+  `scripts/fixtures/** -text`, untouched).
+- **`VERIFICATION.md`** — Gate 1.15 section: four generic probes, the
+  `--jobs` probes shape with `capture` (required workspace-relative on
+  screenshot, refused elsewhere), the screenshot-semantics paragraph, the
+  recorded T-019 flips paragraph (both flips named), all three legs
+  extended with the screenshot pins, and the carve list updated —
+  screenshot moves from carved to pinned; Godot/Web/Blender (target
+  lifecycle, readiness, mid-run capture), non-PNG formats, dimensions /
+  pixel-content assertions, and probe-side target lifecycle are recorded
+  as carves so they are neither silently assumed nor silently owed.
+- **`README.md`** — the `--jobs` probes doc: type list gains
+  `"screenshot"`, `capture` documented (required, workspace-relative, no
+  absolute paths / `..`), PNG-only with the 33-byte floor and magic check,
+  the durable copy to `probes/<candidateId>/<probeId>.png`, capture-command
+  owns launch/timing/readiness, and the recording-not-judging posture.
+- **`docs/ROADMAP.md`** — stage-4 row: screenshot probe landed (T-019),
+  Gate 1.15 extended; remaining: Godot/Web/Blender.
+- **`docs/tickets/`** — this ticket flipped to done with the boxes
+  checked, index row updated, in the same change-set.
+
+Change-set exactly as pinned (`git status --porcelain`):
+`src/probe.ts`, `src/scheduler.ts`, `scripts/check-probe.mjs`,
+`scripts/fixtures/tiny-1x1.png` (new), `VERIFICATION.md`,
+`docs/ROADMAP.md`, `README.md`, this ticket + the index. Zero edits to
+`src/runner.ts`, `src/cli.ts`, `src/types.ts`, `package.json`, or
+`package-lock.json` — no runner/CLI/report-shape drift
+(`CandidateReport.probes`/`ProbeRunSummary` untouched, the verdict ladder
+byte-identical), no new npm dependencies, the capture command through the
+landed list-form `executeProbeCommand` (never `exec`, never a second spawn
+path).
+
+Gates measured this session (lane, node v22.23.1, Windows):
+
+- **Gate 0** `npm run typecheck` → exit 0.
+- **Gate 1.15** `node node_modules/tsx/dist/cli.mjs scripts/check-probe.mjs`
+  → **ALL GREEN, exit 0**, 79 `ok:` assertions (two red-then-fixed bars
+  recorded honestly during iteration: a silent capture command produced a
+  0-byte `.log`, so the leg's `sizeBytes > 0` sub-assertion failed — fixed
+  by making the gate's own capture command print one line, not by weakening
+  the assertion; and `copyCapture` was block-scoped to the P3 braces so the
+  P5 drive crashed with a ReferenceError — hoisted to module scope).
+- **Fast tier** `node scripts/verify.mjs fast` (Gate 0 + Gate 1, including
+  the flipped Gate 1.15) → **"verify (fast) complete: ALL GREEN"**, 888
+  `ok:` lines, run twice back-to-back (no S4 kill-verification flake
+  reproduced; the flake the pre-change-state paragraph recorded remains a
+  one-session observation, not a Known issue).
+- **Gate 2 NOT owed** per the recorded trigger analysis in the criteria
+  (no `src/runner.ts`, no adapter, no gate code, no workspace handling, no
+  report-shape change; Gate 2 is additionally a `--goal`-mode run that
+  executes no probe code). **Gate 3 n/a** (no adapter touched). **Gate 2
+  was not run** — not skipped silently.
