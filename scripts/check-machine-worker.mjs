@@ -301,6 +301,37 @@ async function main() {
     t('S5: the machine brief is provenance only — the log header carries it, unexecuted as such (the argv ran, not the brief)',
       read(join(runDir, 'codemod-a', 'worker.log')).includes('brief (provenance only')
       && read(join(runDir, 'codemod-a', 'worker.log')).includes('write marker A'))
+
+    // T-020: the reproduced --clean leak, red-before/green-after (AGENTS.md
+    // #8). The in-run dispose is ONLY `git worktree remove --force`
+    // (src/workspace/worktree.ts), so this real --clean machine run has just
+    // leaked its swarm/wt-* branches into the target repo — pinned present
+    // FIRST (the recorded red bar), then `gc` on this run root removes
+    // exactly them.
+    const listBranches = () => run('git', ['-C', repo, 'branch', '--list', 'swarm/*'])
+      .split('\n').map((l) => l.replace(/^[*+]\s*/, '').trim()).filter(Boolean).sort()
+    t('S5 (T-020 red bar): the --clean machine run LEAKED its swarm/* branches — they are present after the run',
+      eq(listBranches(), ['swarm/wt-codemod-a', 'swarm/wt-codemod-b', 'swarm/wt-noop']))
+    let gcCode = 0
+    let gcOut = ''
+    try {
+      gcOut = run(process.execPath, [
+        join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs'),
+        join(root, 'src', 'gc.ts'),
+        '--run-root', runs,
+      ], { timeout: 120_000 })
+    } catch (e) {
+      gcCode = e.status ?? -1
+      gcOut = `${e.stdout ?? ''}${e.stderr ?? e.message}`
+    }
+    if (gcCode !== 0) console.error(`--- gc output (exit ${gcCode}) ---\n${gcOut}`)
+    t('S5 (T-020): gc on this run root exits 0 and classifies the run finished (report.json present → branch sweep only)',
+      gcCode === 0 && gcOut.includes('class: finished'))
+    t('S5 (T-020 green): gc removed exactly the leaked branches — no swarm/* branches left, only main in worktree list',
+      listBranches().length === 0
+      && run('git', ['-C', repo, 'worktree', 'list', '--porcelain']).split('\n').filter((l) => l.startsWith('worktree ')).length === 1)
+    t('S5 (T-020): the run\'s evidence survived gc — report.json intact on disk',
+      existsSync(join(runDir, 'report.json')) && JSON.parse(read(join(runDir, 'report.json'))).runId === report.runId)
   }
 
   // ---------- S6: refusals, all exit 1 with zero side effects ----------
