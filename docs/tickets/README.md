@@ -60,3 +60,4 @@ Rules:
 | T-021 | §15.4 explicit long-path tests: engine path-budget pin at MAX_PATH depth (spec §15.4, §34 M3) | medium | proposed |
 | T-022 | Disposable clones deferred: WorktreeProvider stays the only WorkspaceProvider (spec §3.6, §14, §34 M3) | medium | proposed |
 | T-023 | Planner/reviewer capability restriction: §14 execution policy at the WorkerAdapter seam (spec §3.6, §14, §34 M5) | high | proposed |
+| T-024 | Web/server probe: launch target → bounded readiness poll → HTTP status + body-snippet evidence → verified teardown (spec §12.1, stage-4 breadth) | high | proposed |
