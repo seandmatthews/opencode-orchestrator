@@ -56,3 +56,4 @@ Rules:
 | T-017 | MachineWorker adapter: deterministic-command worker behind WorkerAdapter (spec §5.3, §34) | high | done 2026-10-17 |
 | T-018 | Benchmark probe: repeated measured command → quantitative EvidenceBundle (per-run durations + min/median/p95) | medium | done 2026-10-17 |
 | T-019 | Screenshot artifact probe: capture-command → validated image EvidenceBundle (spec §34:2069, §12) | medium | done 2026-10-17 |
+| T-020 | Worktree lease GC: orphaned worktree + `swarm/*` branch reconciliation and disposal (spec §16, §34 M3) | high | proposed |
