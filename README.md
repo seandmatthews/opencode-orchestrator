@@ -136,7 +136,7 @@ nothing, or the gates failed, running it again would just produce the same
 result.
 
 Each job may also carry a `probes` array: named commands
-(`{"id", "type": "command"|"test"|"benchmark", "command": {"exe", "args"}, "timeoutMs"?, "repeats"?}`)
+(`{"id", "type": "command"|"test"|"benchmark"|"screenshot", "command": {"exe", "args"}, "timeoutMs"?, "repeats"?, "capture"?}`)
 that run on the final attempt no matter how the gates went, and write a JSON
 record of what happened to `probes/<candidateId>/<probeId>.json` in the run
 folder. A `command` probe records the exit code, how long it took, and the
@@ -146,7 +146,15 @@ failed. A `benchmark` probe runs its command `repeats` times (required,
 a positive integer) and records each run's duration in milliseconds plus
 `min`/`median`/`p95` summaries (nearest-rank — no interpolation), writing a
 machine-readable `probes/<candidateId>/<probeId>.results.json` table beside
-the record; `timeoutMs` is a per-repeat budget. A probe carries no
+the record; `timeoutMs` is a per-repeat budget. A `screenshot` probe runs
+its capture command once and requires it to have written a PNG (the
+8-byte magic, at least 33 bytes) at the `capture` path (required,
+workspace-relative — no absolute paths, no `..`) inside the candidate's
+workspace; the image is then copied to
+`probes/<candidateId>/<probeId>.png` in the run folder, where it survives
+worktree disposal and a human can open it. Launch, timing, and readiness
+are the capture command's job — the probe runs one command and records what
+it produced. A probe carries no
 threshold of any kind: it records performance, never judges it. A probe's
 result, even a failing one, never affects whether a
 candidate passes; probes only record.

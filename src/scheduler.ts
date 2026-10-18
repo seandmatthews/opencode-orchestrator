@@ -22,6 +22,7 @@
 // (src/store/index.ts: unknownDependencyRefusal + cycleRefusal) on the
 // expanded job DAG, so a cycle refusal names the cycle.
 
+import { win32 } from 'node:path'
 import { cycleRefusal, unknownDependencyRefusal } from './store/index.js'
 import type { DagJobSpec } from './store/index.js'
 import type { RunSchedule } from './types.js'
@@ -201,14 +202,14 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
       probes = j.probes.map((p, i) => {
         const where = `job '${id}' probes[${i}]`
         if (!isPlainObject(p)) refuse(`${where} must be an object`)
-        unknownField(where, p, ['id', 'type', 'command', 'timeoutMs', 'repeats'])
+        unknownField(where, p, ['id', 'type', 'command', 'timeoutMs', 'repeats', 'capture'])
         if (typeof p.id !== 'string' || !SPEC_ID_PATTERN.test(p.id)) {
           refuse(`${where} id ${JSON.stringify(p.id)} does not match [a-z0-9][a-z0-9-]* — it names the probe's evidence files`)
         }
         if (seenProbes.has(p.id)) refuse(`job '${id}' has duplicate probe id '${p.id}' — probe ids must be unique per job`)
         seenProbes.add(p.id)
-        if (p.type !== 'command' && p.type !== 'test' && p.type !== 'benchmark') {
-          refuse(`${where} type must be "command", "test", or "benchmark" (got ${JSON.stringify(p.type)}) — unknown probe types are refused, not ignored`)
+        if (p.type !== 'command' && p.type !== 'test' && p.type !== 'benchmark' && p.type !== 'screenshot') {
+          refuse(`${where} type must be "command", "test", "benchmark", or "screenshot" (got ${JSON.stringify(p.type)}) — unknown probe types are refused, not ignored`)
         }
         if (!isPlainObject(p.command)) refuse(`${where} command must be an object with "exe" and "args"`)
         unknownField(`${where} command`, p.command, ['exe', 'args'])
@@ -232,12 +233,34 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
         } else if (p.repeats !== undefined) {
           refuse(`${where} repeats is only valid on a benchmark probe (got type ${JSON.stringify(p.type)})`)
         }
+        // T-019: capture is REQUIRED (non-empty, workspace-relative — no
+        // absolute path, no '..' segment) on a screenshot probe: it names
+        // the PNG the capture command must have written INSIDE the
+        // disposable workspace, and the evidence contract stays local to the
+        // worktree (the durable copy is the probe's job). REFUSED on every
+        // other probe type: the field exists only where it means something
+        // (the repeats precedent). win32.isAbsolute regardless of host OS so
+        // drive-letter and UNC forms are refused deterministically.
+        if (p.type === 'screenshot') {
+          if (typeof p.capture !== 'string' || p.capture.length === 0) {
+            refuse(`${where} capture must be a non-empty workspace-relative path on a screenshot probe (got ${JSON.stringify(p.capture)})`)
+          }
+          if (win32.isAbsolute(p.capture)) {
+            refuse(`${where} capture must be workspace-relative; absolute paths are refused (got ${JSON.stringify(p.capture)})`)
+          }
+          if (p.capture.split(/[\\/]/).includes('..')) {
+            refuse(`${where} capture must not contain a '..' segment (got ${JSON.stringify(p.capture)})`)
+          }
+        } else if (p.capture !== undefined) {
+          refuse(`${where} capture is only valid on a screenshot probe (got type ${JSON.stringify(p.type)})`)
+        }
         return {
           id: p.id,
           type: p.type,
           command: { exe: p.command.exe, args: p.command.args as string[] },
           ...(p.timeoutMs !== undefined ? { timeoutMs: p.timeoutMs } : {}),
           ...(p.type === 'benchmark' ? { repeats: p.repeats as number } : {}),
+          ...(p.type === 'screenshot' ? { capture: p.capture as string } : {}),
         }
       })
     }

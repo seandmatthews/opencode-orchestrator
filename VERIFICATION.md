@@ -1032,7 +1032,10 @@ seam and the structured probe-output contract (§12.2) in `src/probe.ts`, the
 generic probes — `CommandProbe` (exit-0 evidence probe; parses nothing),
 `TestProbe` (parses TAP into tests/pass/fail measurements), and, since
 T-018, `BenchmarkProbe` (the first Measurement producer: a repeated measured
-command recording quantitative durations) — the bundle validator, the
+command recording quantitative durations), and, since T-019,
+`ScreenshotProbe` (the first directly human-reviewable evidence: a capture
+command whose PNG is copied under the run artifacts dir) — the bundle
+validator, the
 evidence writer, and the minimal `--jobs` wiring. The seam
 module's docblock chooses and documents the vocabulary the spec uses but
 never defines (`ScenarioSpec`/`EnvironmentSpec`/`Measurement`/
@@ -1046,17 +1049,37 @@ Probes produce evidence; survival still belongs to machine gates
 diffBytes > 0`) is byte-identical and a probe result, including a
 success:false bundle, never enters any verdict. No new CLI flags: probes
 attach via the `--jobs` spec's per-job `probes` array
-(`{id, type: "command"|"test"|"benchmark", command: {exe, args}, timeoutMs?,
-repeats?}` — `repeats` is required positive integer ≥ 1 on a benchmark
-probe and refused on command/test probes, the field existing only where it
-means something; ids match
+(`{id, type: "command"|"test"|"benchmark"|"screenshot", command: {exe,
+args}, timeoutMs?, repeats?, capture?}` — `repeats` is required positive
+integer ≥ 1 on a benchmark
+probe and refused on command/test/screenshot probes, the field existing only where it
+means something; `capture` is required non-empty workspace-relative on a
+screenshot probe (absolute paths and `..` segments refused — the evidence
+contract stays local to the disposable workspace; the durable copy is the
+probe's job) and refused on command/test/benchmark probes; ids match
 the job-id charset because they name evidence files; default timeout 5 min,
 the CommandGate default, a PER-REPEAT budget on a benchmark); default
 `--goal` mode has none, so default-mode
 reports are unchanged. Zero new npm dependencies; every probe subprocess is
 list-form `spawn` (never `exec`) with the T-011 verified tree kill at
 timeout — unproven kill outcomes land on the bundle's GateResult
-`cleanupFailures`, evidence only.
+`cleanupFailures`, evidence only. T-019's screenshot semantics (the spec
+defines no Screenshot Probe; §6.8:479 names `screenshot` only as an
+artifact example): PNG-only this slice, success = the capture command
+exited 0 AND the `capture` file exists in the workspace AND is ≥ 33 bytes
+(`MIN_PNG_BYTES` — the smallest syntactically-possible PNG: 8-byte
+signature + one 25-byte IHDR chunk) AND starts with the 8-byte PNG
+signature; a zero-byte, missing, truncated, or non-PNG capture is
+success:false, never a pass (AGENTS.md #7 applied to image evidence); on
+success the image is COPIED to
+`<artifactsDir>/probes/<candidateId>/<probeId>.png` and referenced as a
+kind-`'screenshot'` artifact (the workspace is disposed right after the
+attempt loop — the durable copy is structural); measurements `capture
+duration` (ms, whenever the command actually ran) and `image bytes`
+(bytes, whenever the capture file exists — even on failure faces); no
+target lifecycle — launch, timing, and readiness are encapsulated inside
+the operator's capture command; dimensions and pixel-content assertions are
+successor slices.
 
 T-018's flip, recorded: Gate 1.15's P2 leg previously ACTIVELY PINNED
 `type: 'benchmark'` as refused (`type must be "command" or "test"`). The
@@ -1065,6 +1088,23 @@ T-018's change-set — the refusal became positive coverage (a benchmark
 probe with `repeats` parses and is preserved verbatim) plus refusal of a
 genuinely-unknown type with the updated message (net strictness increases,
 the T-013 precedent); no other existing check was weakened.
+
+T-019's flips, recorded — this change-set's only intentional invalidations
+of existing assertions: (a) Gate 1.15's P2 leg used `type: 'screenshot'` as
+its genuinely-unknown example (`type must be "command", "test", or
+"benchmark"` — the message T-018's landing left behind). The screenshot
+probe now exists, and T-018 having landed first, this second landing
+adjusted BOTH the message and the unknown-type example (the ticket's
+coordination note): the example became a type still unknown at this landing
+(`'godot'`), and the flip gained positive coverage (a screenshot probe with
+`capture` parses and is preserved verbatim). (b) Gate 1.15's P1 leg
+actively pinned the artifact-kind refusal (`kind must be "log" or
+"report"`): the message gained `"screenshot"` and the leg gained positive
+coverage (a well-formed bundle carrying a kind-`'screenshot'` artifact
+validates — the ScreenshotProbe is that kind's first producer). Net
+strictness increases in both flips (refusal loosened in one dimension, that
+dimension now positively exercised, the T-013 precedent); no other existing
+check was weakened.
 
 No existing gate can pin any probe criterion — Gate 2 is a `--goal`-mode run
 that exercises no probe code (probe emission rides `--jobs` runs), so this
@@ -1075,18 +1115,27 @@ gate has three legs, all token-free:
   probeId/scenarioId, non-boolean success, non-array
   artifacts/measurements/gateResults, malformed entries (artifact kind,
   measurement value, gateResult passed/exitCode/durationMs), and non-object
-  bundles, each naming the offense; `parseJobsSpec` accepts a well-formed
+  bundles, each naming the offense; since T-019 the kind refusal reads
+  `kind must be "log", "report", or "screenshot"` and a well-formed bundle
+  carrying a kind-`'screenshot'` artifact validates (the T-019 P1 flip);
+  `parseJobsSpec` accepts a well-formed
   `probes` array verbatim — since T-018 including a benchmark probe with
-  `repeats`, preserved verbatim — parses a probe-less spec to output
+  `repeats`, and since T-019 a screenshot probe with `capture`, each
+  preserved verbatim — parses a probe-less spec to output
   byte-identical JSON to today, and refuses a genuinely-unknown probe type
-  with the updated message (`type must be "command", "test", or
-  "benchmark"`), malformed entries
+  with the updated message (`type must be "command", "test", "benchmark",
+  or "screenshot"`; the unknown-type example is a type still unknown at the
+  landing — `'godot'` since T-019, the ticket's coordination note),
+  malformed entries
   (non-object, probes non-array, missing exe, non-string args, bad
   timeoutMs), duplicate probe ids per job, probe-id charset violations,
-  unknown fields inside a probe or its command (the T-009 posture), and
+  unknown fields inside a probe or its command (the T-009 posture),
   T-018's `repeats` shape rule: missing/zero/negative/non-integer/
   non-number on a benchmark probe all refused naming the offense, and
-  `repeats` on a command/test probe refused;
+  `repeats` on a command/test probe refused, and T-019's `capture` shape
+  rule: missing/empty/non-string/absolute (drive-letter, backslash, and UNC
+  forms)/`..`-segment on a screenshot probe all refused naming the offense,
+  and `capture` on a command/test/benchmark probe refused;
 - **direct token-free executions**: on a fresh demo-target fixture
   (scripts/demo-target.mjs, Gate 1's own generator) `CommandProbe{node
   build.js}` yields success true, exitCode 0, exactly one GateResult entry,
@@ -1123,7 +1172,34 @@ gate has three legs, all token-free:
   (the P4 sleeper pattern) → success false, `error` names the timing-out
   run, the repeat exitCode null with durationMs ≥ timeoutMs and its
   duration still recorded, the spawned tree verified dead on the real
-  process table, kill evidence on that repeat's GateResult entry;
+  process table, kill evidence on that repeat's GateResult entry.
+  T-019's `ScreenshotProbe` pins, against temp screenshot fixtures in the
+  verify sandbox whose capture commands only copy the checked-in tiny valid
+  PNG (`scripts/fixtures/tiny-1x1.png` — magic-verified at authoring time,
+  above the floor — into the workspace, list-form, so no capture technology
+  is a dependency of any pin): the fixture itself is pinned magic-valid and
+  above `MIN_PNG_BYTES`; the happy path (capture into a workspace-relative
+  subdirectory) → success true, one GateResult entry (exit 0, passed),
+  both measurements (`capture duration` unit ms, `image bytes` unit bytes
+  equal to the source size), the image a kind-`'screenshot'` artifact named
+  `<probeId>.png` at
+  `<artifactsDir>/probes/<candidateId>/<probeId>.png` with sizeBytes equal
+  to the source and the PNG magic re-verified ON THE COPY, and the bundle
+  passes `validateEvidenceBundle`. Failure faces, each success:false never
+  a pass: a non-zero-exiting capture → `error` names the exit, capture
+  duration still recorded, no image bytes, no screenshot artifact; a
+  zero-byte capture → `error` names the size floor, `image bytes` 0
+  recorded (evidence about failures is evidence); exit 0 having written
+  nothing → `error` names the missing capture file, no image bytes
+  recorded; a magic-less capture (64 bytes, clearing the floor) → `error`
+  names the bad magic, `image bytes` recorded; a non-existent exe →
+  success false with the spawn error recorded, NO `capture duration` (the
+  command never ran), no artifact beyond the `.log`; a directly constructed
+  screenshot scenario without `capture` is refused by the class itself,
+  never silently run; timeout (the P4 sleeper pattern) → success false,
+  `error` names the timeout, exitCode null, durationMs ≥ timeoutMs, the
+  capture duration still recorded, the whole spawned tree verified dead on
+  the real process table, kill evidence on the GateResult entry;
 - **evidence emission in a real pipeline** (the Gate 1.8/1.10 pattern —
   `runSkeleton` driven end-to-end with a fake `WorkerAdapter` and fake
   gates against throwaway fixture repos): a `--jobs` run carrying probes
@@ -1137,12 +1213,21 @@ gate has three legs, all token-free:
   fails, and since T-018 a passing-gates/FAILING-benchmark job still passes
   (the benchmark probe rides the same correspondence pin: bundle on disk,
   validator-clean, durations + summaries + a real on-disk 'report' artifact,
-  success agreeing with the summary); default mode records no `probes`
+  success agreeing with the summary); since T-019 a `--jobs` drive carrying
+  screenshot probes pins: the screenshot bundle on disk, validator-clean,
+  with one GateResult entry and its success agreeing with the summary; the
+  image artifact a kind-`'screenshot'` copy at exactly
+  `<artifactsDir>/probes/<candidateId>/<probeId>.png` — under the artifacts
+  dir, NEVER inside the candidate worktree (pinned against the report's
+  `workspacePath`) — that exists on disk at report time with sizeBytes
+  equal to the source and the PNG magic re-verified; and a passing-gates/
+  FAILING-screenshot job still passes (the screenshot outcome never enters
+  a verdict); default mode records no `probes`
   field and no `probes/` dir.
 
-Not pinned here and carved by the ticket(s): the screenshot-artifact probe
-(§34:2069 — T-019; the benchmark probe at §34:2068 landed with T-018 and is
-pinned above), Godot/Web/Blender probes (§12.1:911-947), Static
+Not pinned here and carved by the ticket(s): Godot/Web/Blender probes
+(§12.1:911-947 — the screenshot probe is their base; target lifecycle,
+readiness polling, and mid-run capture stay carved), Static
 Diff probe (§12.1:949-951 — mostly exists as worktree diff capture),
 probe persistence (§27:1831 `probe_runs` / §28:1854 `ARTIFACT_CREATED` —
 landed since by T-016, schema v5: the extended Gate 1.6 pins the rows and
@@ -1160,7 +1245,11 @@ decisions.md 2026-10-10 keeps verdicts gate-only), statistical
 sophistication (warmup runs, outlier rejection, cross-candidate
 comparison — each owns its ticket), and benchmark `probe_runs` consumption
 (the rows persist through T-016's store untouched — `ProbeRunSummary` is
-type-agnostic). Gate 2 runs once at landing as the
+type-agnostic). T-019 additionally carves: non-PNG image formats, image
+dimensions and any pixel-content assertion (§6.8:480-481 — contact sheets,
+video), and probe-side target lifecycle (the Web/Godot probes' §12.1
+territory — today the capture command encapsulates launch, timing, and
+readiness, and the one-command seam shape is unchanged). Gate 2 runs once at landing as the
 no-regression obligation (`src/runner.ts` and report shape are on its
 trigger list; the slice gives default mode no probes, so Gate 2 pins that
 the pipeline without probes behaves exactly as today, never probe
