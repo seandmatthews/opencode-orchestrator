@@ -57,3 +57,4 @@ Rules:
 | T-018 | Benchmark probe: repeated measured command → quantitative EvidenceBundle (per-run durations + min/median/p95) | medium | done 2026-10-17 |
 | T-019 | Screenshot artifact probe: capture-command → validated image EvidenceBundle (spec §34:2069, §12) | medium | done 2026-10-17 |
 | T-020 | Worktree lease GC: orphaned worktree + `swarm/*` branch reconciliation and disposal (spec §16, §34 M3) | high | proposed |
+| T-021 | §15.4 explicit long-path tests: engine path-budget pin at MAX_PATH depth (spec §15.4, §34 M3) | medium | proposed |
