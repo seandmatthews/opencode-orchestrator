@@ -8,6 +8,7 @@
     "demo": "node scripts/demo-target.mjs",
     "skeleton": "tsx src/cli.ts",
     "clean": "tsx src/clean.ts",
+    "gc": "tsx src/gc.ts",
     "integrate": "tsx src/integrate.ts",
     "dag": "tsx src/dag.ts",
     "approvals": "tsx src/approvals.ts",

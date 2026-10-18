@@ -11,11 +11,14 @@
 // (VERIFICATION.md Known issues #4).
 // Since T-004 each run's disposal happens under the per-target-repo checkout
 // lock (src/lock.ts): a refused lock removes nothing and names the holder.
-import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, rmdirSync } from 'node:fs'
+import { existsSync, readdirSync, rmdirSync } from 'node:fs'
 import { basename, join } from 'node:path'
+// readReport/RunResult/removeBranch/disposeTargets are the shared disposal
+// internals (T-020), extracted verbatim from this file so src/gc.ts drives
+// the exact same per-worktree semantics; the loop lives in src/disposal.ts.
+import { disposeTargets, readReport, type RunResult } from './disposal.js'
 import { acquireCheckoutLock, CheckoutLockRefused, releaseCheckoutLock } from './lock.js'
-import { branchForLeaseId, normPath, registeredWorktrees, sniffRepo } from './workspace/worktree.js'
+import { branchForLeaseId, normPath, sniffRepo } from './workspace/worktree.js'
 
 const usage = `Dispose a run's git worktrees and swarm/* branches; keep all evidence.
 
@@ -73,53 +76,6 @@ function parseArgs(argv: string[]): Options {
 /** Windows path identity: `normPath` (shared with src/workspace/worktree.ts). */
 const norm = normPath
 
-function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true })
-}
-
-function errorMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
-}
-
-interface RunReportLike {
-  repo?: string
-  candidates?: { id: string; workspacePath: string | null }[]
-}
-
-function readReport(runDir: string): RunReportLike | null {
-  try {
-    return JSON.parse(readFileSync(join(runDir, 'report.json'), 'utf8')) as RunReportLike
-  } catch {
-    return null
-  }
-}
-
-// registeredWorktrees (path → branch, from `git worktree list --porcelain`)
-// and sniffRepo (repo root from a worktree's .git pointer) are the read-only
-// inspection helpers shared with src/recover.ts (T-010); they live in
-// src/workspace/worktree.ts.
-
-interface RunResult {
-  removed: number
-  refused: number
-  failed: number
-}
-
-function removeBranch(repo: string, branch: string, res: RunResult): void {
-  try {
-    if (git(repo, ['branch', '--list', branch]).trim() === '') {
-      console.log(`branch already gone: ${branch}`)
-      return
-    }
-    git(repo, ['branch', '-D', branch])
-    console.log(`removed branch: ${branch}`)
-    res.removed++
-  } catch (e) {
-    console.error(`failed (branch -D ${branch}): ${errorMessage(e)}`)
-    res.failed++
-  }
-}
-
 function cleanRunDir(runDir: string, force: boolean, forceLock: boolean, runRoot: string): RunResult {
   const res: RunResult = { removed: 0, refused: 0, failed: 0 }
   const report = readReport(runDir)
@@ -174,65 +130,6 @@ function cleanRunDir(runDir: string, force: boolean, forceLock: boolean, runRoot
     return res
   } finally {
     if (lockPath) releaseCheckoutLock(lockPath)
-  }
-}
-
-/** Per-worktree disposal loop — the T-002 semantics, unchanged. */
-function disposeTargets(
-  repo: string,
-  targets: { path: string; fallbackBranch: string | null }[],
-  force: boolean,
-  res: RunResult,
-): void {
-  const registered = registeredWorktrees(repo)
-  for (const t of targets) {
-    const observed = registered.get(norm(t.path))
-    const branch = observed ?? t.fallbackBranch
-
-    if (observed === undefined) {
-      if (!existsSync(t.path)) {
-        console.log(`already gone: ${t.path}`)
-        if (branch) removeBranch(repo, branch, res)
-        continue
-      }
-      console.error(`refused (exists but is not a registered git worktree — inspect manually): ${t.path}`)
-      res.refused++
-      continue
-    }
-
-    if (existsSync(t.path)) {
-      let dirty: boolean
-      try {
-        dirty = git(t.path, ['status', '--porcelain']).trim() !== ''
-      } catch (e) {
-        console.error(`failed (status check on ${t.path}): ${errorMessage(e)}`)
-        res.failed++
-        continue
-      }
-      if (dirty && !force) {
-        console.error(`refused (uncommitted changes; re-run with --force to discard): ${t.path}`)
-        res.refused++
-        continue
-      }
-    }
-
-    try {
-      git(repo, ['worktree', 'remove', '--force', t.path])
-      console.log(`removed worktree: ${t.path}`)
-      res.removed++
-    } catch (e) {
-      // Registered but with a missing/partial directory: a metadata prune
-      // clears the registration when git cannot remove the tree itself.
-      try { git(repo, ['worktree', 'prune']) } catch { /* report the original error */ }
-      if (registeredWorktrees(repo).has(norm(t.path))) {
-        console.error(`failed (git worktree remove): ${errorMessage(e)}`)
-        res.failed++
-        continue
-      }
-      console.log(`removed worktree (pruned stale registration): ${t.path}`)
-      res.removed++
-    }
-    if (branch) removeBranch(repo, branch, res)
   }
 }
 

@@ -1401,6 +1401,144 @@ runs once at landing ("any adapter" is on its trigger list) — recorded in
 T-017's Landed section, not a permanent extension. Gate 3 runs once at
 landing (an adapter was added) — see its section's T-017 note.
 
+## Gate 1.18 — worktree lease GC (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-gc.mjs
+```
+
+Pins T-020 (spec §16's leased-worktrees posture, §34 Milestone 3's GC build
+item, the dispose half of §29 recovery's "validate worktree leases"): the
+standalone `npm run gc -- [--run-root <path>] [--force-lock]` (`src/gc.ts`,
+the clean/integrate/recover standalone-entry pattern) walks the run root —
+14-digit timestamp run directories, the `clean --all` convention —
+classifies every run dir against the evidence the engine already produces,
+and disposes, through `src/clean.ts`'s lock-serialized, dirty-refusing
+disposal loop, only what is provably orphaned. The disposal internals
+(`readReport`/`RunResult`/`removeBranch`/`disposeTargets`) moved verbatim
+out of `src/clean.ts` into `src/disposal.ts` (the T-010 extract precedent
+that put `sniffRepo`/`registeredWorktrees` in `src/workspace/worktree.ts`)
+so both commands drive one semantics; clean's behavior is unchanged (Gate
+1.5 stays green) and the module is deliberately NOT
+`src/workspace/worktree.ts` (that file is the WorkspaceProvider seam —
+decisions.md 2026-10-18 keeps it the only one). Deliberately **no
+`--force`**: GC never discards uncommitted changes — a dirty worktree is
+refused per-item, with a pointer at `npm run clean -- --run <id> --force`
+(today's manual path for exactly that case). Every git subprocess is
+list-form (AGENTS.md #4); zero new dependencies.
+
+Classification, per run directory — every run dir is reported with its
+class:
+
+- **live (lock held)** — acquiring the per-repo checkout lock
+  (`acquireCheckoutLock`, `src/lock.ts`) is refused ⇒ the run may be live ⇒
+  skip, print the holder pid/age/path, remove nothing (the T-004
+  never-auto-reap policy; `--force-lock` is the explicit human override,
+  honored exactly as clean honors it and documented in the command's help —
+  nothing ever reaps a lock automatically);
+- **crashed-unreconciled** — no `report.json` and no `recovery.json` ⇒
+  reported "run `npm run recover` first", skip, remove nothing;
+- **crashed-reconciled** — `recovery.json` present, no `report.json` ⇒
+  worktrees + branches are disposable: targets from the dispatch records'
+  `worktreePath`/`branch` fields, the `recovery.json` workspaces, and
+  `wt/`-discovery, deduped by path and fed through clean's per-worktree
+  disposal loop with its dirty-refusal, prune fallback, and
+  branch-removal-AFTER-worktree-removal order (`src/disposal.ts`,
+  unchanged);
+- **finished** — `report.json` present ⇒ no worktree disposal (its
+  workspaces were disposed in-run or are clean's ordinary business);
+  eligible only for the branch sweep.
+
+The repo-side branch sweep (the `--clean` leak fix: the in-run dispose is
+ONLY `git worktree remove --force`, so every `--clean` run permanently
+leaks its `swarm/wt-<id>` and retry-leg `swarm/wt-<id>-a<n>` branches —
+scout-reproduced end-to-end, recorded in T-020's Why). For each terminal
+run's repo (class 3 or 4; from the report's `repo` field, falling back to
+the dispatch header's, then `sniffRepo` — the clean/recover pattern), list
+`swarm/*` branches (list-form `git branch --list 'swarm/*'`) and delete
+exactly those that (a) have no worktree currently registered on them and
+(b) are attributable to the terminal run via its dispatch records' `branch`
+fields, its report candidates (`branchForLeaseId('wt/<id>')`, retry legs
+`wt/<id>-a<n>` → `swarm/wt-<id>-a<n>` included), or its `wt/` entry names.
+Branches attributable to no terminal run are reported unowned and never
+deleted; branches on registered worktrees are reported and never deleted
+(workers never commit — the diff is captured to `diff.patch` first — so a
+`swarm/*` branch carries no unique evidence). `wt/int-*` integration-replay
+worktrees (spec §16.1 `integration` retention class, dirty by construction)
+are excluded from every target set and reported held for human disposition.
+Evidence files (`report.json`, `dispatch.jsonl`, `recovery.json`,
+`worker.log`, `diff.patch`, `integrate/<id>.json`) are never deleted. The
+per-repo lock is taken inside the per-run pass and released in a `finally`
+on every path (the `src/clean.ts` pattern); exit 0 when the sweep completed
+— skipped-live and crashed-unreconciled runs are healthy classifications,
+not failures; exit 1 when any disposal item was refused or failed (clean's
+convention).
+
+The check builds one sandbox repo whose run root holds one run dir per
+classification plus focused passes, all through the real CLI, token-free:
+
+- **A1** — a crashed-reconciled run's clean orphan worktree is removed and
+  its `swarm/wt-c01` branch removed after it (clean's order, pinned on the
+  output lines);
+- **A2** — a crashed-unreconciled run (dispatch.jsonl + worktree + branch,
+  no `recovery.json`) is reported recover-first with the worktree, branch,
+  and dispatch evidence intact — nothing removed;
+- **A3** — the reproduced `--clean` leak shape (`workspacePath: null`
+  candidates, exactly what the in-run dispose produces): the leaked
+  `swarm/wt-c03a`, `swarm/wt-c03b`, and retry-leg `swarm/wt-c03b-a2` are
+  deleted while the unowned `swarm/wt-ghost` is reported and kept;
+- **A4** — a finished run whose worktree is still registered loses
+  nothing: the sweep reports "branch held by a registered worktree —
+  kept";
+- **A5** — a dirty worktree in a crashed-reconciled run is refused (GC
+  takes no `--force`), reported per-item with the
+  `npm run clean -- --run <id> --force` pointer, worktree + branch intact
+  — the pass exits 1, and the pointer's advice actually works (`clean
+  --run 20260101000005 --force` disposes it, exit 0);
+- **A6** — a dirty `wt/int-c06` worktree survives the pass byte-identical
+  (whole-tree hash) and reported held while its crashed-reconciled
+  sibling's orphan IS disposed;
+- **E** — every evidence file (`report.json`/`dispatch.jsonl`/
+  `recovery.json`/`worker.log`/`diff.patch`) is hash-identical across the
+  whole pass, and no residual `.lock` files remain (the lock released in
+  `finally` on every path);
+- **B** — a held checkout lock classifies every run live, names the holder
+  pid and lock path, removes nothing, exit 0 (healthy); the documented
+  `--force-lock` override proceeds and disposes (parity with clean) and
+  releases the lock afterward; the end state keeps exactly the
+  deliberately-kept worktrees (main + the unreconciled c02 + the
+  registered c04 + the held int-c06) and branches (c02, c04, ghost).
+
+The reproduced leak is additionally pinned red-before/green-after inside
+the existing Gate 1.17 S5 sandbox (`scripts/check-machine-worker.mjs`):
+after the real `--clean` machine run the three `swarm/wt-*` branches ARE
+present (the recorded red bar — AGENTS.md #8), then `gc` on that run root
+removes exactly them, leaving no `swarm/*` branches and only `main` in
+`worktree list`, with the run's `report.json` intact.
+
+Not pinned here and carved by the ticket: no §27 `workspace_leases` table
+and no §28 `WORKTREE_*` events — a lease record is retention machinery,
+not a GC prerequisite (`dispatch.jsonl` already carries the lease identity
+per attempt; the carve is recorded in T-010's Landed section and this
+file's Gate 1.11 carve note), no retention policies / `expiresAt` (§16.1's
+graded classes — GC implements one binary classification, debris-vs-live;
+the graded classes are the next stage-3 item), no recover changes
+(`recover` stays report-only — Gate 1.11's byte-identical pin stays intact;
+GC consumes recovery.json, never produces it, and never flips that pin),
+no pipeline changes (`src/runner.ts` and the WorktreeProvider untouched —
+the `--clean` leak is fixed at GC time, not by making in-run dispose
+delete branches, which would change run-time behavior), no
+startup-automatic GC (an explicit command in the clean/recover family;
+T-004's never-auto-reap policy bounds how automatic a crashed-run GC can
+be — a crashed run's stale lock blocks until a human overrides), and no
+§26.7 retention UI / disposable clones / short-path run roots (decisions.md
+2026-10-18 for clones). Gate 2 is not triggered: the change-set touches no
+pipeline file — the shared disposal module is a `clean.ts` extraction,
+`src/runner.ts`, `src/workspace/worktree.ts`, the adapters, the gates, and
+the report shape are untouched (trigger list, Gate 2's section). If a
+landed change-set touches `src/workspace/worktree.ts` or `src/runner.ts`
+anyway, Gate 2 runs once at landing. Gate 3 n/a (no adapter change).
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash

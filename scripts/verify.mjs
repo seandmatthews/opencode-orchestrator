@@ -555,6 +555,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.18: worktree lease GC (T-020) ----------
+section('Gate 1.18 — worktree lease GC (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-gc.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'gc self-check exit 0')
+} catch (e) {
+  fail(`gc self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
