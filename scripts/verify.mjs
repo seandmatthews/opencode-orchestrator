@@ -565,6 +565,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.19: §15.4 explicit long-path budget (T-021) ----------
+section('Gate 1.19 — §15.4 explicit long-path budget (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-long-paths.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'long-path budget self-check exit 0')
+} catch (e) {
+  fail(`long-path budget self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
