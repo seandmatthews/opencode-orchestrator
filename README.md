@@ -136,7 +136,7 @@ nothing, or the gates failed, running it again would just produce the same
 result.
 
 Each job may also carry a `probes` array: named commands
-(`{"id", "type": "command"|"test"|"benchmark"|"screenshot", "command": {"exe", "args"}, "timeoutMs"?, "repeats"?, "capture"?}`)
+(`{"id", "type": "command"|"test"|"benchmark"|"screenshot"|"web", "command": {"exe", "args"}, "timeoutMs"?, "repeats"?, "capture"?, "url"?}`)
 that run on the final attempt no matter how the gates went, and write a JSON
 record of what happened to `probes/<candidateId>/<probeId>.json` in the run
 folder. A `command` probe records the exit code, how long it took, and the
@@ -154,7 +154,21 @@ workspace; the image is then copied to
 `probes/<candidateId>/<probeId>.png` in the run folder, where it survives
 worktree disposal and a human can open it. Launch, timing, and readiness
 are the capture command's job — the probe runs one command and records what
-it produced. A probe carries no
+it produced. A `web` probe launches its command as a long-running server
+(it does not wait for the command to exit), then polls `url` — required,
+an `http://` or `https://` address — until the first response connects or
+the timeout expires (one budget from launch; `timeoutMs` is the whole
+launch → poll → capture → teardown budget). That first response is the
+capture: the probe records its HTTP status, how many body bytes it read
+(capped at 1 MiB), and how long readiness took, and writes a bounded
+record (status plus a 2048-byte body snippet) to
+`probes/<candidateId>/<probeId>.response.json`. The launched process tree
+is always torn down with a verified kill — after a capture, after a
+failure, and at the deadline; nothing is left running. The probe succeeds
+only when the server launched, answered within the deadline with a 2xx
+status, and sent a non-empty body. The port in `url` is machine-global and
+chosen by you: two probes pointed at the same port at the same time
+collide. A probe carries no
 threshold of any kind: it records performance, never judges it. A probe's
 result, even a failing one, never affects whether a
 candidate passes; probes only record.

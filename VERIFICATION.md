@@ -1034,7 +1034,10 @@ generic probes — `CommandProbe` (exit-0 evidence probe; parses nothing),
 T-018, `BenchmarkProbe` (the first Measurement producer: a repeated measured
 command recording quantitative durations), and, since T-019,
 `ScreenshotProbe` (the first directly human-reviewable evidence: a capture
-command whose PNG is copied under the run artifacts dir) — the bundle
+command whose PNG is copied under the run artifacts dir), and, since T-024,
+`WebProbe` (the first launch-without-awaiting-exit lifecycle: a long-running
+server target launched, readiness-polled, HTTP-captured, and
+verified-torn-down under one timeout budget) — the bundle
 validator, the
 evidence writer, and the minimal `--jobs` wiring. The seam
 module's docblock chooses and documents the vocabulary the spec uses but
@@ -1049,16 +1052,22 @@ Probes produce evidence; survival still belongs to machine gates
 diffBytes > 0`) is byte-identical and a probe result, including a
 success:false bundle, never enters any verdict. No new CLI flags: probes
 attach via the `--jobs` spec's per-job `probes` array
-(`{id, type: "command"|"test"|"benchmark"|"screenshot", command: {exe,
-args}, timeoutMs?, repeats?, capture?}` — `repeats` is required positive
+(`{id, type: "command"|"test"|"benchmark"|"screenshot"|"web", command: {exe,
+args}, timeoutMs?, repeats?, capture?, url?}` — `repeats` is required positive
 integer ≥ 1 on a benchmark
-probe and refused on command/test/screenshot probes, the field existing only where it
+probe and refused on command/test/screenshot/web probes, the field existing only where it
 means something; `capture` is required non-empty workspace-relative on a
 screenshot probe (absolute paths and `..` segments refused — the evidence
 contract stays local to the disposable workspace; the durable copy is the
-probe's job) and refused on command/test/benchmark probes; ids match
+probe's job) and refused on command/test/benchmark/web probes; `url` is
+required non-empty http(s) on a web probe and refused on
+command/test/benchmark/screenshot probes (T-024 — the one probe field
+pointing outside the workspace, its operator-chosen port machine-global);
+ids match
 the job-id charset because they name evidence files; default timeout 5 min,
-the CommandGate default, a PER-REPEAT budget on a benchmark); default
+the CommandGate default, a PER-REPEAT budget on a benchmark and a
+WHOLE-LIFECYCLE budget (launch → readiness poll → capture → teardown) on a
+web probe); default
 `--goal` mode has none, so default-mode
 reports are unchanged. Zero new npm dependencies; every probe subprocess is
 list-form `spawn` (never `exec`) with the T-011 verified tree kill at
@@ -1079,7 +1088,47 @@ duration` (ms, whenever the command actually ran) and `image bytes`
 (bytes, whenever the capture file exists — even on failure faces); no
 target lifecycle — launch, timing, and readiness are encapsulated inside
 the operator's capture command; dimensions and pixel-content assertions are
-successor slices.
+successor slices. T-024's web/server semantics (the spec defines NO
+server-lifecycle probe anywhere — §12.1:925-935's "Web Probe" is browser
+automation): the scenario carries `url`, a required non-empty http(s) URL —
+the address the probe polls for readiness and captures, and the one
+ScenarioSpec field pointing outside the workspace (absolute by nature; its
+operator-chosen port is machine-global — two concurrently-running probes
+aimed at one port collide; no ephemeral-port scheme this slice). The
+lifecycle is launch WITHOUT awaiting exit beside the run-to-completion
+`executeProbeCommand` core: `launchTarget` spawns the scenario command in
+the workspace (list-form, `windowsHide`, refusal recorded never thrown) and
+returns the live child; a bounded readiness poll (stdlib global `fetch`,
+zero new dependencies; `WEB_PROBE_POLL_INTERVAL_MS` = 250 between attempts;
+each attempt aborted at the deadline) runs until the first poll response
+that CONNECTS — that response IS the capture (status read; body read capped
+at `WEB_PROBE_MAX_BODY_BYTES` = 1 MiB, the bytes actually read recorded;
+the artifact's `bodySnippet` further bounded at `WEB_PROBE_SNIPPET_BYTES` =
+2048 bytes of the UTF-8-decoded read) — or a face ends the poll first:
+spawn refusal, the target exiting before readiness (fail-fast, the exit
+named), or deadline expiry (the last poll error named, e.g. connection
+refused). Teardown is the T-011 `killTreeVerified` on EVERY path while the
+target is live — after the capture, after every failure face, at deadline
+expiry; unproven kill outcomes land on the GateResult `cleanupFailures`
+(evidence only); nothing-to-kill (spawn refusal, target already exited) is
+recorded honestly, never fabricated, and a just-exited pid is never
+taskkilled (the `executeProbeCommand` boundary rule — pid reuse). Success =
+target launched AND `url` ready within the deadline AND the captured
+response is 2xx AND its body non-empty; `error` names the first failed face
+(spawn refused / target exited before readiness / readiness deadline
+expired / non-2xx status / empty body); a probe that captured no response
+is success:false, never a pass (AGENTS.md #7 applied to bundles). No
+threshold/assertion field of any kind — 2xx + non-empty body is the
+documented evidence shape; the probe records, never judges; a success:false
+web bundle changes nothing downstream. Measurements (recorded whenever
+their face applies): `http status` (the captured status code), `body bytes`
+(bytes — what the capped read actually read), `ready duration` (ms — launch
+to the first connected response, recorded whenever readiness was reached,
+even on later failure faces). Artifacts: the standard `.log` (launch banner
++ poll attempts + child output + capture/teardown outcome) plus
+`<probeId>.response.json`, kind `'report'` (the kind's second producer:
+`{url, status, contentType?, bodySnippet, bodyBytes}` — the bounded snippet
+keeps the file bounded whatever the served body was).
 
 T-018's flip, recorded: Gate 1.15's P2 leg previously ACTIVELY PINNED
 `type: 'benchmark'` as refused (`type must be "command" or "test"`). The
@@ -1106,6 +1155,21 @@ strictness increases in both flips (refusal loosened in one dimension, that
 dimension now positively exercised, the T-013 precedent); no other existing
 check was weakened.
 
+T-024's flip, recorded — this change-set's only intentional invalidation of
+an existing assertion: Gate 1.15's P2 leg actively pinned the unknown-type
+refusal message (`type must be "command", "test", "benchmark", or
+"screenshot"` — the message T-019's landing left behind, with `'godot'` as
+the unknown-type example since T-019). The web probe now exists, so that one
+assertion was flipped explicitly in T-024's change-set: the expected message
+became `type must be "command", "test", "benchmark", "screenshot", or "web"`
+and `'godot'` stays genuinely unknown and remains the example (only the
+message string changed), and the flip gained positive coverage (a web probe
+with `url` parses and is preserved verbatim). Net strictness increases (the
+T-013 flip precedent); no other existing check was weakened. The P5 drive's
+existing per-job probes[] length/order pins were EXTENDED (job-a 4→5
+probes, job-b 3→4) to carry the new web probes — coverage added, nothing
+weakened (the T-019 label-correction precedent for drive-extending edits).
+
 No existing gate can pin any probe criterion — Gate 2 is a `--goal`-mode run
 that exercises no probe code (probe emission rides `--jobs` runs), so this
 gate has three legs, all token-free:
@@ -1120,12 +1184,14 @@ gate has three legs, all token-free:
   carrying a kind-`'screenshot'` artifact validates (the T-019 P1 flip);
   `parseJobsSpec` accepts a well-formed
   `probes` array verbatim — since T-018 including a benchmark probe with
-  `repeats`, and since T-019 a screenshot probe with `capture`, each
+  `repeats`, since T-019 a screenshot probe with `capture`, and since T-024
+  a web probe with `url`, each
   preserved verbatim — parses a probe-less spec to output
   byte-identical JSON to today, and refuses a genuinely-unknown probe type
   with the updated message (`type must be "command", "test", "benchmark",
-  or "screenshot"`; the unknown-type example is a type still unknown at the
-  landing — `'godot'` since T-019, the ticket's coordination note),
+  "screenshot", or "web"` since T-024's flip; the unknown-type example is a
+  type still unknown at the
+  landing — `'godot'` since T-019, still unknown at the T-024 landing),
   malformed entries
   (non-object, probes non-array, missing exe, non-string args, bad
   timeoutMs), duplicate probe ids per job, probe-id charset violations,
@@ -1135,7 +1201,10 @@ gate has three legs, all token-free:
   `repeats` on a command/test probe refused, and T-019's `capture` shape
   rule: missing/empty/non-string/absolute (drive-letter, backslash, and UNC
   forms)/`..`-segment on a screenshot probe all refused naming the offense,
-  and `capture` on a command/test/benchmark probe refused;
+  and `capture` on a command/test/benchmark probe refused, and T-024's
+  `url` shape rule: missing/empty/non-string/non-http(s)-scheme
+  (`ftp://host/`, URL junk) on a web probe all refused naming the offense,
+  and `url` on a command/test/benchmark/screenshot probe refused;
 - **direct token-free executions**: on a fresh demo-target fixture
   (scripts/demo-target.mjs, Gate 1's own generator) `CommandProbe{node
   build.js}` yields success true, exitCode 0, exactly one GateResult entry,
@@ -1200,6 +1269,37 @@ gate has three legs, all token-free:
   `error` names the timeout, exitCode null, durationMs ≥ timeoutMs, the
   capture duration still recorded, the whole spawned tree verified dead on
   the real process table, kill evidence on the GateResult entry;
+  T-024's `WebProbe` pins, on zero-dependency `node:http` fixture servers
+  generated in the verify sandbox per leg (write-and-run, the demo-target
+  pattern — no server exists in any checked-in fixture; each leg's server
+  binds a free port the check picks, ports being machine-global — the
+  documented limitation): the happy path (a 200 server with a known body)
+  → success true; `http status` 200; `ready duration` (ms) + `body bytes`
+  recorded; the body snippet equals the known body;
+  `<probeId>.response.json` (kind `'report'`) on disk under
+  `<artifactsDir>/probes/<candidateId>/` parsing to the captured values
+  (url, status, contentType, snippet, bytes); the bundle passes
+  `validateEvidenceBundle`; the bounds pinned exactly — a 5000-char body
+  records a snippet of exactly `WEB_PROBE_SNIPPET_BYTES` characters and a
+  1.5 MiB body records exactly `WEB_PROBE_MAX_BODY_BYTES` bytes read (both
+  still success true — the bounds bound the evidence, never judge it);
+  **the server tree verified dead on the real process table after `run()`
+  returns** — teardown pinned on the success path. Failure faces, each
+  success:false never a pass: a 500 server → `error` names the non-2xx
+  status and the `http status` measurement still records 500 (readiness was
+  reached — `ready duration` recorded too; the response artifact records
+  the 500); a 200 with a zero-byte body → `error` names the empty body,
+  body bytes 0 recorded; a launch that exits 3 without serving → `error`
+  names the exit, zero measurements, no response artifact, exitCode 3 on
+  the GateResult, nothing-to-kill recorded in the log with NO
+  `cleanupFailures` fabricated; a never-ready sleeper that binds nothing →
+  deadline expiry, `error` names the readiness timeout with the last poll
+  error (ECONNREFUSED), exitCode null, durationMs ≥ timeoutMs, multiple
+  poll attempts logged inside the one budget, **the spawned tree (parent +
+  child) verified dead on the real process table** — the tree kill is what
+  reaps a launched server — kill evidence on the GateResult entry; every
+  leg sweeps its fixture server (no process left alive, the P4 sweep
+  fallback).
 - **evidence emission in a real pipeline** (the Gate 1.8/1.10 pattern —
   `runSkeleton` driven end-to-end with a fake `WorkerAdapter` and fake
   gates against throwaway fixture repos): a `--jobs` run carrying probes
@@ -1222,12 +1322,26 @@ gate has three legs, all token-free:
   `workspacePath`) — that exists on disk at report time with sizeBytes
   equal to the source and the PNG magic re-verified; and a passing-gates/
   FAILING-screenshot job still passes (the screenshot outcome never enters
+  a verdict); since T-024 a `--jobs` drive carrying web probes (inline
+  `node -e` servers, source as argv) pins: the web bundle on disk,
+  validator-clean, its success agreeing with the summary, the `http status`
+  measurement on the captured 200; the response artifact on disk under the
+  artifacts dir — NEVER inside the candidate worktree (pinned against the
+  report's `workspacePath`) — parsing to the captured body snippet; and a
+  passing-gates/FAILING-web job still passes (the web outcome never enters
   a verdict); default mode records no `probes`
   field and no `probes/` dir.
 
-Not pinned here and carved by the ticket(s): Godot/Web/Blender probes
-(§12.1:911-947 — the screenshot probe is their base; target lifecycle,
-readiness polling, and mid-run capture stay carved), Static
+Not pinned here and carved by the ticket(s): Godot/Blender probes
+(§12.1:911-924, :937-947 — the T-024 web/server probe is their lifecycle
+base; app-specific launch/readiness/capture for those tools stays carved
+until the apps are installed) and browser-automation Web proper
+(§12.1:925-935 — interaction, console/network errors, accessibility tree,
+viewport matrix, performance metrics — needs a browser dependency and its
+own decisions.md entry; T-024's `web` probe is the server-lifecycle slice,
+not §12.1's Web Probe), screenshot integration on a launched web target
+(composing T-019's capture onto a live server — the natural successor
+ticket), Static
 Diff probe (§12.1:949-951 — mostly exists as worktree diff capture),
 probe persistence (§27:1831 `probe_runs` / §28:1854 `ARTIFACT_CREATED` —
 landed since by T-016, schema v5: the extended Gate 1.6 pins the rows and
@@ -1249,7 +1363,13 @@ type-agnostic). T-019 additionally carves: non-PNG image formats, image
 dimensions and any pixel-content assertion (§6.8:480-481 — contact sheets,
 video), and probe-side target lifecycle (the Web/Godot probes' §12.1
 territory — today the capture command encapsulates launch, timing, and
-readiness, and the one-command seam shape is unchanged). Gate 2 runs once at landing as the
+readiness, and the one-command seam shape is unchanged; the
+server-lifecycle half is pinned for `web` probes since T-024 — the carve
+stands for the screenshot/Godot/Blender territory). T-024 additionally
+carves: ephemeral-port allocation (`url` is operator-chosen and ports are
+machine-global — concurrent probes aimed at one port collide), multi-URL/
+health-endpoint logic, and web `probe_runs` consumption beyond T-016's
+type-agnostic persistence (the rows persist untouched). Gate 2 runs once at landing as the
 no-regression obligation (`src/runner.ts` and report shape are on its
 trigger list; the slice gives default mode no probes, so Gate 2 pins that
 the pipeline without probes behaves exactly as today, never probe

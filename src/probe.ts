@@ -70,6 +70,58 @@
 //     judges (decisions.md 2026-10-10) — a success:false benchmark bundle
 //     changes nothing downstream. Its 'report'-kind results artifact
 //     (<probeId>.results.json) is that kind's first producer.
+//   - Web/server semantics (T-024; the spec defines NO server-lifecycle
+//     probe anywhere — §12.1:925-935's "Web Probe" is browser automation
+//     (load page, interact, console/network errors, accessibility tree,
+//     viewport matrix, performance metrics) and needs a browser dependency;
+//     chosen and documented here, the T-007/T-012/T-013/T-018/T-019
+//     precedent). The scenario carries `url`: a REQUIRED, non-empty
+//     http:// or https:// URL — the address the probe polls for readiness
+//     and captures, and the one ScenarioSpec field pointing OUTSIDE the
+//     workspace (absolute by nature — documented; its operator-chosen port
+//     is machine-global: two concurrently-running probes aimed at one port
+//     collide, and no ephemeral-port scheme exists this slice). The
+//     lifecycle is a LAUNCH-WITHOUT-AWAITING-EXIT beside the
+//     run-to-completion executeProbeCommand core: launchTarget spawns the
+//     scenario command in the workspace (list-form, windowsHide, refusal
+//     recorded never thrown) and returns the LIVE child handle; a bounded
+//     readiness poll (stdlib global `fetch` — zero new dependencies per
+//     decisions.md 2026-10-10; WEB_PROBE_POLL_INTERVAL_MS between attempts;
+//     ONE timeoutMs budget from launch, each attempt aborted at it) runs
+//     until the first poll response that CONNECTS — that response IS the
+//     capture (status read; body read capped at WEB_PROBE_MAX_BODY_BYTES —
+//     the probe records what it read, never the whole body; the artifact's
+//     bodySnippet further bounded at WEB_PROBE_SNIPPET_BYTES) — or a face
+//     ends the poll first: spawn refusal, the target exiting before
+//     readiness (fail-fast, the exit named), or deadline expiry (the last
+//     poll error named, e.g. connection refused). Teardown is the T-011
+//     verified tree kill (killTreeVerified) on EVERY path while the target
+//     is live — after the capture, after every failure face, at deadline
+//     expiry; unproven kill outcomes land on the GateResult cleanupFailures
+//     (evidence only); nothing-to-kill (spawn refusal, target already
+//     exited) is recorded honestly, never fabricated, and a just-exited pid
+//     is never taskkilled (the executeProbeCommand boundary rule: a
+//     just-exited or reused pid is not ours to kill). Success = target
+//     launched AND url ready within the deadline AND the captured response
+//     is 2xx AND its body non-empty — no threshold/assertion field of any
+//     kind: 2xx + non-empty body is the documented evidence shape; the
+//     probe records, never judges (decisions.md 2026-10-10), and `error`
+//     names the first failed face (spawn refused / target exited before
+//     readiness / readiness deadline expired / non-2xx status / empty
+//     body). A probe that captured no response is success: false, NEVER a
+//     pass (AGENTS.md #7 applied to bundles — the T-015 posture), and a
+//     success:false web bundle changes nothing downstream — the ladder
+//     (src/runner.ts) is untouched by construction. Measurements (recorded
+//     whenever their face applies — evidence about failures is evidence):
+//     `http status` (the captured status code), `body bytes` (unit bytes —
+//     what the capped read actually read), `ready duration` (unit ms —
+//     launch to the first connected response, recorded whenever readiness
+//     was reached, even on later failure faces). Artifacts: the standard
+//     .log (launch banner + poll attempts + child output + capture outcome
+//     + teardown outcome) plus <probeId>.response.json, kind 'report' (the
+//     kind's second producer; {url, status, contentType?, bodySnippet,
+//     bodyBytes} — the bounded snippet keeps the file bounded whatever the
+//     served body was).
 //   - Screenshot semantics (T-019, §34:2069 — the spec defines NO Screenshot
 //     Probe; screenshots appear only as capabilities of the Godot probe
 //     (§12.1:919) and Web probe (§12.1:931) and as an Artifact example
@@ -114,16 +166,20 @@
 // land on the bundle's GateResult `cleanupFailures` — evidence only.
 
 import { spawn } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { killFailureLines, killTreeVerified } from './kill-tree.js'
+import { killFailureLines, killSuccessLine, killTreeVerified } from './kill-tree.js'
 import type { GateResult, WorkspaceLease } from './types.js'
 
 /** The generic probe types landed so far (§34:2061-2072's start list;
  *  `benchmark` landed with T-018 — the first Measurement producer — and
- *  `screenshot` with T-019 — the first directly human-reviewable evidence).
- *  Godot/Web/Blender probes are successor slices. */
-export type ProbeType = 'command' | 'test' | 'benchmark' | 'screenshot'
+ *  `screenshot` with T-019 — the first directly human-reviewable evidence;
+ *  `web` with T-024 — the first launch-without-awaiting-exit lifecycle: a
+ *  long-running server target, readiness-polled and verified-torn-down
+ *  under one timeout budget). Godot/Blender probes and browser-automation
+ *  Web proper (§12.1:925-935) are successor slices. */
+export type ProbeType = 'command' | 'test' | 'benchmark' | 'screenshot' | 'web'
 
 /** Kind of an evidence artifact file (§12.1 names logs, screenshots, video).
  *  Producers so far write `log` (every probe's combined output), `report`
@@ -161,6 +217,16 @@ export interface ScenarioSpec {
    *  (src/scheduler.ts); this type carries it optionally because the union
    *  is shared. */
   capture?: string
+  /** Web probes only (T-024): REQUIRED, non-empty http:// or https:// URL —
+   *  the address the probe polls for readiness and captures. The ONE
+   *  ScenarioSpec field pointing outside the workspace (absolute by nature
+   *  — documented), and its operator-chosen port is machine-global: two
+   *  concurrently-running probes aimed at one port collide (no
+   *  ephemeral-port scheme this slice). REFUSED on every other probe type:
+   *  the field exists only where it means something (the `repeats` /
+   *  `capture` precedent). Enforced by parseJobsSpec (src/scheduler.ts);
+   *  this type carries it optionally because the union is shared. */
+  url?: string
 }
 
 /** The run-level context a probe needs beyond the workspace (§12:891-893's
@@ -234,6 +300,27 @@ export const MIN_PNG_BYTES = 33
 
 /** The 8-byte PNG signature every captured image must start with. */
 export const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+/** The web probe's readiness-poll interval (T-024, pinned by Gate 1.15):
+ *  sleep between poll attempts of `url`. The poll itself is bounded by the
+ *  ONE timeoutMs budget from launch — the interval only spaces the
+ *  attempts, it never extends the deadline. */
+export const WEB_PROBE_POLL_INTERVAL_MS = 250
+
+/** The web probe's body-read cap (T-024, pinned by Gate 1.15): the capture
+ *  reads at most this many body bytes from the first connected response —
+ *  the probe records what it read, never the whole body; an oversized body
+ *  is cancelled past the cap. Evidence stays bounded; the cap bounds the
+ *  evidence, it never judges it (the body content itself is recorded in
+ *  the bounded 'report' artifact, never in a measurement). */
+export const WEB_PROBE_MAX_BODY_BYTES = 1024 * 1024
+
+/** The web probe's body-snippet bound (T-024, pinned by Gate 1.15): at most
+ *  this many bytes of the read body, UTF-8-decoded, land in the response
+ *  artifact's `bodySnippet` — the artifact stays bounded whatever the
+ *  served body was (the validator accepts any finite measurement value,
+ *  so body content is an artifact, never a measurement). */
+export const WEB_PROBE_SNIPPET_BYTES = 2048
 
 /** Tail length for a GateResult's outputTail — the CommandGate shape. */
 const TAIL_BYTES = 4000
@@ -440,6 +527,95 @@ function executeProbeCommand(
   })
 }
 
+/** A launched long-running target (T-024): the live child handle plus the
+ *  launch/exit facts the WebProbe records — never thrown. */
+interface LaunchedTarget {
+  child: ChildProcess
+  /** The spawn refusal's message (e.g. ENOENT) when the command never ran —
+   *  recorded, never thrown. */
+  spawnError: string | undefined
+  /** The target's own process-exit facts, set by the 'exit' event the
+   *  moment the process leaves the process table on its own: code on a
+   *  normal exit, signal name when killed by a signal; both null while it
+   *  is still live. */
+  exitCode: number | null
+  exitSignal: string | null
+}
+
+/**
+ * Launch the scenario command WITHOUT awaiting its exit (T-024 — the
+ * launch-without-awaiting-exit lifecycle beside the run-to-completion
+ * executeProbeCommand core): list-form `spawn` (never exec — AGENTS.md #4),
+ * `windowsHide`, cwd = the workspace path. A spawn refusal arrives as the
+ * child's 'error' event and is recorded on the returned handle, never
+ * thrown. The CALLER owns teardown: killTreeVerified on the returned
+ * child's pid while it is live — and never a taskkill of an already-exited
+ * child (the executeProbeCommand boundary rule: a just-exited or reused pid
+ * is not ours to kill; the caller records nothing-to-kill honestly
+ * instead).
+ */
+function launchTarget(command: { exe: string; args: string[] }, cwd: string): LaunchedTarget {
+  const child = spawn(command.exe, command.args, { cwd, windowsHide: true })
+  const target: LaunchedTarget = { child, spawnError: undefined, exitCode: null, exitSignal: null }
+  child.on('error', (err) => {
+    if (target.spawnError === undefined) target.spawnError = err.message
+  })
+  child.on('exit', (code, signal) => {
+    target.exitCode = code
+    target.exitSignal = signal
+  })
+  return target
+}
+
+/** The poll's sleep — the only wall-clock wait in the web lifecycle, always
+ *  capped by the caller to the remaining budget. */
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** One poll failure, named usefully: undici surfaces a refused connection as
+ *  `TypeError: fetch failed` with the real cause (e.g. `connect ECONNREFUSED
+ *  127.0.0.1:PORT`) on `error.cause` — the recorded last-poll-error carries
+ *  the cause so the evidence names what actually happened (e.g. connection
+ *  refused), not just "fetch failed". */
+function describePollError(e: unknown): string {
+  const message = e instanceof Error ? e.message : String(e)
+  const cause = e instanceof Error && e.cause instanceof Error ? e.cause.message : undefined
+  return cause !== undefined && !message.includes(cause) ? `${message} (${cause})` : message
+}
+
+/**
+ * Read a fetch response's body, capped at `capBytes` (T-024's documented
+ * body-read cap): chunks are accumulated only until the cap is reached, the
+ * stream is cancelled past it, and exactly the first capBytes are returned.
+ * A response with no body stream (or an already-empty one) reads as zero
+ * bytes — recorded, never fabricated. An abort (the caller's deadline) is
+ * NOT swallowed here: the in-flight read rejects and the poll loop records
+ * the face.
+ */
+async function readBodyCapped(res: Response, capBytes: number): Promise<Buffer> {
+  const reader = res.body?.getReader()
+  if (reader === undefined) return Buffer.alloc(0)
+  const chunks: Buffer[] = []
+  let total = 0
+  try {
+    while (total < capBytes) {
+      const { done, value } = await reader.read()
+      if (done || value === undefined) break
+      chunks.push(Buffer.from(value))
+      total += value.byteLength
+    }
+  } finally {
+    // Cancel whatever remains — an oversized or un-consumed body is never
+    // fully read. Cancel on a stream that already ended (or was aborted by
+    // the deadline) may reject; that is nothing to report — the read is over.
+    try {
+      await reader.cancel()
+    } catch {
+      // Already closed, cancelled, or aborted.
+    }
+  }
+  return Buffer.concat(chunks).subarray(0, capBytes)
+}
+
 /** One probe execution as a recorded GateResult entry — evidence inside a
  *  bundle, never a verdict. `name` is the entry's self-naming name: the
  *  probe id for command/test probes, '<probeId>#run-<i>' for a benchmark
@@ -496,6 +672,33 @@ function resultsArtifact(
   const body = JSON.stringify(results, null, 2)
   writeFileSync(path, body)
   return { name: `${results.probeId}.results.json`, path, kind: 'report', sizeBytes: Buffer.byteLength(body) }
+}
+
+/** The machine-readable capture record of a web probe (T-024) — the
+ *  'report' evidence-artifact kind's SECOND producer (T-018's benchmark
+ *  results table is the first): written beside the bundle as
+ *  <probeId>.response.json. The snippet is bounded (WEB_PROBE_SNIPPET_BYTES
+ *  — see the module docblock), so the file stays bounded whatever the
+ *  served body was. Written only when a response was actually captured —
+ *  a probe that captured nothing fabricates no artifact. */
+function responseArtifact(
+  environment: EnvironmentSpec,
+  response: {
+    probeId: string
+    scenarioId: string
+    url: string
+    status: number
+    contentType?: string
+    bodySnippet: string
+    bodyBytes: number
+  },
+): EvidenceArtifactRef {
+  const dir = probeEvidenceDir(environment.artifactsDir, environment.candidateId)
+  mkdirSync(dir, { recursive: true })
+  const path = join(dir, `${response.probeId}.response.json`)
+  const body = JSON.stringify(response, null, 2)
+  writeFileSync(path, body)
+  return { name: `${response.probeId}.response.json`, path, kind: 'report', sizeBytes: Buffer.byteLength(body) }
 }
 
 // ---------- CommandProbe: the exit-0 evidence probe ----------
@@ -871,8 +1074,242 @@ export class ScreenshotProbe implements Probe {
   }
 }
 
+/** §12.1 territory's server-lifecycle probe (T-024; the spec defines no
+ *  server-lifecycle probe anywhere — §12.1:925-935's "Web Probe" is browser
+ *  automation; the semantics are the module-docblock choices): LAUNCHES the
+ *  scenario command as a long-running target and does NOT await its exit,
+ *  polls `url` for readiness, captures the first connected response, and
+ *  tears the target down — all under ONE timeoutMs budget (default
+ *  DEFAULT_PROBE_TIMEOUT_MS) from launch.
+ *
+ *   - url: required non-empty http(s) URL (parseJobsSpec enforces; the
+ *     class holds the contract too for a directly constructed scenario —
+ *     a refusal here is a thrown Error, recorded by the runner's
+ *     failedBundle path, never a crash of the run, and never a silent
+ *     5-minute poll of a malformed scenario). The one ScenarioSpec field
+ *     pointing outside the workspace; its operator-chosen port is
+ *     machine-global (the documented limitation).
+ *   - The lifecycle: launchTarget (list-form spawn, windowsHide, refusal
+ *     recorded never thrown) → a bounded readiness poll of `url` (stdlib
+ *     global `fetch`, zero new deps; WEB_PROBE_POLL_INTERVAL_MS between
+ *     attempts; every attempt aborted at the deadline; the poll fail-fasts
+ *     the moment the target exits before readiness) → the first poll
+ *     response that CONNECTS is the capture (status read; body read capped
+ *     at WEB_PROBE_MAX_BODY_BYTES; the artifact's bodySnippet further
+ *     bounded at WEB_PROBE_SNIPPET_BYTES). A face that ends the poll
+ *     without a capture: spawn refusal / target exited before readiness
+ *     (the exit named) / deadline expiry (the last poll error named).
+ *   - Teardown on EVERY path: killTreeVerified on the live target — after
+ *     a successful capture, after every failure face, at deadline expiry;
+ *     unproven kill outcomes land on the GateResult's cleanupFailures
+ *     (evidence only). Nothing-to-kill (spawn refusal, target already
+ *     exited) is recorded in the log honestly, never fabricated, and a
+ *     just-exited pid is never taskkilled (pid reuse — the
+ *     executeProbeCommand boundary rule).
+ *   - Success = target launched AND url ready within the deadline AND the
+ *     captured response is 2xx AND its body non-empty. `error` names the
+ *     FIRST failed face. A probe that captured no response is success:
+ *     false, never a pass (AGENTS.md #7). No threshold/assertion input of
+ *     any kind — 2xx + non-empty body is the documented evidence shape;
+ *     the probe records, never judges (decisions.md 2026-10-10).
+ *   - Measurements (recorded whenever their face applies — evidence about
+ *     failures is evidence): `http status` (the captured status code),
+ *     `body bytes` (unit bytes — what the capped read actually read),
+ *     `ready duration` (unit ms — launch to the first connected response,
+ *     recorded whenever readiness was reached, even on later failure
+ *     faces). A capture-failed face records none of them (readiness was
+ *     never reached); a spawn refusal records none (nothing ran).
+ *   - Artifacts: the standard `.log` (launch banner + poll attempts +
+ *     child output + capture/teardown outcome), plus — only when a
+ *     response was captured — the kind-'report' response artifact
+ *     <probeId>.response.json ({url, status, contentType?, bodySnippet,
+ *     bodyBytes}).
+ *   - gateResults: one GateResult entry for the whole lifecycle; exitCode
+ *     is the target's own exit code when it exited on its own before
+ *     teardown, null otherwise (still live at teardown / killed by the
+ *     verified tree kill / spawn refused); durationMs spans launch through
+ *     teardown's conclusion. */
+export class WebProbe implements Probe {
+  readonly id: string
+  readonly scenario: ScenarioSpec
+
+  constructor(scenario: ScenarioSpec) {
+    this.id = scenario.id
+    this.scenario = scenario
+  }
+
+  async run(input: ProbeInput): Promise<EvidenceBundle> {
+    const s = input.scenario
+    const url = s.url ?? ''
+    // The url contract for a directly constructed scenario (the
+    // parseJobsSpec refusals are the --jobs enforcement point; this keeps a
+    // hand-built scenario from silently escaping the same rule — or from
+    // silently burning the whole timeout polling a garbage url).
+    if (typeof url !== 'string' || url.length === 0) {
+      throw new Error(`web probe '${this.id}': url must be a non-empty http(s) URL`)
+    }
+    let parsedUrl: URL
+    try {
+      parsedUrl = new URL(url)
+    } catch {
+      throw new Error(`web probe '${this.id}': url must be an http:// or https:// URL (got ${JSON.stringify(url)})`)
+    }
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      throw new Error(`web probe '${this.id}': url must be an http:// or https:// URL (got ${JSON.stringify(url)})`)
+    }
+
+    const timeoutMs = s.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS
+    const started = Date.now()
+    const deadline = started + timeoutMs
+    const logParts: string[] = []
+    const measurements: Measurement[] = []
+    let responseRef: EvidenceArtifactRef | undefined
+
+    // Launch — without awaiting exit.
+    const target = launchTarget(s.command, input.workspace.path)
+    logParts.push('=== web probe launch ===')
+    logParts.push(`$ ${[s.command.exe, ...s.command.args].join(' ')} (list-form, cwd=${input.workspace.path})`)
+    // Child stdout+stderr, collected for the log (the 16 MiB CommandGate
+    // posture) — a server that announces itself (pid, bind) leaves that
+    // evidence here.
+    let childOutput = ''
+    target.child.stdout?.on('data', (chunk: string) => { if (childOutput.length < 16 * 1024 * 1024) childOutput += chunk })
+    target.child.stderr?.on('data', (chunk: string) => { if (childOutput.length < 16 * 1024 * 1024) childOutput += chunk })
+
+    // The bounded readiness poll — ONE budget from launch.
+    logParts.push(`=== readiness poll: ${url} (deadline ${timeoutMs}ms from launch) ===`)
+    let captured: { status: number; contentType: string | undefined; body: Buffer; readyMs: number } | null = null
+    let lastPollError: string | undefined
+    let attempts = 0
+    while (captured === null) {
+      if (target.spawnError !== undefined) break
+      if (target.exitCode !== null || target.exitSignal !== null) break
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) break
+      attempts++
+      // Each attempt is aborted at the deadline — a server that accepts the
+      // connection but never responds cannot stretch the budget.
+      const ac = new AbortController()
+      const abortTimer = setTimeout(() => ac.abort(), remaining)
+      try {
+        const res = await fetch(url, { signal: ac.signal })
+        // The first poll response that connects IS the capture. The body
+        // read stays deadline-bounded too: an abort mid-read rejects and is
+        // recorded as the face's last poll error.
+        const bodyTimer = setTimeout(() => ac.abort(), Math.max(0, deadline - Date.now()))
+        let body: Buffer
+        try {
+          body = await readBodyCapped(res, WEB_PROBE_MAX_BODY_BYTES)
+        } finally {
+          clearTimeout(bodyTimer)
+        }
+        captured = {
+          status: res.status,
+          contentType: res.headers.get('content-type') ?? undefined,
+          body,
+          readyMs: Date.now() - started,
+        }
+      } catch (e) {
+        lastPollError = describePollError(e)
+        logParts.push(`poll attempt ${attempts} failed: ${lastPollError}`)
+      } finally {
+        clearTimeout(abortTimer)
+      }
+      if (captured === null) {
+        const sleepMs = Math.min(WEB_PROBE_POLL_INTERVAL_MS, Math.max(0, deadline - Date.now()))
+        if (sleepMs > 0) await sleep(sleepMs)
+      }
+    }
+
+    logParts.push(`=== child output (stdout+stderr, as collected) ===`)
+    logParts.push(childOutput)
+
+    // Teardown on EVERY path (the snapshot below is taken before the kill so
+    // the GateResult's exitCode can never race the kill's own exit event).
+    const preTeardownExit = target.exitCode
+    const preTeardownSignal = target.exitSignal
+    const cleanupFailures: string[] = []
+    logParts.push('=== teardown ===')
+    if (target.spawnError !== undefined) {
+      logParts.push(`spawn refused: ${target.spawnError} — no target process to tear down`)
+    } else if (preTeardownExit !== null || preTeardownSignal !== null) {
+      const how = preTeardownSignal !== null ? `signal ${preTeardownSignal}` : `exit code ${preTeardownExit}`
+      logParts.push(`target already exited (${how}) before teardown — nothing to kill (a just-exited or reused pid is never taskkilled)`)
+    } else if (target.child.pid === undefined) {
+      logParts.push('no root pid recorded for the launched target — nothing to kill')
+    } else {
+      const kill = killTreeVerified(target.child.pid)
+      const killLines = killFailureLines(target.child.pid, kill)
+      cleanupFailures.push(...killLines)
+      logParts.push(killLines.length === 0 ? killSuccessLine(kill) : killLines.join('\n'))
+    }
+    const durationMs = Date.now() - started
+
+    // The faces, in order: spawn refusal → captured (readiness WAS reached —
+    // decide on the capture, even if the target exited afterwards) → exited
+    // before readiness → deadline expiry.
+    let success = false
+    let error: string | undefined
+    if (target.spawnError !== undefined) {
+      error = `target could not be spawned: ${target.spawnError}`
+    } else if (captured !== null) {
+      // Readiness was reached — the three measurements are evidence even on
+      // the failing status/body faces.
+      measurements.push(
+        { name: 'ready duration', value: captured.readyMs, unit: 'ms' },
+        { name: 'http status', value: captured.status },
+        { name: 'body bytes', value: captured.body.length, unit: 'bytes' },
+      )
+      const snippet = captured.body.subarray(0, WEB_PROBE_SNIPPET_BYTES).toString('utf8')
+      responseRef = responseArtifact(input.environment, {
+        probeId: this.id,
+        scenarioId: s.id,
+        url,
+        status: captured.status,
+        ...(captured.contentType !== undefined ? { contentType: captured.contentType } : {}),
+        bodySnippet: snippet,
+        bodyBytes: captured.body.length,
+      })
+      logParts.push(`=== captured === status ${captured.status}, ${captured.body.length} body bytes, ready in ${captured.readyMs}ms`)
+      if (captured.status < 200 || captured.status > 299) {
+        error = `captured HTTP status ${captured.status} is not 2xx`
+      } else if (captured.body.length === 0) {
+        error = 'captured response body is empty (0 bytes) — an empty body is never a pass'
+      } else {
+        success = true
+      }
+    } else if (preTeardownExit !== null || preTeardownSignal !== null) {
+      const how = preTeardownSignal !== null ? `signal ${preTeardownSignal}` : `exit code ${preTeardownExit}`
+      error = `target exited before readiness was reached (${how})`
+    } else {
+      error = `readiness deadline expired after ${timeoutMs}ms (last poll error: ${lastPollError ?? 'none recorded'})`
+    }
+
+    const gateResult: GateResult = {
+      name: this.id,
+      passed: success,
+      exitCode: target.spawnError === undefined ? preTeardownExit : null,
+      durationMs,
+      outputTail: logParts.join('\n').slice(-TAIL_BYTES),
+      ...(cleanupFailures.length > 0 ? { cleanupFailures } : {}),
+    }
+    const bundle: EvidenceBundle = {
+      probeId: this.id,
+      scenarioId: s.id,
+      success,
+      artifacts: responseRef !== undefined
+        ? [logArtifact(input.environment, this.id, logParts.join('\n')), responseRef]
+        : [logArtifact(input.environment, this.id, logParts.join('\n'))],
+      measurements,
+      gateResults: [gateResult],
+      ...(error !== undefined ? { error } : {}),
+    }
+    return bundle
+  }
+}
+
 /** The --jobs probe factory: the parsed ScenarioSpec's type has already been
- *  narrowed to 'command' | 'test' | 'benchmark' | 'screenshot' by
+ *  narrowed to 'command' | 'test' | 'benchmark' | 'screenshot' | 'web' by
  *  parseJobsSpec (src/scheduler.ts). */
 export function createProbe(scenario: ScenarioSpec): Probe {
   switch (scenario.type) {
@@ -882,6 +1319,8 @@ export function createProbe(scenario: ScenarioSpec): Probe {
       return new BenchmarkProbe(scenario)
     case 'screenshot':
       return new ScreenshotProbe(scenario)
+    case 'web':
+      return new WebProbe(scenario)
     default:
       return new CommandProbe(scenario)
   }

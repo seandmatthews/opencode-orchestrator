@@ -202,14 +202,14 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
       probes = j.probes.map((p, i) => {
         const where = `job '${id}' probes[${i}]`
         if (!isPlainObject(p)) refuse(`${where} must be an object`)
-        unknownField(where, p, ['id', 'type', 'command', 'timeoutMs', 'repeats', 'capture'])
+        unknownField(where, p, ['id', 'type', 'command', 'timeoutMs', 'repeats', 'capture', 'url'])
         if (typeof p.id !== 'string' || !SPEC_ID_PATTERN.test(p.id)) {
           refuse(`${where} id ${JSON.stringify(p.id)} does not match [a-z0-9][a-z0-9-]* — it names the probe's evidence files`)
         }
         if (seenProbes.has(p.id)) refuse(`job '${id}' has duplicate probe id '${p.id}' — probe ids must be unique per job`)
         seenProbes.add(p.id)
-        if (p.type !== 'command' && p.type !== 'test' && p.type !== 'benchmark' && p.type !== 'screenshot') {
-          refuse(`${where} type must be "command", "test", "benchmark", or "screenshot" (got ${JSON.stringify(p.type)}) — unknown probe types are refused, not ignored`)
+        if (p.type !== 'command' && p.type !== 'test' && p.type !== 'benchmark' && p.type !== 'screenshot' && p.type !== 'web') {
+          refuse(`${where} type must be "command", "test", "benchmark", "screenshot", or "web" (got ${JSON.stringify(p.type)}) — unknown probe types are refused, not ignored`)
         }
         if (!isPlainObject(p.command)) refuse(`${where} command must be an object with "exe" and "args"`)
         unknownField(`${where} command`, p.command, ['exe', 'args'])
@@ -254,6 +254,29 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
         } else if (p.capture !== undefined) {
           refuse(`${where} capture is only valid on a screenshot probe (got type ${JSON.stringify(p.type)})`)
         }
+        // T-024: url is REQUIRED (non-empty http:// or https://) on a web
+        // probe — the address the probe polls for readiness and captures,
+        // the one probe field pointing OUTSIDE the workspace (absolute by
+        // nature; its operator-chosen port is machine-global — the
+        // documented limitation). REFUSED on every other probe type: the
+        // field exists only where it means something (the repeats/capture
+        // precedent).
+        if (p.type === 'web') {
+          if (typeof p.url !== 'string' || p.url.length === 0) {
+            refuse(`${where} url must be a non-empty http(s) URL on a web probe (got ${JSON.stringify(p.url)})`)
+          }
+          let parsedUrl: URL | null = null
+          try {
+            parsedUrl = new URL(p.url as string)
+          } catch {
+            parsedUrl = null
+          }
+          if (parsedUrl === null || (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:')) {
+            refuse(`${where} url must be an http:// or https:// URL (got ${JSON.stringify(p.url)})`)
+          }
+        } else if (p.url !== undefined) {
+          refuse(`${where} url is only valid on a web probe (got type ${JSON.stringify(p.type)})`)
+        }
         return {
           id: p.id,
           type: p.type,
@@ -261,6 +284,7 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
           ...(p.timeoutMs !== undefined ? { timeoutMs: p.timeoutMs } : {}),
           ...(p.type === 'benchmark' ? { repeats: p.repeats as number } : {}),
           ...(p.type === 'screenshot' ? { capture: p.capture as string } : {}),
+          ...(p.type === 'web' ? { url: p.url as string } : {}),
         }
       })
     }
