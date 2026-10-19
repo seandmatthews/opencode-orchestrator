@@ -333,6 +333,69 @@ Deviations: the three implementation notes above; nothing else. Gate
 numbering: **1.20** claimed and landed as planned — the next free integer
 after T-020's landed 1.18 and T-021's landed 1.19.
 
+### Review round 1 (2026-10-19)
+
+The driving pipeline's Gate 2 run went red — `FAIL: skeleton run failed:
+SIGTERM` (scripts/verify.mjs's then-8-minute outer ceiling killed the
+skeleton run). Diagnosis, from the killed run's own evidence (run
+20261019010147 under `C:\swarm\verify`, evidence kept):
+
+- **c01's worker hung on the UNCHANGED path.** Its logged argv carries no
+  `--agent` (`$ opencode run -m zai-coding-plan/glm-5.3-flash <prompt:
+  3013 chars>`, `dispatch.jsonl` + `c01/worker.log`): dispatched
+  01:02:37Z, logged three tool calls (Glob, Get-ChildItem, Read
+  calc.js/test.js), then went silent with no completion record. The
+  runner's own 15-minute worker timeout never fired — the outer 8-minute
+  ceiling SIGTERM'd the run first.
+- **Both dispatch sites this ticket changed worked on the real harness in
+  the same run.** The planner (`--agent plan`) produced parsed distinct
+  briefs in ~50s (worker prompts 3013 vs 3199 chars — different briefs,
+  `fallbackUsed` false); the reviewer (`--agent plan`) parsed
+  (`review.json` `ok: true`). c02's full pipeline (worker → gates →
+  review) completed. The red is not attributable to the capability
+  restriction.
+- **A SIGTERM death skips report writing and disposal.** The kill left
+  both worktrees registered on the fixture, both `swarm/wt-*` branches,
+  and a stale checkout lock — disposed through the house path
+  (`npm run clean -- --run 20261019010147 --run-root C:\swarm\verify
+  --force --force-lock`: `clean: 4 removed, 0 refused, 0 failed`), and
+  the fixture verified pristine afterward (only `main` in
+  `worktree list`, no `swarm/*` branches, `status --short` empty).
+
+Changes in this round (same change-set):
+
+- **`scripts/verify.mjs`** — Gate 2's outer ceiling 8 → 20 minutes, with
+  a derivation comment: the ceiling must exceed the runner's OWN
+  per-worker `--timeout-min` budget (default 15, src/cli.ts) plus the
+  planner/gates legs, so a stalled worker resolves through the T-011
+  verified tree kill into a FAILED candidate verdict and Gate 2 fails on
+  its `workerOk` assertion — the designed, legible failure — instead of
+  an uninformative SIGTERM that also skips report writing and disposal.
+  No assertion weakened: every Gate 2 assertion is unchanged; only the
+  harness ceiling moved out of the runner's way (a worker that stalls
+  again still fails Gate 2, truthfully).
+- **`VERIFICATION.md`** — the Gate 2 section gains the
+  ceiling-derivation paragraph; Known issue #6's unverified-ask bullet
+  records the first real-run observation (both restricted postures ran
+  headless with `--agent plan` to completion, no permission stall — the
+  auto-deny semantics themselves remain unverified); new Known issue #12
+  records the one-off worker stall and the old ceiling's failure mode.
+
+Round-1 measured gates:
+
+- `npm run clean -- --run 20261019010147 --run-root C:\swarm\verify
+  --force --force-lock` → exit 0, `clean: 4 removed, 0 refused, 0
+  failed`; fixture pristine after.
+- Full fast tier, `node scripts/verify.mjs fast` → exit 0,
+  `verify (fast) complete: ALL GREEN`, 981 ok lines — twice (before and
+  after the verify.mjs edit; identical count, confirming the edit
+  changed no fast-tier behavior — the ceiling lives in the Gate 2
+  block, after the fast-tier `finish()`).
+- Gate 2 remains **not green and not re-run by the lane** (model tokens;
+  the ask's constraint stands) — the driving pipeline's next Gate 2 run
+  is the landing evidence, and the Gate 2 acceptance box above stays
+  unchecked until then.
+
 ## Verification
 
 Gate 0, Gate 0.5, Gate 1 including new Gate 1.20 (fast tier, token-free) on

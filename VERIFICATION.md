@@ -1759,6 +1759,19 @@ fresh fixture, then asserts on the artifacts:
   (`tsx src/clean.ts --run <runId> --run-root <verify root> --force`; `--force`
   is correct here — the run captured the evidence before disposal) (T-002).
 
+The skeleton run's outer ceiling (scripts/verify.mjs, `execFileSync` timeout
+**20 min**, T-023 review round 1) bounds CI; it deliberately exceeds the
+runner's OWN per-worker budget — `--timeout-min` default 15 (src/cli.ts), at
+which the T-011 verified tree kill resolves a stalled worker into a FAILED
+candidate verdict, plus the planner/gates/reviewer legs — so the runner, not
+the verify harness, produces the verdict when a worker stalls, and Gate 2
+fails on its `workerOk` assertion with a truthful line. At the previous
+8-minute ceiling one silent worker SIGTERM'd the whole run before the runner
+could finish — an uninformative red that also skips report writing and
+disposal, leaving stale worktree metadata, `swarm/*` branches, and a stale
+checkout lock behind (observed once, 2026-10-19 — Known issue #12). The
+historical happy path is 3–5 minutes and is unchanged.
+
 Required when touching `src/runner.ts`, any adapter, gates, workspace handling, or
 anything that changes report shape. Fast tier alone does not clear you here.
 
@@ -1836,10 +1849,16 @@ landing in T-017's Landed section).
    - Whether a headless non-TTY `opencode run` auto-denies `ask`-action
      permissions (the plan agent's `external_directory → ask`) is
      **unverified** — no model session exercising the plan agent was run
-     for this ticket (the lane's Gate 3 probe drove the default build
-     agent; S2's stub is not the harness). The landing Gate 2 run is
-     where a probe observation gets recorded; until then this stays
-     recorded as unverified.
+     for this ticket's fast tier (the lane's Gate 3 probe drove the
+     default build agent; S2's stub is not the harness). First real-run
+     observation (2026-10-19 landing attempt, Known issue #12's run):
+     BOTH restricted postures ran headless with `--agent plan` to
+     completion — the planner's briefs parsed (two distinct briefs: the
+     workers' composed prompts differ, 3013 vs 3199 chars) and the
+     reviewer's observations parsed (`review.json` `ok: true`) — no
+     permission stall occurred. The auto-deny semantics themselves
+     remain unverified; a run that requests no external directory
+     cannot probe them.
    - Output-content threats (e.g. a planner brief containing a hostile
      path) are a *different* threat class — §14 governs execution
      capability, not output content; sanitization is carved (T-023).
@@ -1900,6 +1919,35 @@ landing in T-017's Landed section).
    is self-removed). Same class as Known issue #10: a loud-by-design one-off
    in a fast-tier check; benign until observed recurring — and the failing
    assertion's name must be captured before any code change is considered.
+12. **A one-off Gate 2 worker stall, fatal at the old outer ceiling
+    (observed once, 2026-10-19, T-023 review round 1).** In the landing
+    `verify:full` attempt, candidate c01's worker — the UNCHANGED
+    worktree-write path; its logged argv carries no `--agent`
+    (`$ opencode run -m zai-coding-plan/glm-5.3-flash <prompt: 3013
+    chars>`, run 20261019010147's `dispatch.jsonl` + `c01/worker.log`)
+    — went silent after three file reads (Glob, Get-ChildItem, Read
+    calc.js/test.js) and never completed. The runner's own 15-minute
+    worker timeout never got to fire: verify.mjs's then-8-minute outer
+    ceiling SIGTERM'd the whole skeleton run first (`FAIL: skeleton run
+    failed: SIGTERM`). A SIGTERM death skips report writing and
+    disposal — the killed run left both worktrees registered on the
+    fixture, both `swarm/wt-*` branches, and a stale checkout lock,
+    disposed through the house path (`npm run clean -- --run
+    20261019010147 --run-root C:\swarm\verify --force --force-lock`;
+    4 removed, 0 refused, 0 failed; fixture verified pristine after:
+    only `main` in `worktree list`, no `swarm/*` branches, clean
+    status; evidence kept). The same run clears T-023's own paths of
+    suspicion: the restricted planner (`--agent plan`) produced parsed
+    distinct briefs in ~50s and the restricted reviewer parsed its
+    observations — the red is not attributable to the capability
+    restriction. The outer ceiling now exceeds the runner's per-worker
+    budget (see Gate 2's section), so a recurring stall resolves into
+    the runner's FAILED candidate verdict and Gate 2 fails on its
+    `workerOk` assertion — the designed, legible failure — instead of
+    an uninformative SIGTERM. Not re-run by the lane (model tokens);
+    the next driving Gate 2 is the next observation. Same class as
+    Known issues #10/#11: loud-by-design one-offs; benign until observed
+    recurring.
 
 ## Definition of done (per ticket)
 
