@@ -1539,6 +1539,103 @@ the report shape are untouched (trigger list, Gate 2's section). If a
 landed change-set touches `src/workspace/worktree.ts` or `src/runner.ts`
 anyway, Gate 2 runs once at landing. Gate 3 n/a (no adapter change).
 
+## Gate 1.19 — §15.4 explicit long-path budget (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-long-paths.mjs
+```
+
+Pins T-021 (spec §15.4's six path-handling constraints, :1088-1098). Five are
+implemented and anchored in code — 14-digit run ids (`src/cli.ts:304`), the
+`C:\swarm` run-root default (`src/cli.ts:107`), `normPath` path normalization
+(`src/workspace/worktree.ts:12`), the flat artifactsDir evidence layout
+(`src/cli.ts:305`), and the list-form worktree lease
+(`src/workspace/worktree.ts:67-74`) — and the sixth, the **explicit long-path
+test** (:1096), is this gate: it had no artifact anywhere in the repo before
+it (the honesty note below). The shape-deciding values are unexported inline
+code (`grep -n "export" src/cli.ts` → zero hits), so the gate pins them
+behaviorally, never through a composition the check reconstructs: it builds a
+deep fixture repo in a throwaway sandbox under `C:\swarm\verify-longpath`
+(created and removed by the check itself — AGENTS.md #10), drives the REAL
+engine end-to-end with a token-free `--jobs` machine run (the Gate 1.17 S5
+shape: per-job `worker: "machine"` + list-form command; run-level
+`--worker machine` is refused by design, `src/cli.ts:142-143`; the planner
+auto-skips under `--jobs`, `src/cli.ts:312`; timeout-bounded like S5's 120s;
+NO `--clean` — disposal is its own assertion), then derives every assertion
+from the run's actual records.
+
+The fixture: a demo-target-style repo (baseline-passing `node build.js` +
+`node test.js`, run by the check before the engine touches anything) whose
+committed tree holds one file at a measured, deterministic depth — nested
+bounded-name directories sized so the deepest composed path (below) lands in
+a documented **240–258-char band**, inside MAX_PATH 260 (no `core.longpaths`,
+no `\\?\` prefixing, no symlink semantics — default-Windows behavior; §15.4's
+no-POSIX-symlink bullet stays satisfied by `git worktree add`). One machine
+job appends one line to that file and its gate validates the file, both
+executing with the leased worktree as their working directory (the fixture
+helper `tools/longpath.mjs` carries the deep path as a generated constant, so
+no command string ships ~200 chars of tree through a shell). The check then
+asserts, reading only what the run produced:
+
+- exactly one 14-digit run dir under the sandbox run root (the Gate 1.17 S5
+  scan) — flips if the runId derivation changes (`src/cli.ts:304`);
+- the recorded `workspacePath` (`report.json`) equals `<runDir>\wt\<jobId>`
+  EXACTLY, and the `dispatch.jsonl` dispatch record (`src/runner.ts:428-436`)
+  carries the same `worktreePath` with `leaseId` `wt/<jobId>` and branch
+  `swarm/wt-<jobId>`, the completion record `ok` with the captured
+  `diffBytes` — flips if the lease-id shape (`src/runner.ts:407`) or the
+  lease-path join (`src/workspace/worktree.ts:68`) changes;
+- the composed worktree budget: the engine's own composition read off the
+  recorded path (`<runId>` + `\wt\` + lease id) composed against the locked
+  run-root default `C:\swarm` (decisions.md 2026-10-10) measures **≤ 40
+  chars** — the production prefix the MAX_PATH budget cares about (the
+  engine's worst case today is `C:\swarm\<14 digits>\wt\<id>-a2\` ≈ 34
+  chars). The literal recorded path is NOT asserted against 40: the sandbox
+  run root (`C:\swarm\verify-longpath\runs`) is necessarily longer, so that
+  measure would size the check's own sandbox choice, not the engine's budget;
+- before disposal, the deepest composed file path (recorded `workspacePath` +
+  the fixture-relative deep path) EXISTS on disk carrying the appended line,
+  and lands in the documented 240–258 band (measured 249 at landing);
+- the run succeeded at that depth: `workerOk`, `diffBytes > 0`, the deep-file
+  gate passed, and `diff.patch` contains the deep path with its byte length
+  equal to the recorded `diffBytes`;
+- disposal through the house path: `tsx src/clean.ts --run <runId> --run-root
+  <sandbox> --force` (`--force` is correct: the run captured the evidence
+  before disposal — the Gate 2 posture) exits 0 and removes the worktree and
+  the `swarm/*` branch (only `main` in `worktree list`) with `report.json`,
+  `dispatch.jsonl`, `worker.log`, and `diff.patch` hash-identical to before —
+  T-002's disposal loop exercised on a real deep run.
+
+**Flip-sensitivity, stated exactly.** Gate 1.19 flips automatically on:
+runId derivation changes (`src/cli.ts:304`); lease-id shape or lease-path
+composition changes (`src/runner.ts:407`, `src/workspace/worktree.ts:68`);
+and any depth/shallowness regression the run's records expose. It does NOT
+automatically flip on the run-root default (`src/cli.ts:107`) — the check
+passes `--run-root` explicitly (the sandbox discipline every fast-tier check
+follows: Gate 1.5's `C:\swarm\verify-clean`, S5's sandboxed runs), so a
+changed default is invisible behind the flag; that case is pinned by this
+section's anchor plus change-set review. The mechanism that would automate it
+(invoke the CLI without `--run-root` and assert the run landed under
+`C:\swarm`, then dispose through `clean`) is named in T-021 and deliberately
+NOT taken: it would write real run state into the live root during
+`npm run verify`, breaking the sandbox discipline the rest of the fast tier
+keeps.
+
+**Honesty note.** No MAX_PATH/ENAMETOOLONG failure has ever been observed in
+this repo; the gate pins a failure class prospectively, before field fan-out
+scales worktree counts — it fixes no observed bug. Recorded at landing
+(re-run of the ticket's grep, `grep -rn
+"MAX_PATH\|longpath\|long-path\|ENAMETOOLONG\|260"` over `src/`, `scripts/`,
+VERIFICATION.md, `docs/tickets/`): zero hits under `src/`, and zero hits for
+the failure-class tokens (`MAX_PATH`/`longpath`/`long-path`/`ENAMETOOLONG`)
+anywhere outside the tickets' own prose; the bare `260` alternative matched
+only incidental `2026…` timestamp literals (e.g. the fixture run ids in
+`scripts/check-gc.mjs`, one `--run` example in this file) and `:260-`
+line-range references in other tickets — never a path-length discussion. The
+ticket's "zero hits" phrasing held for `src/` and for the failure-class
+names, not for the bare `260` alternative; the substance (no observed
+failure, no pre-existing long-path artifact) is unchanged.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
@@ -1649,6 +1746,26 @@ landing in T-017's Landed section).
    that change-set). Benign until observed recurring; the exact triggering
    line (snapshot failure vs already-gone root vs survivor) is not captured
    by the check's output and was not diagnosed post-hoc.
+11. **A one-off Gate 1.17 red with a single failed assertion, not
+   reproducible (observed once, 2026-10-18, T-021 lane review round 1).**
+   One fast-tier run failed inside `scripts/check-machine-worker.mjs` — exit
+   1, `check-machine-worker: 1 failure(s)` — while the check passed in every
+   other execution around it: 13 green Gate 1.17 executions in the same lane
+   the same day (two full `node scripts/verify.mjs fast` runs, six
+   standalone runs, three of them under 8-way artificial CPU saturation).
+   The check's own end-of-`main()` sandbox cleanup had run (no
+   `C:\swarm\verify-machine` debris), so `main()` completed and exactly one
+   assertion was false; the failing assertion's name was not preserved in
+   the reviewer-side log. The stderr tail that log does contain — worktree
+   prep lines, SQLite experimental warnings, and the six S6 refusal
+   messages — is byte-for-byte the noise every run prints, green runs
+   included: the tsx-wrapped CLI children leak their stderr to the terminal
+   even through `execFileSync` pipes, so that noise identifies nothing. The
+   change-set under review touched none of the check's inputs (no `src/`
+   file, no check file; the Gate 1.19 hook runs after 1.17 and its sandbox
+   is self-removed). Same class as Known issue #10: a loud-by-design one-off
+   in a fast-tier check; benign until observed recurring — and the failing
+   assertion's name must be captured before any code change is considered.
 
 ## Definition of done (per ticket)
 

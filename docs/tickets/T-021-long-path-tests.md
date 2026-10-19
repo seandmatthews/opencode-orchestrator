@@ -1,6 +1,6 @@
 # T-021 — §15.4 explicit long-path tests: pin the engine's path budget at Windows MAX_PATH depth
 
-**Status:** proposed
+**Status:** done
 **Category:** verification
 **Value (1-5):** 3 · **Risk (1-5):** 1
 **Depends on:** — (independent of proposed T-020; gate numbering coordinated below — this ticket claims Gate 1.19 unconditionally, leaving 1.18 to T-020, so either landing order merges without renumber)
@@ -161,7 +161,7 @@ why this half tickets first and retention carves off.
 
 ## Acceptance criteria
 
-- [ ] **Gate 1.19** exists: `scripts/check-long-paths.mjs` hooked into
+- [x] **Gate 1.19** exists: `scripts/check-long-paths.mjs` hooked into
       `scripts/verify.mjs` after the Gate 1.17 check, token-free, sandbox
       under `C:\swarm\verify-longpath` created and removed by the check; a
       deep-file fixture repo, a real token-free `--jobs` machine run against
@@ -171,7 +171,7 @@ why this half tickets first and retention carves off.
       composed depth, `diff.patch` containing the deep path; then
       `tsx src/clean.ts --run <runId> --run-root <sandbox> --force` removes
       the worktree + `swarm/*` branch with the evidence files intact; exit 0.
-- [ ] The composed-path budget is pinned by **Gate 1.19, measured from the
+- [x] The composed-path budget is pinned by **Gate 1.19, measured from the
       run's real records**: composed worktree prefix ≤ 40 chars; deepest
       composed file path in a documented 240–258-char band (inside MAX_PATH
       260, deterministic). The gate's automatic flip-sensitivity is stated in
@@ -183,21 +183,106 @@ why this half tickets first and retention carves off.
       — is pinned by the Gate 1.19 anchor + change-set review, with the
       not-taken automating mechanism (default-root run into live
       `C:\swarm`) and its rejection reason recorded in the ticket.
-- [ ] The five implemented §15.4 mechanisms are named with their code anchors
+- [x] The five implemented §15.4 mechanisms are named with their code anchors
       in VERIFICATION.md's Gate 1.19 section, and the honesty note records
       the zero-hit grep (command quoted) — no observed-failure claim is made.
       Anchors stay compiling via **Gate 0**; note content pinned by
       change-set review.
-- [ ] No existing check weakened: Gate 0/0.5/1 and the full fast tier (Gates
+- [x] No existing check weakened: Gate 0/0.5/1 and the full fast tier (Gates
       1.5–1.17) stay green — pinned by `npm run verify` ALL GREEN (the new
       gate adds one S5-class real machine run: seconds, token-free,
       timeout-bounded like S5's 120s).
-- [ ] **Gate 2 not triggered**: the change-set touches no `src/` file
+- [x] **Gate 2 not triggered**: the change-set touches no `src/` file
       (trigger list, VERIFICATION.md:1428-1429); if implementation forces a
       `src/` touch, Gate 2 runs once at landing — pinned by change-set
       review, with what actually ran recorded in the landed notes.
-- [ ] Ticket status + index row move in the same change-set (AGENTS.md #6) —
+- [x] Ticket status + index row move in the same change-set (AGENTS.md #6) —
       pinned by change-set review.
+
+## Landed
+
+2026-10-18, lane branch `ticket/T-021-long-path-tests`.
+
+What changed:
+
+- **`scripts/check-long-paths.mjs`** (new) — **Gate 1.19**, token-free, zero
+  new dependencies, nothing imported from `src/` (the shape-deciding values
+  are unexported inline code). One throwaway sandbox under
+  `C:\swarm\verify-longpath`, created and removed by the check (AGENTS.md
+  #10): a demo-target-style deep fixture repo (baseline-passing
+  `node build.js` + `node test.js`; committed tree holding
+  `d000/…/d030xxx/deep-leaf-marker-file-for-gate-019.txt` at a planned
+  196-char repo-relative depth), then the REAL engine end-to-end — a
+  `--jobs` machine run in the Gate 1.17 S5 invocation shape with NO
+  `--clean` — then every assertion from the run's records: exactly one
+  14-digit run dir; `workspacePath` == `<runDir>\wt\deep` exactly, with
+  `dispatch.jsonl` agreeing (leaseId `wt/deep`, branch `swarm/wt-deep`, same
+  worktreePath, completion `diffBytes` non-null and equal); the composed
+  worktree budget ≤ 40; the deepest composed file on disk in the 240–258
+  band; `workerOk` + `diffBytes > 0` + the deep-file gate passed;
+  `diff.patch` carrying the deep path at the recorded byte length; then
+  `tsx src/clean.ts --run <runId> --run-root <sandbox> --force` disposing
+  worktree + `swarm/*` branch with `report.json`/`dispatch.jsonl`/
+  `worker.log`/`diff.patch` hash-identical. 14 assertions, all green.
+- **`scripts/verify.mjs`** — the Gate 1.19 hook, after the Gate 1.18 block
+  (the fast tier ends 1.17 → 1.18 → 1.19; T-020 landed first and occupies
+  the slot right after the Gate 1.17 check — this ticket's coordination note
+  anticipated either landing order). No other line touched.
+- **`VERIFICATION.md`** — the Gate 1.19 section: the five implemented §15.4
+  mechanisms with their code anchors, the behavioral-pinning rationale, the
+  budget definition, the exact flip-sensitivity statement (including the
+  non-automatic run-root default case and the not-taken automating
+  mechanism), and the honesty note. No existing gate text changed.
+- **This ticket + `docs/tickets/README.md`** — status and index row moved in
+  the same change-set.
+
+Measured (lane, this change-set): standalone `node
+scripts/check-long-paths.mjs` → exit 0, ALL GREEN — composed deep file 249
+chars (band 240–258, inside MAX_PATH 260), production prefix
+`C:\swarm\<14 digits>\wt\deep` 31 chars (≤ 40), recorded `workspacePath`
+52 chars, deep repo-relative path 196 chars. Full fast tier
+`node scripts/verify.mjs fast` (== `npm run verify`) → ALL GREEN, exit 0:
+Gate 0 typecheck exit 0, Gate 1 fixture baseline green, Gate 0.5 parser
+green, Gates 1.5–1.18 green — no existing check touched or weakened.
+Gate 2 NOT triggered: the change-set touches no `src/` file (runner,
+adapters, gates, workspace handling, report shape all untouched).
+Gate 3 n/a (no adapter).
+
+Deviations from the ticket text, recorded:
+
+- **The ≤ 40 budget's measurement definition.** The ticket's "composed
+  worktree prefix (run dir + `wt\` + lease id, all from the recorded path)
+  measures ≤ 40 chars" cannot hold literally: the sandbox-recorded path is
+  52 chars, because the check's run root (`C:\swarm\verify-longpath\runs`)
+  is longer than the production root. The gate therefore asserts the budget
+  on the production shape the records pin — `<runId>` + `\wt\` + lease id
+  read off the recorded path, composed against the locked run-root default
+  `C:\swarm` (decisions.md 2026-10-10) — measured 31; the exact-equality
+  `workspacePath` assertion pins the recorded shape itself. VERIFICATION.md
+  states this definition and the reason.
+- **The honesty note's grep result.** The ticket recorded the five-token
+  grep (including the bare `260` alternative) as returning zero hits. The
+  re-run at HEAD found: zero hits under `src/`, and zero hits for the
+  failure-class tokens (`MAX_PATH`/`longpath`/`long-path`/`ENAMETOOLONG`)
+  anywhere outside the tickets' own prose — but the bare `260` matches
+  incidental `2026…` timestamp literals (e.g. `scripts/check-gc.mjs`'s
+  fixture run ids, one `--run` example in VERIFICATION.md) and `:260-`
+  line-range references in other tickets. VERIFICATION.md quotes the command
+  and records this true result; the substance (no MAX_PATH/ENAMETOOLONG
+  failure ever observed, no pre-existing long-path artifact) is unchanged.
+
+Review round 1 (2026-10-18): the driving fast tier went red once, exit 1,
+inside Gate 1.17's `scripts/check-machine-worker.mjs` — a check this
+change-set does not touch, executing before the Gate 1.19 hook — with
+exactly one failed assertion, no crash, and no debris (the check's own
+sandbox cleanup had run). Not reproducible: 13 green Gate 1.17 executions in
+the same lane the same day (two full fast tiers, six standalone runs, three
+under 8-way artificial CPU saturation), and the preserved log's stderr tail
+is the exact noise green runs print (the tsx-wrapped CLI children leak their
+stderr to the terminal even through execFileSync pipes, so that noise
+identifies nothing). Recorded as VERIFICATION.md Known issue #11 (the #10
+one-off class). No assertion touched anywhere in this round; no `src/` file
+touched, so Gate 2 stays untriggered.
 
 ## Verification
 
