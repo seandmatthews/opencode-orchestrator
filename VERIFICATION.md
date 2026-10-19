@@ -1447,10 +1447,15 @@ per-job cache keys by adapter id + serialized command (two machine jobs with
 identical commands share one instance, distinct commands get distinct
 instances); the unknown-worker error reads
 `unknown worker adapter '<id>' (available: opencode, machine)`; and
-run-level `--worker machine` is refused at parse time (the planner and
-reviewer phases execute through the run-level worker and have no machine
-command — machine selection is per-job in `--jobs` mode, which makes a fully
-token-free run reachable: `--jobs` + per-job `machine` + `--no-review`).
+run-level `--worker machine` is refused at parse time (no run-level machine
+command for the worker tier — since T-025 the planner and reviewer roles
+select their own adapter through `--planner-worker`/`--reviewer-worker` with
+their own `--planner-command`/`--reviewer-command` sources, so the refusal's
+"no machine command" fact is about the worker tier alone; the refusal
+message and Gate 1.17 S6's pin of it are unchanged). Before T-025 a fully
+token-free run needed `--no-review`; since T-025 `--jobs` + per-job
+`machine` + `--reviewer-worker machine --reviewer-command` reaches one with
+a real advisory review (Gate 1.21 S3).
 Zero new npm dependencies (`node:child_process` only, decisions.md
 2026-10-10). The gate's legs, all token-free:
 
@@ -1508,7 +1513,8 @@ Zero new npm dependencies (`node:child_process` only, decisions.md
   resolves the worker through the run-level default argument.
 
 Not pinned here and carved by the ticket: machine workers serving
-planner/reviewer roles (refused by construction this slice); any
+planner/reviewer roles — carved by T-017, landed since by T-025 (per-role
+selection flags, Gate 1.21); any
 WorkerAdapter seam extension toward §11's `capabilities()`/`cancel()`;
 §5.3's evidence-collection tasks (benchmarks/screenshots/Godot — probe-layer
 successors per T-015's carve, T-018/T-019 ticketed); §19 machine-job
@@ -1854,6 +1860,157 @@ sanitization (a different threat class — §14 governs execution capability,
 not output content); custom-agent config hardening beyond the built-in
 plan agent, and any restricted-agent CLI flag. The restricted postures'
 residuals are recorded in Known issue #6's rewrite, below.
+
+**T-025 extension of these pins, and the stale premise reconciled.** T-023's
+premise — "MachineWorker never receives a non-default policy: planner/reviewer
+cannot dispatch through it" (T-023's What §1) — was true of T-023's own
+change-set and is superseded since T-025: a machine advisory role is reachable
+(`--planner-worker`/`--reviewer-worker machine` + the role's command flag), so
+a machine advisory dispatch CAN now carry a non-default policy. The S1 pins
+here are per-site (what each dispatch site sends) and survive per-role adapters
+unchanged; Gate 1.21's S1 extends them to the per-role world (each role's
+dispatches carry the same policy and cwd posture through that role's own
+adapter). The §14.3:1039 honor-or-refuse interaction this poses for
+`MachineWorker` is settled in Gate 1.21's section, below.
+
+## Gate 1.21 — per-role harness selection (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-per-role-harness.mjs
+```
+
+Pins T-025 (spec §6.6:397-415 — "Roles are configuration, not classes" — with
+`RoleSpec.defaultWorker: WorkerSpec` :407; §11.1:875): the two advisory roles
+get their own adapter selection. Four new CLI flags (src/cli.ts):
+`--planner-worker <id>`/`--reviewer-worker <id>` — a `WORKER_ADAPTERS` registry
+id, defaulting to the `--worker` value, so absent flags leave all three roles
+on the run-level adapter with byte-identical default-mode stdout and report —
+and `--planner-command <json>`/`--reviewer-command <json>` — the machine
+command source for the advisory roles, a JSON argv string parsed and
+shape-validated at parse time (non-array, non-string or empty entries refused,
+mirroring the scheduler's `command` shape rules, src/scheduler.ts). A command
+flag is **required iff that role resolves to `'machine'`** and **refused on a
+role resolving to `'opencode'`** (the T-017 pairing rule at role level).
+Validation sits early in `main()` — before the `--jobs` spec read, repo
+validation, the checkout lock, or any artifacts dir (the T-007/T-017
+zero-side-effects refusal pattern): unknown per-role id (the registry message
+verbatim), role → machine without its command, command on a non-machine role.
+Construction stays in `runPipeline`: a non-default role builds its adapter
+through the same `createWorker(id, opts, command)`; a default role passes
+nothing. `SkeletonOptions` (src/runner.ts) gains optional
+`plannerWorker`/`reviewerWorker`, resolved as `opts.plannerWorker ??
+opts.worker` / `opts.reviewerWorker ?? opts.worker` — direct `runSkeleton`
+callers (the Gate 1.8/1.10 checks) compile and behave unchanged. The planner
+phase uses the resolved planner adapter on both execute calls (initial +
+bounded repair share `baseReq`); `runReview` uses the resolved reviewer
+adapter on both calls. Composition: the reviewer selection applies in BOTH
+modes (review runs post-gates in both); the planner flags are
+accepted-but-ignored in `--jobs` mode (the planner is skipped there — the
+`--planner-model` precedent), documented in usage/README. **The worker leg is
+untouched**: the synthesized jobs' `worker: opts.worker`, the dispatch, and
+`--jobs` per-job worker resolution stay exactly as they were. The run header's
+`workers:` line names non-default roles (`planner=machine reviewer=machine`);
+with no new flags it is byte-identical. No report shape change and no
+adapter-id fields on `PlannerReport`/`ReviewReport` — which adapter served a
+role is evidenced by the per-role log argv headers
+(src/worker/opencode.ts, src/worker/machine.ts) and by this gate's S1
+dispatch capture, so the vendored Gate 1.6 fixtures stay green unchanged.
+
+The standing run-level `--worker machine` parse-time refusal is **not
+flipped** — no run-level machine command for the worker tier. Gate 1.17 S6
+stays green with its message pinned verbatim (S2, below); nothing an existing
+gate pins changes, so no T-018/T-019 flip discipline is owed.
+
+No existing gate can pin per-role dispatch — the fast tier never runs the
+pipeline and Gate 2 spends model tokens (the recorded T-007/T-009 argument) —
+so this gate has three legs, all token-free:
+
+- **S1 — fake-adapter dispatch capture** (the Gate 1.8/1.10 pattern:
+  `runSkeleton` driven with fake `WorkerAdapter`s + fake gates against
+  throwaway fixture repos, one per scenario). Flags absent ⇒ the single fake
+  serves every planner, reviewer, and worker dispatch (its recorded traffic
+  is exactly the three classes, nothing elsewhere) and the report is
+  today's. `plannerWorker`/`reviewerWorker` present ⇒ planner initial + the
+  bounded repair attempt hit the planner fake and only it; reviewer initial +
+  repair hit the reviewer fake and only it (both candidates, repair keyed on
+  the runner's repair prompt); worker dispatches keep hitting the run-level
+  fake; no cross-contamination. This leg also **extends the Gate 1.20 S1
+  pins to per-role adapters**: planner dispatches through the planner fake
+  still carry `'artifact-only'` at a dispatch-time-existing scratch cwd under
+  `<artifactsDir>/planner-scratch` (neither the repo nor inside it), reviewer
+  dispatches through the reviewer fake still carry `'worktree-read'` at the
+  candidate workspaces, worker dispatches still carry `'worktree-write'` at
+  the worktrees; `report.json` key sets exact at every level (no new fields).
+- **S2 — real-CLI refusals, exit 1, zero side effects** (no artifacts dir,
+  no `locks/` after each — the Gate 1.17 S6 harness shape, each through the
+  real CLI with a non-git `--repo` so the refusal provably precedes repo
+  validation): unknown `--planner-worker`/`--reviewer-worker` id (the
+  registry message verbatim); a role resolving to machine without its
+  command flag (both roles); a command flag on a role resolving to opencode
+  (default-resolved and explicitly); malformed command JSON (not JSON, a
+  JSON string, an empty array, a non-string entry, an empty-string entry);
+  and the unchanged `--worker machine` refusal re-pinned **verbatim** (the
+  proof the standing contract was not flipped).
+- **S3 — token-free machine-reviewer end-to-end**: a real-CLI `--jobs` run —
+  one machine worker job (marker-file gate) plus `--reviewer-worker machine
+  --reviewer-command` whose command echoes a valid observations object, and
+  the planner flags accepted alongside: the candidate PASSes its real gate
+  (`workerOk`, `diffBytes > 0`, `passedAllGates`), review fires post-gates
+  through the reviewer's own machine adapter, `review.json` carries the
+  parsed observations with the configured reviewer model string recorded
+  verbatim though no model ran (the machine.ts honesty fields), and
+  `reviewer.log` carries the machine argv header — never an opencode argv.
+  The planner flags are accepted-but-ignored (no `planner.log`, no planner
+  block in the report), and the worker leg's evidence is untouched (the
+  candidate `worker.log` carries exactly its own machine argv, never a role
+  command). The first token-free run with a non-empty advisory review —
+  before T-025 a token-free run needed `--no-review` (T-017).
+
+**Machine-advisory honesty, recorded here (docs only — no adapter file
+changes, the ticket's carve).** A machine advisory role's output is
+`parseBriefs`/`parseReview`ed advisory evidence — briefs and observations,
+never verdicts (decisions.md 2026-10-10: gates decide survival; the ladder is
+byte-identical) — distinct from a CommandProbe's post-gates `EvidenceBundle`
+(the worker-vs-probe seam drawn in src/worker/machine.ts). The §14.3:1039
+honor-or-refuse interaction T-023's seam poses for a machine advisory
+dispatch is settled as follows: the dispatch carries the role's non-default
+policy (`'artifact-only'` planner / `'worktree-read'` reviewer), and
+`MachineWorker` neither translates nor refuses it — it has no model harness
+and no tool layer, so there is no restriction mechanism to silently downgrade
+(the no-silent-downgrade contract targets adapters that WOULD run a
+restriction-capable harness at an unrestricted posture). What the policy
+means for a machine advisory dispatch is engine-side and stands unchanged:
+the `'artifact-only'` cwd (the planner scratch dir — no repo checkout as
+cwd) and the `'worktree-read'` cwd (the disposable candidate worktree, whose
+diff and gate evidence were captured before review runs) are the runner's
+choices, exactly as for the OpenCode adapter; containment for an
+unrestricted machine command is the same capture-before-review ordering +
+disposable-workspace + content-parsed-advisory-output containment Known
+issue #6 records for the plan agent's `bash: true` residual. This is a
+documented contract settlement, deliberately not a behavior hidden in an
+adapter file; a successor ticket that prefers the strict spawn-time refusal
+instead must flip S3 (and S2's pairing rules) explicitly — the T-018/T-019
+discipline.
+
+Not pinned here and carved by the ticket: the worker-tier half — run-level
+`--worker machine` WITH a run-level machine command (the flip that must
+explicitly invalidate Gate 1.17 S6 per the T-018/T-019 discipline, and which
+changes `--goal` worker semantics: token-free goal-mode runs, the NO-OP
+ladder against machine output); §6.6 full `RoleSpec` machinery (prompt refs,
+`PermissionPolicy`, `WorkspacePolicy`); §11.1 `capabilities()`/compile-time
+role-vs-capability refusal (T-017's and T-023's carves stand); any change to
+`src/worker/opencode.ts`, `src/worker/machine.ts`, the `WorkerAdapter` seam,
+`src/parse.ts`, `src/scheduler.ts`, gates, or workspace handling (T-022's
+single-WorkspaceProvider rule untouched); model/role semantics (planner/
+reviewer models remain pure CLI configuration); zero new npm dependencies.
+A machine planner under `--goal` mode rides the same flags and the same S1
+dispatch pins (the flags are symmetric), but its end-to-end face is not
+separately pinned — the delivered capability pinned end-to-end is the
+machine REVIEWER (S3), the one that makes a fully token-free run with a real
+advisory review reachable. Gate 2 runs once at landing (`src/runner.ts` is
+on the trigger list), recorded in T-025's Landed section — not a permanent
+extension. Gate 3 n/a (no adapter file is added or changed; the PWD/OLDPWD
+pinning is untouched — the T-009 precedent for runner/cli-only changes).
 
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 

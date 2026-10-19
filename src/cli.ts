@@ -46,7 +46,25 @@ Options:
   --worker <id>            Worker adapter (default: opencode). "machine"
                            (T-017) is per-job only — a --jobs spec's
                            worker+command fields; run-level --worker machine
-                           is refused at parse time.
+                           is refused at parse time. This id is also the
+                           default adapter for the planner and reviewer
+                           roles (see --planner-worker/--reviewer-worker).
+  --planner-worker <id>    Adapter for the planner role (default: the --worker
+                           value). "machine" requires --planner-command.
+  --reviewer-worker <id>   Adapter for the reviewer role (default: the --worker
+                           value). "machine" requires --reviewer-command.
+                           Applies in both --goal and --jobs mode.
+  --planner-command <json> The machine command for a planner resolved to
+                           "machine" — a JSON argv list (e.g.
+                           '["node","scripts/task.js"]', never a shell
+                           string). Refused on a planner resolving to
+                           "opencode". Accepted but ignored in --jobs mode
+                           (the planner is skipped there — the
+                           --planner-model precedent).
+  --reviewer-command <json>
+                           The machine command for a reviewer resolved to
+                           "machine" — a JSON argv list. Refused on a
+                           reviewer resolving to "opencode".
   --candidates <n>         Number of candidates (default: 3)
   --concurrency <n>        Parallel lanes (default: same as candidates)
   --base <ref>             Base commit: branch or SHA (default: HEAD)
@@ -79,6 +97,12 @@ interface Options {
   plannerModel: string | null
   reviewerModel: string | null
   workerId: string
+  /** T-025: per-role adapter ids; null until defaulted to `workerId` in main(). */
+  plannerWorkerId: string | null
+  reviewerWorkerId: string | null
+  /** T-025: the advisory roles' machine command sources (a JSON argv). */
+  plannerCommand: string[] | null
+  reviewerCommand: string[] | null
   candidates: number
   concurrency: number
   base: string
@@ -92,6 +116,24 @@ interface Options {
   opencodeBin: string
 }
 
+/** T-025: parse + shape-validate an advisory role's machine command at parse
+ *  time — a JSON-encoded argv list, mirroring the scheduler's `command` shape
+ *  rules (src/scheduler.ts: a non-empty array of non-empty strings; the
+ *  command is never re-tokenized from a shell string, AGENTS.md #4). */
+function parseCommandArgv(flag: string, raw: string): string[] {
+  let decoded: unknown
+  try {
+    decoded = JSON.parse(raw)
+  } catch (e) {
+    throw new Error(`${flag} is not valid JSON: ${e instanceof Error ? e.message : String(e)}`)
+  }
+  if (!Array.isArray(decoded) || decoded.length === 0
+    || decoded.some((c) => typeof c !== 'string' || c.length === 0)) {
+    throw new Error(`${flag} must be a JSON argv list — a non-empty array of non-empty strings (e.g. '["node", "scripts/task.js"]' — never a shell string)`)
+  }
+  return decoded as string[]
+}
+
 function parseArgs(argv: string[]): Options {
   const opts: Options = {
     repo: '',
@@ -101,6 +143,10 @@ function parseArgs(argv: string[]): Options {
     plannerModel: 'zai-coding-plan/glm-5.3',
     reviewerModel: 'zai-coding-plan/glm-5.3',
     workerId: 'opencode',
+    plannerWorkerId: null,
+    reviewerWorkerId: null,
+    plannerCommand: null,
+    reviewerCommand: null,
     candidates: 3,
     concurrency: 0,
     base: 'HEAD',
@@ -145,6 +191,10 @@ function parseArgs(argv: string[]): Options {
         opts.workerId = id
         break
       }
+      case '--planner-worker': opts.plannerWorkerId = value(); break
+      case '--reviewer-worker': opts.reviewerWorkerId = value(); break
+      case '--planner-command': opts.plannerCommand = parseCommandArgv('--planner-command', value()); break
+      case '--reviewer-command': opts.reviewerCommand = parseCommandArgv('--reviewer-command', value()); break
       case '--candidates': opts.candidates = Number(value()); break
       case '--concurrency': opts.concurrency = Number(value()); break
       case '--base': opts.base = value(); break
@@ -243,8 +293,12 @@ function createWorker(workerId: string, opts: Options, command?: string[]): Work
       }
       return new OpenCodeWorker(opts.opencodeBin)
     case 'machine':
-      // Constructed from the job's command (resolveJobs). The run-level call
-      // site can never land here: --worker machine is refused at parse time.
+      // Constructed from a job's command (resolveJobs) or, since T-025, from
+      // an advisory role's command (a machine planner/reviewer IS a
+      // legitimate run-level machine construction, via
+      // --planner-worker/--reviewer-worker machine plus the role's command
+      // flag, validated in main()). The WORKER tier still can never land
+      // here without a command: --worker machine is refused at parse time.
       if (command === undefined) {
         throw new Error(`the machine worker requires a per-job command argv (a --jobs spec "command" field)`)
       }
@@ -254,8 +308,46 @@ function createWorker(workerId: string, opts: Options, command?: string[]): Work
   }
 }
 
+/** T-025 per-role selection rules, checked BEFORE repo validation, the
+ *  checkout lock, or any artifacts dir (the T-007/T-017 zero-side-effects
+ *  refusal pattern). Pure: returns the refusal message or null.
+ *  - an unknown per-role id refuses with the registry's own message;
+ *  - a role resolving to 'machine' without its command flag refuses (the
+ *    machine worker has no other command source — the same fact the
+ *    run-level --worker machine refusal cites);
+ *  - a command flag on a role resolving to 'opencode' refuses (the T-017
+ *    --jobs command-pairing rule, at role level). */
+function perRoleRefusal(opts: Options): string | null {
+  const roles = [
+    { role: 'planner', id: opts.plannerWorkerId!, flag: '--planner-worker', commandFlag: '--planner-command', command: opts.plannerCommand },
+    { role: 'reviewer', id: opts.reviewerWorkerId!, flag: '--reviewer-worker', commandFlag: '--reviewer-command', command: opts.reviewerCommand },
+  ]
+  for (const r of roles) {
+    if (!WORKER_ADAPTERS.includes(r.id)) {
+      return `unknown worker adapter '${r.id}' (available: ${WORKER_ADAPTERS.join(', ')})`
+    }
+    if (r.id === 'machine' && r.command === null) {
+      return `${r.flag} machine requires a machine command — pass ${r.commandFlag} <json argv> (a non-empty list-form argv like '["node", "scripts/task.js"]')`
+    }
+    if (r.id !== 'machine' && r.command !== null) {
+      return `${r.commandFlag} sets a machine command but the ${r.role} resolves to the '${r.id}' worker — command is the machine worker's argv; pair it with ${r.flag} machine`
+    }
+  }
+  return null
+}
+
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2))
+  // T-025: the advisory roles default to the --worker id — absent flags ⇒ all
+  // three roles ride --worker exactly as before. Resolved here, after the
+  // whole argv is read, because --worker may appear after --planner-worker.
+  opts.plannerWorkerId = opts.plannerWorkerId ?? opts.workerId
+  opts.reviewerWorkerId = opts.reviewerWorkerId ?? opts.workerId
+  // T-025: the per-role id/pairing refusals happen before the --jobs spec is
+  // even read — before repo validation, the checkout lock, or any artifacts
+  // dir exists (zero side effects, the parse-refusal pattern).
+  const roleRefusal = perRoleRefusal(opts)
+  if (roleRefusal) throw new Error(roleRefusal)
 
   // T-009: the --jobs spec is read and validated BEFORE repo validation, the
   // checkout lock, or any artifacts dir exists — a refusal must write
@@ -311,7 +403,13 @@ async function runPipeline(opts: Options, jobsSpec: JobsSpec | null): Promise<vo
   console.log(`repo:     ${opts.repo} @ ${baseSha.slice(0, 12)}`)
   console.log(`planner:  ${jobsSpec ? '(skipped — briefs come from the jobs spec)' : opts.plannerModel ?? '(disabled — candidates get the raw goal)'}`)
   console.log(`reviewer: ${opts.reviewerModel ?? '(disabled)'}`)
-  console.log(`workers:  ${opts.model} (worker: ${opts.workerId})`)
+  // T-025: the workers line names non-default advisory roles; with no new
+  // flags it is byte-identical to today.
+  const rolesText = [
+    opts.plannerWorkerId !== opts.workerId ? `planner=${opts.plannerWorkerId}` : null,
+    opts.reviewerWorkerId !== opts.workerId ? `reviewer=${opts.reviewerWorkerId}` : null,
+  ].filter(Boolean).join(' ')
+  console.log(`workers:  ${opts.model} (worker: ${opts.workerId}${rolesText ? `, ${rolesText}` : ''})`)
   console.log(`goal:     ${opts.goal || (jobsSpec ? '(none — briefs come from the jobs spec)' : '')}`)
   console.log(`artifacts: ${artifactsDir}`)
   console.log('')
@@ -330,6 +428,18 @@ async function runPipeline(opts: Options, jobsSpec: JobsSpec | null): Promise<vo
     maxAttempts: opts.maxAttempts,
     gates: opts.gates.map((g) => new CommandGate(g.name, g.command)),
     worker: createWorker(opts.workerId, opts),
+    // T-025: a non-default advisory role builds its own adapter through the
+    // same createWorker (a machine role's command was validated in main());
+    // a default role passes nothing and rides the run-level adapter exactly
+    // as before. The planner flags are accepted but inert in --jobs mode
+    // (the planner phase is skipped there); the reviewer selection applies
+    // in both modes.
+    ...(opts.plannerWorkerId !== opts.workerId
+      ? { plannerWorker: createWorker(opts.plannerWorkerId!, opts, opts.plannerCommand ?? undefined) }
+      : {}),
+    ...(opts.reviewerWorkerId !== opts.workerId
+      ? { reviewerWorker: createWorker(opts.reviewerWorkerId!, opts, opts.reviewerCommand ?? undefined) }
+      : {}),
     workspaces: new WorktreeProvider(opts.repo, join(artifactsDir)),
     artifactsDir,
     cleanWorkspaces: opts.clean,
