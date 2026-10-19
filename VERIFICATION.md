@@ -1746,6 +1746,26 @@ landing in T-017's Landed section).
    that change-set). Benign until observed recurring; the exact triggering
    line (snapshot failure vs already-gone root vs survivor) is not captured
    by the check's output and was not diagnosed post-hoc.
+11. **A one-off Gate 1.17 red with a single failed assertion, not
+   reproducible (observed once, 2026-10-18, T-021 lane review round 1).**
+   One fast-tier run failed inside `scripts/check-machine-worker.mjs` — exit
+   1, `check-machine-worker: 1 failure(s)` — while the check passed in every
+   other execution around it: 13 green Gate 1.17 executions in the same lane
+   the same day (two full `node scripts/verify.mjs fast` runs, six
+   standalone runs, three of them under 8-way artificial CPU saturation).
+   The check's own end-of-`main()` sandbox cleanup had run (no
+   `C:\swarm\verify-machine` debris), so `main()` completed and exactly one
+   assertion was false; the failing assertion's name was not preserved in
+   the reviewer-side log. The stderr tail that log does contain — worktree
+   prep lines, SQLite experimental warnings, and the six S6 refusal
+   messages — is byte-for-byte the noise every run prints, green runs
+   included: the tsx-wrapped CLI children leak their stderr to the terminal
+   even through `execFileSync` pipes, so that noise identifies nothing. The
+   change-set under review touched none of the check's inputs (no `src/`
+   file, no check file; the Gate 1.19 hook runs after 1.17 and its sandbox
+   is self-removed). Same class as Known issue #10: a loud-by-design one-off
+   in a fast-tier check; benign until observed recurring — and the failing
+   assertion's name must be captured before any code change is considered.
 
 ## Definition of done (per ticket)
 

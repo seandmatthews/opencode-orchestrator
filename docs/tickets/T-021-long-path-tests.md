@@ -271,6 +271,19 @@ Deviations from the ticket text, recorded:
   and records this true result; the substance (no MAX_PATH/ENAMETOOLONG
   failure ever observed, no pre-existing long-path artifact) is unchanged.
 
+Review round 1 (2026-10-18): the driving fast tier went red once, exit 1,
+inside Gate 1.17's `scripts/check-machine-worker.mjs` — a check this
+change-set does not touch, executing before the Gate 1.19 hook — with
+exactly one failed assertion, no crash, and no debris (the check's own
+sandbox cleanup had run). Not reproducible: 13 green Gate 1.17 executions in
+the same lane the same day (two full fast tiers, six standalone runs, three
+under 8-way artificial CPU saturation), and the preserved log's stderr tail
+is the exact noise green runs print (the tsx-wrapped CLI children leak their
+stderr to the terminal even through execFileSync pipes, so that noise
+identifies nothing). Recorded as VERIFICATION.md Known issue #11 (the #10
+one-off class). No assertion touched anywhere in this round; no `src/` file
+touched, so Gate 2 stays untriggered.
+
 ## Verification
 
 **Gate 0** (`npm run typecheck`) — green at HEAD `d010172` before this
