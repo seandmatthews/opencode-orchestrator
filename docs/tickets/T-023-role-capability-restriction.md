@@ -1,6 +1,6 @@
 # T-023 — Planner/reviewer capability restriction: §14 execution policy at the WorkerAdapter seam (spec §3.6, §14, §34 M5)
 
-**Status:** proposed
+**Status:** done
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 2
 **Depends on:** —
@@ -186,26 +186,26 @@ and Gate 2/Gate 3 landing runs cover the real-harness face.
 
 ## Acceptance criteria
 
-- [ ] The seam field, the three runner dispatch sites, and the adapter
+- [x] The seam field, the three runner dispatch sites, and the adapter
       translation compile — pinned by Gate 0 (`npm run typecheck`).
-- [ ] Planner dispatches carry `'artifact-only'` with a scratch cwd under the
+- [x] Planner dispatches carry `'artifact-only'` with a scratch cwd under the
       run artifacts dir, not `opts.repo`; reviewer dispatches carry
       `'worktree-read'` at the candidate worktree; worker dispatches carry
       `'worktree-write'` at the worktree — pinned by Gate 1.20 S1.
-- [ ] The adapter's argv contains `--agent plan` exactly for non-default
+- [x] The adapter's argv contains `--agent plan` exactly for non-default
       policies and never for workers; `PWD`/`OLDPWD` stay pinned to `req.cwd`
       on every path — pinned by Gate 1.20 S2.
-- [ ] Planner/reviewer output parsing is unchanged — pinned by Gate 0.5
+- [x] Planner/reviewer output parsing is unchanged — pinned by Gate 0.5
       (check-parse.mjs) staying green.
-- [ ] No existing fast-tier assertion is weakened (especially the worker
+- [x] No existing fast-tier assertion is weakened (especially the worker
       workspace shapes in Gate 1.8/1.10) — pinned by the full fast tier
       (`npm run verify`) green with the new Gate 1.20 registered.
-- [ ] VERIFICATION.md gains the Gate 1.20 section and the Known issue #6
+- [x] VERIFICATION.md gains the Gate 1.20 section and the Known issue #6
       rewrite with the three residuals above; Known issue #2 is refreshed per
       the Gate 3 result — human-judgement items, named manual check: the
       VERIFICATION.md diff is read against this ticket's What §5 in
       change-set review.
-- [ ] Report shape unchanged (no new `report.json` fields, verdict lines
+- [x] Report shape unchanged (no new `report.json` fields, verdict lines
       identical) — pinned by Gate 2's existing report assertions plus Gate 0.
 - [ ] **Landing, once, recorded in `## Landed`:** Gate 2 (`npm run verify:full`)
       ALL GREEN on the real harness — planner produced briefs with
@@ -215,10 +215,123 @@ and Gate 2/Gate 3 landing runs cover the real-harness face.
       would fall back to the raw goal and `fallbackUsed` would flip this
       assertion red. Spends model tokens, hence landing-only (the recorded
       T-007/T-009 no-permanent-gate argument).
-- [ ] **Landing, once:** Gate 3 (`node scripts/diag-pwd.mjs`, VERIFICATION.md
+- [x] **Landing, once:** Gate 3 (`node scripts/diag-pwd.mjs`, VERIFICATION.md
       :1431-1435) re-run against the vendored 1.19.3 — required by the adapter
       change (:1431-1435) and due anyway for the 1.18.35 → 1.19.3 drift — with
       the result and any Known issue #2 refresh recorded in `## Landed`.
+
+## Landed
+
+2026-10-18, lane branch `ticket/T-023-role-capability-restriction`.
+
+What changed:
+
+- **`src/types.ts`** — `ExecutionPolicy` (the documented narrowing of spec
+  §14's vocabulary to the three postures with a producer:
+  `'artifact-only'` / `'worktree-read'` / `'worktree-write'`; §6.6:409
+  names `PermissionPolicy` without ever defining it — the T-013
+  choose-and-document precedent) and `WorkerExecutionRequest.executionPolicy?`
+  (absent ≡ `'worktree-write'`, so `MachineWorker` and every fake adapter
+  in the existing checks compile and behave unchanged).
+- **`src/runner.ts`** — `runPlannerPhase` dispatches from a fresh
+  `<artifactsDir>/planner-scratch/` (created before the phase, removed
+  best-effort in a `finally` after it — its contents are never evidence;
+  planner evidence stays `planner.log` + `planner-raw.txt`) with policy
+  `'artifact-only'`; both execute calls (initial + bounded repair) share
+  the restricted `baseReq`, so one change covers both. The old comment
+  ("enforcement moves into capability restrictions later") retired — this
+  ticket is that later. `runReview` dispatches with policy
+  `'worktree-read'` at the candidate worktree lease (unchanged cwd); the
+  "prompt-reinforced only" comment retired, the prompt's "Do not modify
+  any files" line kept as reinforcement. The worker dispatch carries
+  `'worktree-write'` explicitly. No verdict surface touched: the ladder,
+  gates, probes, dispatch evidence, and the report shape are unchanged —
+  a restricted role's harness failure degrades through the existing
+  planner raw-goal fallback and reviewer parse-fail paths.
+- **`src/worker/opencode.ts`** — a non-`'worktree-write'` policy adds
+  `--agent plan` to the `run` argv (the OpenCode built-in plan agent);
+  the spawn log line is built from the actual argv (prompt elided), so
+  `worker.log`/`planner.log`/`reviewer.log` record the restriction;
+  `PWD`/`OLDPWD` pinning untouched on every path. Docblock states the
+  §14.3 no-silent-downgrade contract and that the agent name is
+  adapter-internal harness vocabulary (no new CLI flag — the carve).
+- **`scripts/check-capabilities.mjs` (new Gate 1.20)** + the hook in
+  `scripts/verify.mjs` after the Gate 1.19 hook, before the fast-tier
+  finish. S1 request capture (the Gate 1.8/1.10 fake-adapter pattern):
+  planner requests `'artifact-only'` with a dispatch-time-existing cwd
+  under `<artifactsDir>/planner-scratch`, neither the repo nor inside it,
+  prompt naming no repo path; the bounded planner repair attempt shares
+  the restricted request (S1b); reviewer requests `'worktree-read'` at
+  the candidate workspace; worker requests `'worktree-write'` at the
+  worktree; candidates pass as before; `report.json` key shape exact at
+  every level (top/planner/candidate/review/attempt/gate-result). S2
+  stub-bin argv pin: `OpenCodeWorker` against a stub recording real argv
+  and `env.PWD`/`OLDPWD` — `--agent plan` exactly for the two restricted
+  postures, never for `'worktree-write'`/absent; `PWD`/`OLDPWD` =
+  `req.cwd` in all four cases; the log line reflects the actual argv.
+  42 assertions, zero model tokens, zero opencode involvement in S1.
+- **`VERIFICATION.md`** — the Gate 1.20 section (after Gate 1.19, with
+  the carve list); Known issue #6 rewritten from "prompt-reinforced
+  only" to mechanism-landed with the three recorded residuals (the plan
+  agent's `bash: true` — shell-mediated writes not permission-denied,
+  making the planner's scratch cwd load-bearing and the reviewer's
+  capture-before-review ordering load-bearing; the unverified headless
+  `ask`-action auto-deny; output-content threats as a different threat
+  class); Known issue #2 refreshed — 1.19.3's `run --help` shows `--dir`
+  (re-verified first-hand), so cwd+env pinning is no longer the only
+  mechanism but remains the one in use.
+- **`docs/tickets/`** — this ticket flipped to done, index row updated,
+  in the same change-set.
+
+Implementation notes (the ticket text left implied):
+
+- Gate 1.20's hook sits after Gate 1.19 in `scripts/verify.mjs`
+  (sequential fast-tier hook order), not literally beside Gate 1.5's
+  inline sections — the ticket's "next to Gate 1.5" predates T-020/T-021
+  landing Gates 1.18/1.19; the intent (registered in the fast tier) is
+  what lands, in VERIFICATION.md as well.
+- S2's stub executable is the node executable itself with the recorder
+  injected via `NODE_OPTIONS=--require` (a bare script cannot be spawned
+  directly on Windows without a shell, and the adapter's spawn is
+  list-form by contract); node resolves the entry-module argument to an
+  absolute path before a preload runs, so the adapter's bare `'run'` is
+  pinned on its basename — everything after it verbatim.
+- S1 pins the planner cwd's existence AT DISPATCH TIME (the fake adapter
+  records it), because the scratch dir is removed after the phase — a
+  post-hoc existence check would contradict the removal pin. Both of
+  these authored assertions were red in this gate's own first run and
+  green in every run after the fix (recorded per AGENTS.md #8 for new
+  checks; no existing check was touched).
+
+Measured gates (this lane, this change-set):
+
+- Gate 0 `tsc --noEmit` → exit 0.
+- Gate 1.20 new, `node node_modules/tsx/dist/cli.mjs
+  scripts/check-capabilities.mjs` → `check-capabilities: ALL GREEN`,
+  exit 0, 42 ok assertions.
+- Full fast tier, `node scripts/verify.mjs fast` → exit 0,
+  `verify (fast) complete: ALL GREEN`, 981 ok lines, every section (Gate
+  0, 1, 0.5, 1.5 ×3, 1.6–1.20) green — Gate 0.5 (parser contract) green,
+  Gate 1.8/1.10 worker-workspace shapes untouched.
+- Gate 3 (owed once at landing — the adapter changed), both forms
+  against `C:\swarm\demo-target` on the vendored 1.19.3: form 1 (no
+  override) exit 0 — the harness reports its `env.PWD`-resolved
+  directory (Known issue #1 still exhibited, as documented); form 2
+  (PWD override) exit 0 — the harness reports the override target
+  `C:\swarm\demo-target`. Known issue #2's refresh is recorded from the
+  token-free `run --help` observation above; the `--dir` switch stays
+  unused (ground rule 5).
+- Gate 2 **owed at landing** (`src/runner.ts` and "any adapter" are on
+  its trigger list) and **not run by this lane** — the driving script
+  runs the full e2e gate after this change-set lands (real model
+  tokens); recorded there. That run doubles as the harness-drift
+  tripwire the ticket names: if 1.19.3 rejected `--agent plan`, the
+  planner would fall back to the raw goal and `fallbackUsed` would flip
+  its assertion red.
+
+Deviations: the three implementation notes above; nothing else. Gate
+numbering: **1.20** claimed and landed as planned — the next free integer
+after T-020's landed 1.18 and T-021's landed 1.19.
 
 ## Verification
 

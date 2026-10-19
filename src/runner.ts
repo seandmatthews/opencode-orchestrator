@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseBriefs, parseReview } from './parse.js'
 import { evidenceBundlePath, failedBundle, writeEvidenceBundle } from './probe.js'
@@ -264,39 +264,64 @@ async function runPlannerPhase(opts: SkeletonOptions): Promise<PlannerReport> {
   const rawOutputPath = join(opts.artifactsDir, 'planner-raw.txt')
   const started = Date.now()
 
-  // The planner may read the repo to write informed briefs, but must not
-  // modify it; enforcement moves into capability restrictions later.
-  const baseReq = { model: opts.plannerModel!, cwd: opts.repo, logPath, timeoutMs: opts.timeoutMs }
-  let result = await opts.worker.execute({ ...baseReq, prompt })
-  let attempts = 1
-  let briefs = result.ok ? parseBriefs(result.responseTail, count) : null
+  // T-023 (spec §3.6:144, §14): the planner's capability posture is
+  // mechanism-level now, not prompt-reinforced. Its cwd is a fresh disposable
+  // scratch dir under the run artifacts — never the canonical checkout
+  // (ground rule 3), never any repo — with the 'artifact-only' policy passed
+  // explicitly so the adapter restricts the spawn. The prompt names no repo
+  // path (plannerPrompt: goal + count only), so this removes an accidental
+  // capability, not a used one. Scratch contents are never evidence:
+  // planner evidence stays planner.log + planner-raw.txt. Both execute calls
+  // (initial + repair) share baseReq, so one change covers both.
+  const scratchDir = join(opts.artifactsDir, 'planner-scratch')
+  mkdirSync(scratchDir, { recursive: true })
+  try {
+    const baseReq = {
+      model: opts.plannerModel!,
+      cwd: scratchDir,
+      logPath,
+      timeoutMs: opts.timeoutMs,
+      executionPolicy: 'artifact-only',
+    } as const
+    let result = await opts.worker.execute({ ...baseReq, prompt })
+    let attempts = 1
+    let briefs = result.ok ? parseBriefs(result.responseTail, count) : null
 
-  if (!briefs && !result.timedOut) {
-    attempts = 2
-    console.log('planner: output was not a valid JSON array, running one bounded repair attempt')
-    result = await opts.worker.execute({
-      ...baseReq,
-      prompt: [
-        prompt,
-        '',
-        'Your previous response was not a valid JSON array of strings. Previous response:',
-        result.responseTail,
-        '',
-        'Output ONLY the JSON array. No other text.',
-      ].join('\n'),
-    })
-    briefs = result.ok ? parseBriefs(result.responseTail, count) : null
-  }
+    if (!briefs && !result.timedOut) {
+      attempts = 2
+      console.log('planner: output was not a valid JSON array, running one bounded repair attempt')
+      result = await opts.worker.execute({
+        ...baseReq,
+        prompt: [
+          prompt,
+          '',
+          'Your previous response was not a valid JSON array of strings. Previous response:',
+          result.responseTail,
+          '',
+          'Output ONLY the JSON array. No other text.',
+        ].join('\n'),
+      })
+      briefs = result.ok ? parseBriefs(result.responseTail, count) : null
+    }
 
-  writeFileSync(rawOutputPath, result.responseTail)
-  return {
-    model: opts.plannerModel!,
-    ok: briefs !== null,
-    attempts,
-    durationMs: Date.now() - started,
-    briefs: briefs ?? [],
-    fallbackUsed: briefs === null,
-    rawOutputPath,
+    writeFileSync(rawOutputPath, result.responseTail)
+    return {
+      model: opts.plannerModel!,
+      ok: briefs !== null,
+      attempts,
+      durationMs: Date.now() - started,
+      briefs: briefs ?? [],
+      fallbackUsed: briefs === null,
+      rawOutputPath,
+    }
+  } finally {
+    // Best-effort removal — the scratch dir is never evidence, and cleanup
+    // failure must not mask the planner's report.
+    try {
+      rmSync(scratchDir, { recursive: true, force: true })
+    } catch {
+      // Best-effort by contract.
+    }
   }
 }
 
@@ -309,10 +334,22 @@ async function runReview(
   const rawOutputPath = join(ctx.dir, 'review-raw.txt')
   const started = Date.now()
 
-  // Read-only posture is prompt-reinforced only for now (VERIFICATION.md
-  // Known issues #6); the reviewer runs in the candidate worktree, so the
-  // canonical repo is never exposed either way.
-  const baseReq = { model: opts.reviewerModel!, cwd: ctx.workspacePath, logPath, timeoutMs: opts.timeoutMs }
+  // T-023 (spec §14): the reviewer's posture is mechanism-level now — the
+  // 'worktree-read' policy is passed explicitly and the OpenCode adapter
+  // restricts the spawn to its plan agent (edit tools deny-listed). The cwd
+  // stays the candidate worktree lease: a disposable workspace whose diff
+  // and gate results were already captured into evidence files before review
+  // runs (the capture is above; review is invoked below), so the canonical
+  // repo is never exposed either way. The prompt's "Do not modify any files"
+  // line stays as reinforcement (decisions.md: prompts are
+  // defense-in-depth, never the boundary).
+  const baseReq = {
+    model: opts.reviewerModel!,
+    cwd: ctx.workspacePath,
+    logPath,
+    timeoutMs: opts.timeoutMs,
+    executionPolicy: 'worktree-read',
+  } as const
   let result = await opts.worker.execute({ ...baseReq, prompt })
   let attempts = 1
   let review = result.ok ? parseReview(result.responseTail) : null
@@ -443,6 +480,11 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
         cwd: lease.path,
         logPath,
         timeoutMs: job.timeoutMs,
+        // T-023: the builder posture, passed explicitly — the check pins what
+        // was sent, never what was defaulted (§14.1:1014: a write-capable
+        // worker's writable workspace is the worktree, never the canonical
+        // checkout — already true here by the worktree lease).
+        executionPolicy: 'worktree-write',
         // T-010: the pid line lands as soon as the adapter knows its root
         // pid — before any hang — so recovery can find it after a crash
         // while execute() never resolves.

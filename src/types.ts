@@ -5,6 +5,24 @@
 // worker adapters. OpenCode is one adapter among future ones (Codex, a
 // local OpenAI-compatible endpoint, ...), never an engine assumption.
 
+/**
+ * Execution capability policy for one dispatch (spec §14, T-023). The spec
+ * never defines PermissionPolicy (§6.6:409 names it without a type); this
+ * union is the repo's documented narrowing (the T-013 types.ts:110-114
+ * choose-and-document precedent) — exactly the three postures with a
+ * producer. An adapter that receives a non-`worktree-write` policy it
+ * cannot honor must refuse the dispatch at spawn time, never silently
+ * downgrade (§14.3:1039 — "The implementation can vary. The contract does
+ * not.").
+ */
+export type ExecutionPolicy =
+  /** No repo checkout is this dispatch's cwd (§14.2 "artifact-only"). */
+  | 'artifact-only'
+  /** Tool-restricted read over the supplied disposable worktree (§14.3 "tool restriction"). */
+  | 'worktree-read'
+  /** Builder posture: full tools inside the candidate worktree. */
+  | 'worktree-write'
+
 export interface WorkerExecutionRequest {
   /** Fully composed prompt for this job. */
   prompt: string
@@ -32,6 +50,19 @@ export interface WorkerExecutionRequest {
    * report-not-kill.
    */
   onSpawn?: (pid: number) => void
+  /**
+   * Execution capability policy for this dispatch (T-023, spec §14). Absent
+   * ≡ 'worktree-write' — the builder posture every pre-T-023 dispatch had —
+   * so existing adapters compile unchanged. The runner passes it explicitly
+   * on every dispatch site (planner 'artifact-only', reviewer
+   * 'worktree-read', worker 'worktree-write'); the OpenCode adapter
+   * translates the restricted postures to its plan agent (the only
+   * OpenCode-aware file). A non-'worktree-write' policy is a mechanism-level
+   * restriction (decisions.md 2026-10-10: mechanism over prompts), never a
+   * gate result — a restricted role's failure degrades through the existing
+   * planner-fallback/reviewer-parse paths, never into a candidate verdict.
+   */
+  executionPolicy?: ExecutionPolicy
 }
 
 export interface WorkerResult {

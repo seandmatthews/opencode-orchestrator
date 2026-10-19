@@ -1636,6 +1636,105 @@ ticket's "zero hits" phrasing held for `src/` and for the failure-class
 names, not for the bare `260` alternative; the substance (no observed
 failure, no pre-existing long-path artifact) is unchanged.
 
+## Gate 1.20 — role capability restriction (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-capabilities.mjs
+```
+
+Pins T-023 (spec §3.6:144 "Do not edit files is not a security boundary" ·
+§14.1:1014 "A write-capable model worker never receives the canonical
+checkout as its writable workspace" · §14.3:1039 "The implementation can
+vary. The contract does not."): mechanism-level capability restriction for
+the two advisory roles at the `WorkerAdapter` seam, closing Known issue #6
+(the repo's oldest recorded honesty debt — the planner ran with build-agent
+write tools in the target repo cwd). Three parts, one change-set:
+
+- **The seam** (src/types.ts): `WorkerExecutionRequest.executionPolicy?: ExecutionPolicy`
+  — the spec §14 vocabulary narrowed to the three postures with a producer
+  (`'artifact-only'` / `'worktree-read'` / `'worktree-write'`; the spec
+  never defines `PermissionPolicy`, §6.6:409 names it without a type — the
+  T-013 choose-and-document precedent). Absent ≡ `'worktree-write'`, so
+  existing adapters (`MachineWorker`, T-017) and every fake adapter in the
+  existing checks compile and behave unchanged. The runner passes it
+  EXPLICITLY on all three dispatch sites — the check pins what was sent,
+  never what was defaulted.
+- **The runner** (src/runner.ts): the planner dispatches from
+  `<artifactsDir>/planner-scratch/` — created before the phase, removed
+  best-effort after (its contents are never evidence; planner evidence
+  stays `planner.log` + `planner-raw.txt`), policy `'artifact-only'` on
+  both execute calls (initial + bounded repair share `baseReq`); the
+  reviewer dispatches with policy `'worktree-read'` at the candidate
+  worktree lease — a disposable workspace whose diff and gate evidence was
+  already captured before review runs — with the prompt's "Do not modify
+  any files" line kept as reinforcement; the worker dispatch carries
+  `'worktree-write'` at the leased worktree, behavior unchanged. No verdict
+  surface changes: the ladder, gates, probes, and the report shape are
+  untouched — a restricted role's harness-level failure degrades through
+  the existing planner raw-goal fallback and reviewer parse-fail paths,
+  never into a candidate verdict (decisions.md: capability restriction is a
+  spawn-time mechanism, not a gate result).
+- **The adapter** (src/worker/opencode.ts — the only OpenCode-aware file,
+  decisions.md 2026-10-10): a non-`'worktree-write'` policy adds `--agent
+  plan` to the `run` argv — the OpenCode built-in plan agent, verified
+  first-hand against the vendored opencode-ai **1.19.3**
+  (`node_modules/opencode-ai/package.json`): `run --help` shows `--agent
+  <string>`; `opencode debug agent plan` reports *"Plan mode. Disallows all
+  edit tools."* with permission rules `edit * → deny` (narrow plan-file
+  allows). The spawn log line reflects the actual argv, so `worker.log` /
+  `planner.log` / `reviewer.log` record the restriction. `PWD`/`OLDPWD`
+  pinning is untouched on every path (ground rule 5). The agent name is
+  adapter-internal harness vocabulary; no new CLI flag (T-023 carve).
+
+No existing gate can pin any of this — the fast tier never runs the planner
+or reviewer, and Gate 2 spends model tokens — so the gate has two legs, all
+token-free:
+
+- **S1 — request capture** (the Gate 1.8/1.10 fake-adapter pattern, the
+  check-retry shape: `runSkeleton` driven end-to-end with a fake
+  `WorkerAdapter` + fake gates against throwaway fixture repos): planner
+  requests carry `'artifact-only'` with a cwd that existed at dispatch
+  time, sits under the run artifacts dir (`<artifactsDir>/planner-scratch`),
+  and is neither the target repo nor inside it — and the planner prompt
+  names no repo path (the restriction removes an accidental capability,
+  not a used one); the scratch dir is gone after the phase; the bounded
+  planner repair attempt (S1b) shares the same restricted request shape
+  and cwd; reviewer requests carry `'worktree-read'` with cwd = the
+  candidate workspace path; worker requests carry `'worktree-write'` with
+  cwd = the worktree; candidates pass exactly as before and
+  `report.json`'s key shape is unchanged (top-level, planner, candidate,
+  review, attempt, and gate-result key sets all exact — no new report
+  fields anywhere).
+- **S2 — stub-bin argv pin** (constructor-injected `binPath`,
+  src/worker/opencode.ts:25; the Gate 1.12 S2 pin face): `OpenCodeWorker`
+  pointed at a stub executable that records its real argv and
+  `env.PWD`/`env.OLDPWD` (the node executable itself with the recorder
+  injected via `NODE_OPTIONS=--require`, so the recorder sees exactly the
+  argv the adapter built — node resolves the entry-module argument to an
+  absolute path before a preload runs, so the pin is on its basename):
+  `'artifact-only'` and `'worktree-read'` → argv contains `--agent plan`;
+  `'worktree-write'` and absent → it never appears; `PWD`/`OLDPWD` equal
+  `req.cwd` in all four cases; the spawn log line reflects the actual argv
+  (`$ opencode run --agent plan -m …` exactly for the restricted postures).
+
+Not pinned here and carved by the ticket: no `WorkspaceProvider`
+implementation, factory, or `--workspace` flag — T-022's single-provider
+rule stands, and T-023 does not trigger its re-entry condition (a): the
+reviewer's workspace stays the existing worktree lease, the planner's
+scratch dir is plain `fs.mkdir` (not a provider), and the stage-5 read-only
+verifier roles that would consume
+`{ type: "disposable-clone-readonly" }` (spec §34 M5:2082-2094) remain
+re-entry (a)'s owners. Also carved: §14.4 secrets/network allowlisting;
+§6.6 RoleSpec / §11.1 `capabilities()` compile-time refusal machinery
+(T-017's carve stands); `--jobs` spec `workspace`/`permissions`/`role`
+fields stay refused (src/scheduler.ts); OS-ACL/container isolation
+(§14.3's other mechanisms); worker-tier tool restriction (builders keep
+full tools — §14.1:1014 is satisfied by worktrees); brief-output content
+sanitization (a different threat class — §14 governs execution capability,
+not output content); custom-agent config hardening beyond the built-in
+plan agent, and any restricted-agent CLI flag. The restricted postures'
+residuals are recorded in Known issue #6's rewrite, below.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
@@ -1693,9 +1792,18 @@ landing in T-017's Landed section).
    `PWD`/`OLDPWD` to the intended cwd — done in `src/worker/opencode.ts`. First run
    before the fix: all three workers edited the orchestrator repo while gates blessed
    untouched worktrees and everything reported PASS; only zero-byte diffs exposed it.
-2. **`opencode run` has no directory flag** (`--help` confirmed) — cwd + env pinning is
-   the only mechanism. `opencode run` also auto-attaches to a running server if one
-   exists (`--attach` in help); kill stale opencode processes before measuring.
+2. **`opencode run` had no directory flag — refreshed for 1.19.3 (T-023).**
+   The original claim (`--help` confirmed on 1.18.35) was "no directory
+   flag — cwd + env pinning is the only mechanism". The vendored harness
+   drifted to **1.19.3** and its `run --help` now shows `--dir` ("directory
+   to run in, path on remote server if attaching" — re-verified first-hand,
+   2026-10-18), so cwd + env pinning is no longer the *only* mechanism; it
+   remains the one in use (ground rule 5 — `PWD`/`OLDPWD` pinning in
+   src/worker/opencode.ts, Gate 1.20 S2), and the Gate 3 re-run against
+   1.19.3 (required by the T-023 adapter change) is where a `--dir` switch
+   would be evaluated, if ever. `opencode run` also auto-attaches to a
+   running server if one exists (`--attach` in help); kill stale opencode
+   processes before measuring.
 3. **`glm-5.3-highspeed` is not in the plan.** The default `build` agent resolves to it
    when no `-m` is given and fails after ~70s of retries with exit code 0 through a
    pipeline. Always pass `--model`/`-m` explicitly; never trust harness defaults.
@@ -1705,10 +1813,36 @@ landing in T-017's Landed section).
    `src/clean.ts`, whose git calls are list-form (T-002).
 5. **CRLF warnings from git on fixture files are benign** (`.gitattributes` normalizes;
    the fixture regenerates from scratch each run).
-6. **The planner's read-only-ness is prompt-reinforced only** — it runs with build-agent
-   write tools in the target repo cwd. Mechanism-level capability restriction lands
-   with the worker permission model (spec §14). Until then, planner output and the
-   repo state after Gate 2 are the tripwire.
+6. **Advisory-role capability restriction is mechanism-level now (T-023) —
+   with recorded residuals.** The planner dispatches `'artifact-only'` from
+   a disposable scratch dir under the run artifacts dir (never the target
+   repo) and the reviewer dispatches `'worktree-read'` at the candidate
+   worktree; the OpenCode adapter translates both to its built-in plan
+   agent (`--agent plan`, "Plan mode. Disallows all edit tools.", `edit *
+   → deny` — verified first-hand on 1.19.3). Supersedes this issue's
+   original "prompt-reinforced only" posture (and T-001's prompt-only
+   reviewer "for now", T-001:73); the prompt lines stay as
+   defense-in-depth (decisions.md 2026-10-10). Honest residuals, observed
+   in the same 1.19.3 dump:
+   - The plan agent's tool list still includes `bash: true` —
+     shell-mediated writes are NOT denied by the permission layer. The
+     planner's scratch cwd is therefore load-bearing, not decorative: a
+     bash `cd`/absolute-path escape remains possible in principle, bounded
+     by the prompt naming no repo path and briefs being content-parsed
+     engine-side. For the reviewer the same residual is contained by
+     ordering: diff and gate evidence are captured before review runs,
+     into evidence files, and the worktree is disposable
+     (src/runner.ts: diff capture → gates → review → dispose).
+   - Whether a headless non-TTY `opencode run` auto-denies `ask`-action
+     permissions (the plan agent's `external_directory → ask`) is
+     **unverified** — no model session exercising the plan agent was run
+     for this ticket (the lane's Gate 3 probe drove the default build
+     agent; S2's stub is not the harness). The landing Gate 2 run is
+     where a probe observation gets recorded; until then this stays
+     recorded as unverified.
+   - Output-content threats (e.g. a planner brief containing a hostile
+     path) are a *different* threat class — §14 governs execution
+     capability, not output content; sanitization is carved (T-023).
 7. **`node:sqlite` is experimental on Node 22** — first use emits
    `ExperimentalWarning: SQLite is an experimental feature and might change at any
    time` on stderr (benign), and the API may churn across Node minors. Named

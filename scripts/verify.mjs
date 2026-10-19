@@ -575,6 +575,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.20: role capability restriction (T-023) ----------
+section('Gate 1.20 — role capability restriction (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-capabilities.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'capabilities self-check exit 0')
+} catch (e) {
+  fail(`capabilities self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
