@@ -575,6 +575,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.20: role capability restriction (T-023) ----------
+section('Gate 1.20 — role capability restriction (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-capabilities.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'capabilities self-check exit 0')
+} catch (e) {
+  fail(`capabilities self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
@@ -591,8 +601,19 @@ const skeletonArgs = [
   '--run-root', verifyRoot.replace(/\//g, '\\'),
 ]
 console.log('$ tsx src/cli.ts', skeletonArgs.slice(3).join(' '))
+// The outer ceiling bounds CI; it must never preempt the runner's OWN verdict
+// machinery (T-023 review round 1, VERIFICATION.md Known issue #12): the
+// runner's per-worker budget is --timeout-min (default 15, src/cli.ts) per
+// attempt, resolved by the T-011 verified tree kill into a FAILED candidate
+// verdict, and the planner/reviewer calls carry the same per-call budget.
+// Realistic stall path = planner (~1 min) + worker runner-timeout (15 min) +
+// gates/summary ⇒ ~17 min; 20 min gives margin while still reaping a
+// genuinely stuck run. Historical happy path is 3–5 min, unchanged. At the
+// previous 8-min ceiling a single silent worker SIGTERM'd the whole run
+// before the runner could produce its verdict — an uninformative red that
+// also skips report writing and disposal (stale worktrees, branches, lock).
 try {
-  run(process.execPath, skeletonArgs, { cwd: root, stdio: 'inherit', timeout: 8 * 60_000 })
+  run(process.execPath, skeletonArgs, { cwd: root, stdio: 'inherit', timeout: 20 * 60_000 })
 } catch (e) {
   fail(`skeleton run failed: ${e.status ?? e.signal ?? e.message}`)
   finish()

@@ -17,7 +17,19 @@ import { runChildWithTimeout } from './run-with-timeout.js'
  * the verified process-tree kill at expiry, the exit wait — lives in
  * `runChildWithTimeout` (src/worker/run-with-timeout.ts, pinned token-free
  * by Gate 1.12 S4). This file keeps only the harness specifics: bin path,
- * `run -m <model>` args, and the PWD/OLDPWD pinning.
+ * `run -m <model>` args, the execution-policy translation (T-023), and the
+ * PWD/OLDPWD pinning.
+ *
+ * T-023 (spec §14): a non-'worktree-write' `executionPolicy` translates to
+ * the OpenCode built-in plan agent (`--agent plan`), verified first-hand
+ * against the vendored opencode-ai 1.19.3: "Plan mode. Disallows all edit
+ * tools." with permission rules `edit * → deny` (narrow plan-file allows).
+ * The agent name is adapter-internal harness vocabulary — the engine stays
+ * harness-agnostic (decisions.md 2026-10-10); there is deliberately no
+ * restricted-agent CLI flag (T-023 carve). An adapter that cannot honor a
+ * non-'worktree-write' policy must refuse the dispatch at spawn time, never
+ * silently downgrade (§14.3:1039) — this one honors both restricted
+ * postures, so nothing is refused.
  */
 export class OpenCodeWorker implements WorkerAdapter {
   readonly id = 'opencode'
@@ -26,8 +38,15 @@ export class OpenCodeWorker implements WorkerAdapter {
 
   async execute(req: WorkerExecutionRequest): Promise<WorkerResult> {
     const started = Date.now()
-    const args = ['run', '-m', req.model, req.prompt]
-    appendLog(req.logPath, `$ opencode run -m ${req.model} <prompt: ${req.prompt.length} chars>\n`)
+    // Absent policy ≡ 'worktree-write' (the pre-T-023 shape): existing
+    // request sites and fake adapters compile and behave unchanged.
+    const policy = req.executionPolicy ?? 'worktree-write'
+    const args = policy === 'worktree-write'
+      ? ['run', '-m', req.model, req.prompt]
+      : ['run', '--agent', 'plan', '-m', req.model, req.prompt]
+    // The log line reflects the ACTUAL argv (prompt elided), so
+    // worker.log / planner.log / reviewer.log record the restriction.
+    appendLog(req.logPath, `$ opencode ${args.slice(0, -1).join(' ')} <prompt: ${req.prompt.length} chars>\n`)
 
     const child = spawn(this.binPath, args, {
       cwd: req.cwd,
