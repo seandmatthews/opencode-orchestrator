@@ -1,24 +1,28 @@
 // Probe-layer self-check (Gate 1.15, fast tier, T-015; extended in place by
-// T-018 — the benchmark probe — and T-019 — the screenshot probe) — run
-// under tsx:
+// T-018 — the benchmark probe — T-019 — the screenshot probe — and T-024 —
+// the web/server probe) — run under tsx:
 //   node node_modules/tsx/dist/cli.mjs scripts/check-probe.mjs
 // Three legs, zero model tokens (the tickets' Verification sections):
 //   1. contract fixtures — the EvidenceBundle validator's accept/refuse faces
-//      and parseJobsSpec's probes wiring, including the benchmark `repeats`
-//      and screenshot `capture` validation (the Gate 0.5 hand-built-input
-//      pattern: no pipeline, no subprocess),
+//      and parseJobsSpec's probes wiring, including the benchmark `repeats`,
+//      screenshot `capture`, and web `url` validation (the Gate 0.5
+//      hand-built-input pattern: no pipeline, no subprocess),
 //   2. direct token-free CommandProbe/TestProbe/BenchmarkProbe/
-//      ScreenshotProbe executions against a fresh demo-target fixture
-//      (scripts/demo-target.mjs, Gate 1) and temp TAP/screenshot fixtures in
-//      the verify sandbox — real list-form spawns, real process-table
-//      assertions on the timeout tree kill (the Gate 1.12 style), and for
-//      the benchmark probe the quantitative measurement invariants (exactly
-//      N run-* durations, nearest-rank min/median/p95 recomputed in this
-//      check and compared exactly, the 'report'-kind results artifact); the
-//      screenshot probe's capture target is the checked-in tiny valid PNG
-//      under scripts/fixtures/ (each leg's capture command copies it into
-//      the workspace — list-form — so no capture technology is a dependency
-//      of any pin),
+//      ScreenshotProbe/WebProbe executions against a fresh demo-target
+//      fixture (scripts/demo-target.mjs, Gate 1) and temp TAP/screenshot/web
+//      fixtures in the verify sandbox — real list-form spawns, real
+//      process-table assertions on the timeout tree kill (the Gate 1.12
+//      style), and for the benchmark probe the quantitative measurement
+//      invariants (exactly N run-* durations, nearest-rank min/median/p95
+//      recomputed in this check and compared exactly, the 'report'-kind
+//      results artifact); the screenshot probe's capture target is the
+//      checked-in tiny valid PNG under scripts/fixtures/ (each leg's capture
+//      command copies it into the workspace — list-form — so no capture
+//      technology is a dependency of any pin); the web probe's legs run
+//      against zero-dependency node:http fixture servers generated in the
+//      sandbox per leg (write-and-run, the demo-target pattern — no server
+//      exists in any checked-in fixture), each bound to a free port this
+//      check picks (ports are machine-global — the documented limitation),
 //   3. a token-free end-to-end --jobs drive of runSkeleton with a FAKE
 //      WorkerAdapter and fake gates (the Gate 1.8/1.10 pattern,
 //      scripts/check-scheduler.mjs) against throwaway fixture repos,
@@ -28,9 +32,19 @@
 //      job still passes; a failing-gates/passing-probe job still fails).
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer as netCreateServer } from 'node:net'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { MIN_PNG_BYTES, PNG_MAGIC, createProbe, evidenceBundlePath, parseTapSummary, validateEvidenceBundle } from '../src/probe.ts'
+import {
+  MIN_PNG_BYTES,
+  PNG_MAGIC,
+  WEB_PROBE_MAX_BODY_BYTES,
+  WEB_PROBE_SNIPPET_BYTES,
+  createProbe,
+  evidenceBundlePath,
+  parseTapSummary,
+  validateEvidenceBundle,
+} from '../src/probe.ts'
 import { parseJobsSpec } from '../src/scheduler.ts'
 import { runSkeleton } from '../src/runner.ts'
 import { WorktreeProvider } from '../src/workspace/worktree.ts'
@@ -101,6 +115,19 @@ function sweep(pid) {
     // Already dead — fine.
   }
 }
+
+// A free loopback port for a web-probe fixture server (T-024): `url` is
+// operator-chosen and ports are machine-global (the documented limitation),
+// so each leg's server must bind a port nothing else holds. The classic
+// bind-then-close race is acceptable in this throwaway sandbox.
+const freePort = () => new Promise((resolve, reject) => {
+  const srv = netCreateServer()
+  srv.once('error', reject)
+  srv.listen(0, '127.0.0.1', () => {
+    const { port } = srv.address()
+    srv.close(() => resolve(port))
+  })
+})
 
 // A direct-execution workspace: the Probe seam binds the repo's
 // WorkspaceLease shape (src/types.ts); a direct call needs no git.
@@ -372,8 +399,39 @@ async function main() {
       }).jobs[0]?.probes, [
         { id: 'shot-check', type: 'screenshot', command: { exe: 'node', args: ['cap.js'] }, capture: 'shots/out.png' },
       ]))
-    t('P2: a genuinely-unknown probe type is refused with the updated message (the example re-adjusted to a type still unknown at this landing — the T-018 coordination note)',
-      throwsWith(base([{ id: 'x', type: 'godot', command: { exe: 'node', args: [] } }]), 'type must be "command", "test", "benchmark", or "screenshot"'))
+    // T-024 flip (recorded in the ticket as this change-set's only
+    // intentional invalidation of an existing assertion): Gate 1.15's P2 leg
+    // actively pinned the unknown-type refusal message (`type must be
+    // "command", "test", "benchmark", or "screenshot"` — the message T-019's
+    // landing left behind, with 'godot' as the unknown-type example since
+    // T-019). The web probe now EXISTS, so the pin becomes positive coverage
+    // (a web probe with `url` parses and is preserved verbatim) plus refusal
+    // of a genuinely-unknown type with the updated message; 'godot' stays
+    // genuinely unknown and remains the example — only the message string
+    // changed. Net strictness increases (the T-013 flip precedent); no other
+    // existing assertion is weakened.
+    t('P2: a web probe with url validates and is preserved verbatim (the T-024 flip: web moved from unknown-type territory to pinned type)',
+      eq(parseJobsSpec({
+        phases: [{ id: 'p' }],
+        jobs: [{ id: 'j1', phase: 'p', brief: 'b', probes: [
+          { id: 'web-check', type: 'web', command: { exe: 'node', args: ['serve.js'] }, url: 'http://127.0.0.1:8080/' },
+        ] }],
+      }).jobs[0]?.probes, [
+        { id: 'web-check', type: 'web', command: { exe: 'node', args: ['serve.js'] }, url: 'http://127.0.0.1:8080/' },
+      ]))
+    t('P2: a genuinely-unknown probe type is refused with the updated message (the example stays a type still unknown at this landing — the T-018/T-019 coordination chain)',
+      throwsWith(base([{ id: 'x', type: 'godot', command: { exe: 'node', args: [] } }]), 'type must be "command", "test", "benchmark", "screenshot", or "web"'))
+    t('P2: url validation on a web probe — missing, empty, non-string, non-http(s) scheme, and URL junk all refused naming the offense',
+      throwsWith(base([{ id: 'x', type: 'web', command: { exe: 'node', args: [] } }]), 'url must be a non-empty http(s) URL')
+      && throwsWith(base([{ id: 'x', type: 'web', command: { exe: 'node', args: [] }, url: '' }]), 'url must be a non-empty http(s) URL')
+      && throwsWith(base([{ id: 'x', type: 'web', command: { exe: 'node', args: [] }, url: 8080 }]), 'url must be a non-empty http(s) URL')
+      && throwsWith(base([{ id: 'x', type: 'web', command: { exe: 'node', args: [] }, url: 'ftp://host/' }]), 'url must be an http:// or https:// URL')
+      && throwsWith(base([{ id: 'x', type: 'web', command: { exe: 'node', args: [] }, url: 'not-a-url' }]), 'url must be an http:// or https:// URL'))
+    t('P2: url on a command/test/benchmark/screenshot probe is refused — the field exists only where it means something',
+      throwsWith(base([{ id: 'x', type: 'command', command: { exe: 'node', args: [] }, url: 'http://host/' }]), 'url is only valid on a web probe')
+      && throwsWith(base([{ id: 'x', type: 'test', command: { exe: 'node', args: [] }, url: 'http://host/' }]), 'url is only valid on a web probe')
+      && throwsWith(base([{ id: 'x', type: 'benchmark', command: { exe: 'node', args: [] }, url: 'http://host/', repeats: 2 }]), 'url is only valid on a web probe')
+      && throwsWith(base([{ id: 'x', type: 'screenshot', command: { exe: 'node', args: [] }, url: 'http://host/', capture: 'a.png' }]), 'url is only valid on a web probe'))
     t('P2: capture validation on a screenshot probe — missing, empty, non-string, absolute, and ..-segment all refused naming the offense',
       throwsWith(base([{ id: 'x', type: 'screenshot', command: { exe: 'node', args: [] } }]), 'capture must be a non-empty workspace-relative path')
       && throwsWith(base([{ id: 'x', type: 'screenshot', command: { exe: 'node', args: [] }, capture: '' }]), 'capture must be a non-empty workspace-relative path')
@@ -631,6 +689,187 @@ async function main() {
     t("P3: screenshot timeout — kill evidence is on the GateResult: a verified kill leaves cleanupFailures absent, an unproven one records loud CLEANUP FAIL lines",
       shotTimedOut.gateResults[0]?.cleanupFailures === undefined
       || (Array.isArray(shotTimedOut.gateResults[0]?.cleanupFailures) && shotTimedOut.gateResults[0]?.cleanupFailures.every((l) => l.startsWith('CLEANUP FAIL'))))
+
+    // T-024: the web probe — direct token-free executions against
+    // zero-dependency node:http fixture servers generated in the sandbox per
+    // leg (the write-and-run demo-target pattern; no server exists in any
+    // checked-in fixture). Each leg's launch command IS its server instance,
+    // bound to a free port this check picks (ports are machine-global — the
+    // documented limitation), and the probe's verified tree kill is what
+    // reaps it; every leg ends with the P4 sweep fallback over the pids its
+    // server printed.
+    const webFx = join(sandbox, 'web-fx')
+    mkdirSync(webFx, { recursive: true })
+    const webArtifacts = join(webFx, 'artifacts')
+    const webEnv = directEnv(webArtifacts)
+    const webWs = directLease(webFx)
+    const serverPidsOf = (bundle) => {
+      const log = bundle.artifacts.find((a) => a.kind === 'log')
+      return (log !== undefined && existsSync(log.path))
+        ? [...read(log.path).matchAll(/SERVER_PID=(\d+)/g)].map((m) => Number(m[1]))
+        : []
+    }
+    const assertTreeDead = async (label, pids) => {
+      let allDead = pids.length > 0
+      for (const pid of pids) {
+        const dead = await untilDead(pid)
+        if (!dead) sweep(pid)
+        allDead = allDead && dead
+      }
+      t(label, allDead)
+    }
+    const responseOf = (bundle) => {
+      const ref = bundle.artifacts.find((a) => a.kind === 'report')
+      return {
+        ref,
+        body: ref !== undefined && existsSync(ref.path) ? JSON.parse(read(ref.path)) : null,
+      }
+    }
+    // The happy/bounds fixture server: announces SERVER_PID, serves a body
+    // per path ('/' small, '/big' 5000 chars, '/huge' 1.5 MiB).
+    writeFileSync(join(webFx, 'web-ok-server.js'), [
+      "const http = require('node:http')",
+      "const bodies = { '/': 'web-probe-hello', '/big': 'A'.repeat(5000), '/huge': 'B'.repeat(1572864) }",
+      "http.createServer((req, res) => {",
+      "  const body = bodies[req.url] ?? 'web-probe-hello'",
+      "  res.writeHead(200, { 'content-type': 'text/plain' })",
+      "  res.end(body)",
+      "}).listen(Number(process.argv[2]), '127.0.0.1', () => console.log('SERVER_PID=' + process.pid))",
+    ].join('\n') + '\n')
+
+    const happyPort = await freePort()
+    const webHappy = await runDirect({ id: 'web-check', type: 'web', command: { exe: process.execPath, args: ['web-ok-server.js', String(happyPort)] }, url: `http://127.0.0.1:${happyPort}/`, timeoutMs: 8000 }, webWs, webEnv)
+    const { ref: webHappyResp, body: webHappyBody } = responseOf(webHappy)
+    t('P3: WebProbe happy path — success true, http status 200, ready duration (ms) + body bytes recorded, body snippet equals the known body, one GateResult entry (passed; exitCode null — the server was tree-killed at teardown, never exited on its own)',
+      webHappy.success === true
+      && webHappy.measurements.some((m) => m.name === 'http status' && m.value === 200)
+      && webHappy.measurements.some((m) => m.name === 'ready duration' && m.unit === 'ms' && m.value >= 0)
+      && webHappy.measurements.some((m) => m.name === 'body bytes' && m.unit === 'bytes' && m.value === 'web-probe-hello'.length)
+      && webHappy.gateResults.length === 1
+      && webHappy.gateResults[0]?.passed === true
+      && webHappy.gateResults[0]?.exitCode === null)
+    t('P3: the web response artifact <probeId>.response.json (kind report) — on disk under <artifactsDir>/probes/<candidateId>/, parses, carries {url, status, contentType, bodySnippet, bodyBytes}',
+      webHappyResp !== undefined && webHappyResp.kind === 'report' && webHappyResp.name === 'web-check.response.json'
+      && webHappyResp.path === join(webArtifacts, 'probes', 'direct', 'web-check.response.json')
+      && webHappyResp.sizeBytes > 0
+      && webHappyBody !== null
+      && webHappyBody.url === `http://127.0.0.1:${happyPort}/`
+      && webHappyBody.status === 200
+      && webHappyBody.contentType === 'text/plain'
+      && webHappyBody.bodySnippet === 'web-probe-hello'
+      && webHappyBody.bodyBytes === 'web-probe-hello'.length)
+    t('P3: the happy web bundle passes the validator and its .log carries the launch banner, the poll section, and the capture outcome',
+      validateEvidenceBundle(JSON.parse(JSON.stringify(webHappy))).success === true
+      && webHappy.artifacts[0]?.kind === 'log' && webHappy.artifacts[0]?.sizeBytes > 0
+      && read(webHappy.artifacts[0]?.path).includes('=== web probe launch ===')
+      && read(webHappy.artifacts[0]?.path).includes('=== readiness poll:')
+      && read(webHappy.artifacts[0]?.path).includes('=== captured ==='))
+    await assertTreeDead('P3: web teardown pinned on the success path — the server tree verified dead on the real process table after run() returns', serverPidsOf(webHappy))
+
+    // The bounds, pinned exactly (both still success true — the bounds bound
+    // the evidence, never judge it).
+    const bigPort = await freePort()
+    const webBig = await runDirect({ id: 'web-big', type: 'web', command: { exe: process.execPath, args: ['web-ok-server.js', String(bigPort)] }, url: `http://127.0.0.1:${bigPort}/big`, timeoutMs: 8000 }, webWs, webEnv)
+    const { body: webBigBody } = responseOf(webBig)
+    t(`P3: the body snippet is bounded at WEB_PROBE_SNIPPET_BYTES (${WEB_PROBE_SNIPPET_BYTES}) — a 5000-char body records exactly that many characters`,
+      webBig.success === true
+      && webBigBody !== null && webBigBody.bodySnippet.length === WEB_PROBE_SNIPPET_BYTES
+      && webBigBody.bodyBytes === 5000
+      && webBig.measurements.some((m) => m.name === 'body bytes' && m.value === 5000))
+    await assertTreeDead('P3: web-big teardown — its server instance verified dead on the real process table', serverPidsOf(webBig))
+    const hugePort = await freePort()
+    const webHuge = await runDirect({ id: 'web-huge', type: 'web', command: { exe: process.execPath, args: ['web-ok-server.js', String(hugePort)] }, url: `http://127.0.0.1:${hugePort}/huge`, timeoutMs: 8000 }, webWs, webEnv)
+    const { body: webHugeBody } = responseOf(webHuge)
+    t(`P3: the body read is capped at WEB_PROBE_MAX_BODY_BYTES (${WEB_PROBE_MAX_BODY_BYTES}) — a 1.5 MiB body records exactly that many bytes read, the snippet bounded too`,
+      webHuge.success === true
+      && webHugeBody !== null && webHugeBody.bodyBytes === WEB_PROBE_MAX_BODY_BYTES
+      && webHugeBody.bodySnippet.length === WEB_PROBE_SNIPPET_BYTES
+      && webHuge.measurements.some((m) => m.name === 'body bytes' && m.value === WEB_PROBE_MAX_BODY_BYTES))
+    await assertTreeDead('P3: web-huge teardown — its server instance verified dead on the real process table', serverPidsOf(webHuge))
+
+    // Failure faces, each success:false never a pass.
+    writeFileSync(join(webFx, 'web-500-server.js'), [
+      "const http = require('node:http')",
+      "http.createServer((req, res) => { res.writeHead(500, { 'content-type': 'text/plain' }); res.end('server-error') }).listen(Number(process.argv[2]), '127.0.0.1', () => console.log('SERVER_PID=' + process.pid))",
+    ].join('\n') + '\n')
+    const statusPort = await freePort()
+    const webStatus = await runDirect({ id: 'web-status', type: 'web', command: { exe: process.execPath, args: ['web-500-server.js', String(statusPort)] }, url: `http://127.0.0.1:${statusPort}/`, timeoutMs: 8000 }, webWs, webEnv)
+    const { body: webStatusBody } = responseOf(webStatus)
+    t('P3: web wrong-status face — a 500 server: success false, error names the non-2xx status, the http status measurement STILL records 500 (readiness was reached — ready duration too), the response artifact records it',
+      webStatus.success === false
+      && typeof webStatus.error === 'string' && webStatus.error.includes('500')
+      && webStatus.measurements.some((m) => m.name === 'http status' && m.value === 500)
+      && webStatus.measurements.some((m) => m.name === 'ready duration' && m.unit === 'ms')
+      && webStatus.gateResults[0]?.passed === false
+      && webStatusBody !== null && webStatusBody.status === 500)
+    await assertTreeDead('P3: web-status teardown — its server instance verified dead on the real process table', serverPidsOf(webStatus))
+
+    writeFileSync(join(webFx, 'web-empty-server.js'), [
+      "const http = require('node:http')",
+      "http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('') }).listen(Number(process.argv[2]), '127.0.0.1', () => console.log('SERVER_PID=' + process.pid))",
+    ].join('\n') + '\n')
+    const emptyPort = await freePort()
+    const webEmpty = await runDirect({ id: 'web-empty', type: 'web', command: { exe: process.execPath, args: ['web-empty-server.js', String(emptyPort)] }, url: `http://127.0.0.1:${emptyPort}/`, timeoutMs: 8000 }, webWs, webEnv)
+    const { body: webEmptyBody } = responseOf(webEmpty)
+    t('P3: web empty-body face — a 200 server with a zero-byte body: success false, error names the empty body, body bytes 0 recorded (evidence about failures is evidence), the response artifact carries bodyBytes 0 and an empty snippet',
+      webEmpty.success === false
+      && typeof webEmpty.error === 'string' && webEmpty.error.includes('empty')
+      && webEmpty.measurements.some((m) => m.name === 'http status' && m.value === 200)
+      && webEmpty.measurements.some((m) => m.name === 'body bytes' && m.value === 0)
+      && webEmpty.gateResults[0]?.passed === false
+      && webEmptyBody !== null && webEmptyBody.bodyBytes === 0 && webEmptyBody.bodySnippet === '')
+    await assertTreeDead('P3: web-empty teardown — its server instance verified dead on the real process table', serverPidsOf(webEmpty))
+
+    const earlyPort = await freePort()
+    const webEarly = await runDirect({ id: 'web-early', type: 'web', command: { exe: process.execPath, args: ['-e', 'process.exit(3)'] }, url: `http://127.0.0.1:${earlyPort}/`, timeoutMs: 8000 }, webWs, webEnv)
+    t('P3: web target-exits-early face — the launch exits 3 without serving: success false naming the exit, zero measurements, no response artifact, exitCode 3 on the GateResult, nothing-to-kill recorded honestly with NO cleanupFailures fabricated',
+      webEarly.success === false
+      && typeof webEarly.error === 'string' && webEarly.error.includes('exited before readiness') && webEarly.error.includes('3')
+      && webEarly.measurements.length === 0
+      && webEarly.artifacts.every((a) => a.kind === 'log')
+      && webEarly.gateResults[0]?.exitCode === 3
+      && webEarly.gateResults[0]?.cleanupFailures === undefined
+      && read(webEarly.artifacts[0]?.path).includes('nothing to kill'))
+
+    // Never-ready: a sleeper launch that binds nothing — deadline expiry; the
+    // spawned tree (parent + child, the P4 sleeper shape) is what the tree
+    // kill must reap.
+    writeFileSync(join(webFx, 'web-sleeper.js'), [
+      "const { spawn } = require('node:child_process')",
+      "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { windowsHide: true })",
+      "console.log('PARENT_PID=' + process.pid)",
+      "console.log('CHILD_PID=' + child.pid)",
+      'setInterval(() => {}, 1000)',
+    ].join('\n') + '\n')
+    const neverPort = await freePort()
+    const webTimeoutMs = 1200
+    const webNever = await runDirect({ id: 'web-never', type: 'web', command: { exe: process.execPath, args: ['web-sleeper.js'] }, url: `http://127.0.0.1:${neverPort}/`, timeoutMs: webTimeoutMs }, webWs, webEnv)
+    const neverLog = webNever.artifacts.find((a) => a.kind === 'log')
+    const neverPids = (neverLog !== undefined && existsSync(neverLog.path))
+      ? [...read(neverLog.path).matchAll(/(?:PARENT|CHILD)_PID=(\d+)/g)].map((m) => Number(m[1]))
+      : []
+    t('P3: web never-ready face — a sleeper that binds nothing: deadline expiry, success false, error names the readiness timeout with the last poll error (ECONNREFUSED), exitCode null, durationMs >= timeoutMs, zero measurements (no response captured — never a pass)',
+      webNever.success === false
+      && typeof webNever.error === 'string' && webNever.error.includes('readiness deadline expired') && webNever.error.includes(String(webTimeoutMs)) && webNever.error.includes('ECONNREFUSED')
+      && webNever.gateResults.length === 1
+      && webNever.gateResults[0]?.exitCode === null
+      && webNever.gateResults[0]?.durationMs >= webTimeoutMs
+      && webNever.measurements.length === 0
+      && webNever.artifacts.every((a) => a.kind === 'log'))
+    t('P3: web never-ready — the readiness poll really polled (multiple failed attempts logged inside the ONE timeout budget)',
+      neverLog !== undefined && existsSync(neverLog.path)
+      && (read(neverLog.path).match(/poll attempt \d+ failed/g) ?? []).length >= 2)
+    {
+      let parentDead = false
+      let childDead = false
+      if (neverPids[0] !== undefined) { parentDead = await untilDead(neverPids[0]); if (!parentDead) sweep(neverPids[0]) }
+      if (neverPids[1] !== undefined) { childDead = await untilDead(neverPids[1]); if (!childDead) sweep(neverPids[1]) }
+      t('P3: web never-ready — the spawned tree is verified dead on the real process table (parent + child); the tree kill is what reaps a launched server',
+        neverPids.length === 2 && parentDead && childDead)
+      t("P3: web never-ready — kill evidence is on the GateResult entry: a verified kill leaves cleanupFailures absent, an unproven one records loud CLEANUP FAIL lines",
+        webNever.gateResults[0]?.cleanupFailures === undefined
+        || (Array.isArray(webNever.gateResults[0]?.cleanupFailures) && webNever.gateResults[0]?.cleanupFailures.every((l) => l.startsWith('CLEANUP FAIL'))))
+    }
   }
 
   // ---------- P4: TestProbe TAP contract on temp TAP fixtures ----------
@@ -756,10 +995,17 @@ async function main() {
   // ---------- P5: evidence emission in a real pipeline (--jobs drives) ----------
   {
     // Scenario A: passing gates; one job with a PASSING and a FAILING probe,
-    // a PASSING benchmark probe (T-018), and a PASSING screenshot probe
-    // (T-019); its sibling job carries a FAILING benchmark and a FAILING
-    // screenshot — survival must stay untouched by probe outcomes.
+    // a PASSING benchmark probe (T-018), a PASSING screenshot probe
+    // (T-019), and a PASSING web probe (T-024); its sibling job carries a
+    // FAILING benchmark, a FAILING screenshot, and a FAILING web probe —
+    // survival must stay untouched by probe outcomes.
     const a = makeRepo('e2e')
+    // T-024 e2e servers: inline `node -e` sources traveling as argv
+    // (token-free), each bound to a free port this check picks.
+    const e2ePortA = await freePort()
+    const e2ePortB = await freePort()
+    const e2eWebServer = (port, status, body) =>
+      `require('node:http').createServer((q,s)=>{s.writeHead(${status},{'content-type':'text/plain'});s.end('${body}')}).listen(${port},'127.0.0.1',()=>console.log('SERVER_PID='+process.pid))`
     const specA = {
       phases: [{ id: 'p' }],
       jobs: [
@@ -770,6 +1016,7 @@ async function main() {
             { id: 'tap-fail-check', type: 'test', command: { exe: 'node', args: ['tap-fail.js'] } },
             { id: 'bench-check', type: 'benchmark', command: { exe: 'node', args: ['build.js'] }, repeats: 2 },
             copyCapture('shot-check', 'shot-e2e.png'),
+            { id: 'web-check', type: 'web', command: { exe: process.execPath, args: ['-e', e2eWebServer(e2ePortA, 200, 'e2e-web-ok')] }, url: `http://127.0.0.1:${e2ePortA}/`, timeoutMs: 8000 },
           ],
         },
         {
@@ -778,6 +1025,7 @@ async function main() {
             { id: 'tap-pass-check', type: 'test', command: { exe: 'node', args: ['tap-pass.js'] } },
             { id: 'bench-fail-check', type: 'benchmark', command: { exe: 'node', args: ['-e', "console.log('slow-boom'); process.exit(9)"] }, repeats: 1 },
             { id: 'shot-fail-check', type: 'screenshot', capture: 'never.png', command: { exe: process.execPath, args: ['-e', 'process.exit(7)'] } },
+            { id: 'web-fail-check', type: 'web', command: { exe: process.execPath, args: ['-e', e2eWebServer(e2ePortB, 500, 'e2e-web-bad')] }, url: `http://127.0.0.1:${e2ePortB}/`, timeoutMs: 8000 },
           ],
         },
       ],
@@ -787,14 +1035,15 @@ async function main() {
     const cA = rA.report.candidates.find((c) => c.id === 'job-a')
     const cB = rA.report.candidates.find((c) => c.id === 'job-b')
     t('P5: a passing-gates/failing-probe job still PASSES — probe results never enter a verdict',
-      cA?.passedAllGates === true && cA?.gates.every((g) => g.passed) === true && cA?.probes?.length === 4)
-    t('P5: the report carries per-probe summaries {probeId, scenarioId, success, durationMs, bundlePath} in spec order (benchmark + screenshot included, T-018/T-019)',
+      cA?.passedAllGates === true && cA?.gates.every((g) => g.passed) === true && cA?.probes?.length === 5)
+    t('P5: the report carries per-probe summaries {probeId, scenarioId, success, durationMs, bundlePath} in spec order (benchmark + screenshot + web included, T-018/T-019/T-024)',
       eq(cA?.probes?.map((p) => [p.probeId, p.scenarioId, p.success]),
-        [['build-check', 'build-check', true], ['tap-fail-check', 'tap-fail-check', false], ['bench-check', 'bench-check', true], ['shot-check', 'shot-check', true]])
+        [['build-check', 'build-check', true], ['tap-fail-check', 'tap-fail-check', false], ['bench-check', 'bench-check', true], ['shot-check', 'shot-check', true], ['web-check', 'web-check', true]])
       && typeof cA?.probes?.[0]?.durationMs === 'number'
       && typeof cA?.probes?.[1]?.durationMs === 'number'
       && typeof cA?.probes?.[2]?.durationMs === 'number'
-      && typeof cA?.probes?.[3]?.durationMs === 'number')
+      && typeof cA?.probes?.[3]?.durationMs === 'number'
+      && typeof cA?.probes?.[4]?.durationMs === 'number')
     assertBundleCorrespondence('P5: every probes[] entry names an on-disk bundle that parses, passes the validator, and agrees with the summary (probes[] <-> bundlePath)', rA.report, rA.artifactsDir)
     const bundleA1 = JSON.parse(read(join(rA.artifactsDir, 'probes', 'job-a', 'build-check.json')))
     const bundleA2 = JSON.parse(read(join(rA.artifactsDir, 'probes', 'job-a', 'tap-fail-check.json')))
@@ -812,9 +1061,9 @@ async function main() {
       && bundleB.measurements.some((m) => m.name === 'tests' && m.value === 2)
       && bundleB.measurements.some((m) => m.name === 'fail' && m.value === 0))
     t('P5: the on-disk report.json carries the probes[] arrays (the artifact the store and humans read)',
-      JSON.parse(read(join(rA.artifactsDir, 'report.json'))).candidates.find((c) => c.id === 'job-a')?.probes?.length === 4)
+      JSON.parse(read(join(rA.artifactsDir, 'report.json'))).candidates.find((c) => c.id === 'job-a')?.probes?.length === 5)
     t('P5: a passing job\'s probes[] record each outcome while survival stays untouched',
-      cB?.passedAllGates === true && cB?.probes?.length === 3 && cB?.probes?.[0]?.success === true)
+      cB?.passedAllGates === true && cB?.probes?.length === 4 && cB?.probes?.[0]?.success === true)
 
     // T-018: the benchmark probe in a real pipeline — bundle correspondence,
     // validator-clean contents, the report artifact, and survival untouched.
@@ -868,6 +1117,30 @@ async function main() {
       && cB?.probes?.[2]?.success === false
       && validateEvidenceBundle(shotFailBundleB).success === false
       && shotFailBundleB.error === 'capture command exited with code 7')
+
+    // T-024: the web probe in a real pipeline — bundle correspondence, the
+    // response artifact under the artifacts dir (NEVER inside the worktree —
+    // the durable-copy rule; the workspace is disposed after the attempt
+    // loop), and survival untouched by the web outcome.
+    const webBundleA = JSON.parse(read(join(rA.artifactsDir, 'probes', 'job-a', 'web-check.json')))
+    const webRespA = webBundleA.artifacts?.find((a2) => a2.kind === 'report')
+    t('P5: the web bundle is validator-clean with one GateResult entry, its success agrees with the summary, and its response artifact is on disk under the artifacts dir — NEVER inside the worktree — parsing to the captured values',
+      validateEvidenceBundle(webBundleA).success === true
+      && webBundleA.success === true
+      && cA?.probes?.some((p) => p.probeId === 'web-check' && p.success === true)
+      && webBundleA.measurements.some((m) => m.name === 'http status' && m.value === 200)
+      && webRespA !== undefined
+      && webRespA.name === 'web-check.response.json'
+      && webRespA.path === join(rA.artifactsDir, 'probes', 'job-a', 'web-check.response.json')
+      && typeof worktreeA === 'string' && worktreeA.length > 0 && !webRespA.path.startsWith(worktreeA)
+      && existsSync(webRespA.path)
+      && JSON.parse(read(webRespA.path)).bodySnippet === 'e2e-web-ok')
+    const webFailBundleB = JSON.parse(read(join(rA.artifactsDir, 'probes', 'job-b', 'web-fail-check.json')))
+    t('P5: a passing-gates/FAILING-web job still PASSES — the web outcome never enters a verdict',
+      cB?.passedAllGates === true
+      && cB?.probes?.[3]?.success === false
+      && validateEvidenceBundle(webFailBundleB).success === false
+      && typeof webFailBundleB.error === 'string' && webFailBundleB.error.includes('500'))
 
     // Scenario B: a FAILING gate; its probes must still run and record
     // (evidence about failures is evidence).

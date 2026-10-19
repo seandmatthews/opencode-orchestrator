@@ -1,6 +1,6 @@
 # T-024 — Web/server probe: launch target → bounded readiness poll → HTTP status + body-snippet evidence → verified teardown (spec §12.1 territory, stage-4 breadth)
 
-**Status:** proposed
+**Status:** done
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 2
 **Depends on:** T-015 (done 2026-10-17 — the Probe seam + EvidenceBundle contract this extends). **T-016 (done 2026-10-17) is an ordering note, not a build dependency**: `probe_runs`/`ARTIFACT_CREATED` persistence landed type-agnostically (schema v5; the extended Gate 1.6 pins one `probe_runs` row per summary regardless of probe type, VERIFICATION.md:229-233), so a web bundle persists through it with zero store code — web is the consumer T-016:83-84 already named successor probe types to be. **T-018/T-019 (both done 2026-10-17) are precedent, not code dependencies**: this ticket inherits their Gate 1.15 flip discipline and extends the same pins; T-019's capture semantics are *not* called here (screenshot integration is carved, see Does NOT claim).
@@ -235,7 +235,7 @@ ALL GREEN", exit 0** — the pins this ticket extends are green today.
 
 ## Acceptance criteria
 
-- [ ] `ProbeType` includes `'web'`; `WebProbe` exists behind the landed Probe
+- [x] `ProbeType` includes `'web'`; `WebProbe` exists behind the landed Probe
       seam with the documented contract above (list-form launch without
       awaiting exit; bounded readiness poll deadline-bound by the single
       `timeoutMs` budget; `http status`/`body bytes`/`ready duration`
@@ -245,18 +245,18 @@ ALL GREEN", exit 0** — the pins this ticket extends are green today.
       pass; **no threshold field, no verdict input**); zero model/harness
       knowledge in the module (decisions.md:11-15) — pinned by **Gate 0**
       (`tsc --noEmit`) plus the **Gate 1.15 P3** contract legs.
-- [ ] The parser accepts a web probe with `url` verbatim and refuses: a
+- [x] The parser accepts a web probe with `url` verbatim and refuses: a
       genuinely-unknown type with the updated message; missing/empty/
       non-string/non-http(s)-scheme `url` on a web probe; `url` on a
       command/test/benchmark/screenshot probe — pinned by **Gate 1.15 P2**
       (contract fixtures over `parseJobsSpec`, token-free).
-- [ ] **The scripts/check-probe.mjs:376 unknown-type message pin is
+- [x] **The scripts/check-probe.mjs:376 unknown-type message pin is
       explicitly flipped** (the message gains `"web"`; `'godot'` stays the
       example) in this change-set — recorded here as the change-set's only
       intentional invalidation of an existing assertion; no other existing
       check is weakened — pinned by the full fast tier, **`npm run verify`
       ALL GREEN** with the flipped Gate 1.15.
-- [ ] Happy path, token-free: the zero-dep `node:http` fixture server
+- [x] Happy path, token-free: the zero-dep `node:http` fixture server
       (generated in the sandbox, the demo-target pattern) → success true;
       `http status` 200; the body snippet equals the known body;
       `<probeId>.response.json` (kind `'report'`) on disk under
@@ -264,7 +264,7 @@ ALL GREEN", exit 0** — the pins this ticket extends are green today.
       the bundle passes `validateEvidenceBundle`; **the server tree verified
       dead on the real process table after `run()` returns** — pinned by
       **Gate 1.15 P3**.
-- [ ] Failure faces, each `success: false` never a pass: server 500 (the
+- [x] Failure faces, each `success: false` never a pass: server 500 (the
       status measurement still records 500); empty 200 body; target exiting
       before readiness (exit named in `error`); never-ready sleeper →
       deadline expiry, `error` names the readiness timeout, the spawned tree
@@ -272,14 +272,14 @@ ALL GREEN", exit 0** — the pins this ticket extends are green today.
       GateResult; every leg sweeps its fixture server (no process left
       alive) — pinned by **Gate 1.15 P3** (the P4 process-table pattern with
       sweep fallback; AGENTS.md #7 and #10).
-- [ ] Evidence emission in a real pipeline: a `--jobs` run carrying a web
+- [x] Evidence emission in a real pipeline: a `--jobs` run carrying a web
       probe writes its bundle under `<artifactsDir>/probes/<candidateId>/`,
       the report's `probes[]` names its `bundlePath` and agrees with the
       bundle, the response artifact exists on disk at report time **never
       inside the worktree**, and survival is untouched by the web-probe
       outcome (a passing-gates/failing-web-probe job still passes) — pinned
       by **Gate 1.15 P5** (the fake-WorkerAdapter `runSkeleton` drive).
-- [ ] Zero runner/CLI/report-shape/store drift: no `src/runner.ts`,
+- [x] Zero runner/CLI/report-shape/store drift: no `src/runner.ts`,
       `src/cli.ts`, `src/types.ts`, or `src/store/` edits (the pipeline is
       type-agnostic, src/runner.ts:554-556, :617-646; `ProbeRunSummary`
       src/types.ts:279-285; the verdict ladder byte-identical,
@@ -289,16 +289,16 @@ ALL GREEN", exit 0** — the pins this ticket extends are green today.
       `git diff --stat`: exactly `src/probe.ts`, `src/scheduler.ts`,
       `scripts/check-probe.mjs`, `VERIFICATION.md`, `docs/ROADMAP.md`,
       `README.md`, the ticket file + the index).
-- [ ] No new npm dependencies (decisions.md:6-10); the launch is a list-form
+- [x] No new npm dependencies (decisions.md:6-10); the launch is a list-form
       spawn through the new helper (never exec), the poll/capture on stdlib
       `fetch` — pinned by **Gate 0** and the package.json/package-lock.json
       diff-free change-set.
-- [ ] Docs extended in the same change-set: VERIFICATION.md's Gate 1.15
+- [x] Docs extended in the same change-set: VERIFICATION.md's Gate 1.15
       section (type list :1052-1053, carve list :1228-1232, the recorded
       flip), docs/ROADMAP.md:16's stage-4 row, README's `--jobs` probes doc
       (README.md:138-160) — pinned by **`npm run verify` ALL GREEN** with
       the updated sections present.
-- [ ] **Gate 2 NOT owed — recorded, not silently skipped** (the T-018:223-228
+- [x] **Gate 2 NOT owed — recorded, not silently skipped** (the T-018:223-228
       / T-019 trigger-analysis precedent, VERIFICATION.md:1016-1017): the
       change-set touches no `src/runner.ts`, no adapter, no gate code, no
       workspace handling, and no report shape — none of Gate 2's triggers;
@@ -352,3 +352,166 @@ process-table patterns) · scripts/demo-target.mjs:1-53 ·
 scripts/fixtures/ (report-real.json, tiny-1x1.png — no server fixture exists;
 this ticket generates its server in-sandbox) · package.json:22-24 (sole
 runtime dep `opencode-ai`) · README.md:138-160 (the `--jobs` probes doc).
+
+## Landed
+
+2026-10-18, lane branch `ticket/T-024-web-server-probe`.
+
+What changed:
+
+- **`src/probe.ts`** — `ProbeType` gains `'web'` (the docblock that called
+  Web a successor slice now names `web` landed and points Godot/Blender +
+  browser-automation Web proper at the successors); `EvidenceArtifactKind`
+  untouched — the response artifact reuses `'report'` (its second
+  producer). The module docblock gains the web-semantics block (the spec
+  defines no server-lifecycle probe anywhere — chosen and documented: the
+  launch-without-awaiting-exit lifecycle, the bounded readiness poll, the
+  first-connected-response capture, the every-path teardown, success =
+  launched AND ready within the deadline AND 2xx AND non-empty body, the
+  measurement/artifact policy, no verdict input, the two documented
+  limitations). `ScenarioSpec` gains `url?: string` carrying the
+  required-non-empty-http(s) contract in its docblock. New exported
+  constants, exact values fixed here and pinned by the gate:
+  `WEB_PROBE_POLL_INTERVAL_MS = 250`, `WEB_PROBE_MAX_BODY_BYTES =
+  1024 * 1024` (1 MiB), `WEB_PROBE_SNIPPET_BYTES = 2048`. New
+  `launchTarget` helper beside `executeProbeCommand` (the same block):
+  list-form `spawn` (never exec, AGENTS.md #4), `windowsHide`, cwd = the
+  workspace path, spawn refusal recorded on the returned handle via the
+  'error' event — never thrown — and the live `ChildProcess` returned
+  without awaiting exit; the caller owns teardown and never taskkills a
+  just-exited pid (the `executeProbeCommand` boundary rule, pid reuse).
+  Local helpers: `sleep`, `describePollError` (undici's `fetch failed`
+  surface carries the real cause — e.g. `connect ECONNREFUSED` — on
+  `error.cause`; the recorded last-poll-error includes it),
+  `readBodyCapped` (chunks accumulated only to the cap, the stream
+  cancelled past it, aborts not swallowed). New `responseArtifact` beside
+  `resultsArtifact`: `<probeId>.response.json`, kind `'report'`, body
+  `{probeId, scenarioId, url, status, contentType?, bodySnippet,
+  bodyBytes}`. New `WebProbe implements Probe`: launch → bounded readiness
+  poll of `url` (stdlib global `fetch`, zero new deps; one `timeoutMs`
+  budget from launch, every attempt aborted at it via AbortController,
+  `WEB_PROBE_POLL_INTERVAL_MS` between attempts; fail-fast the moment the
+  target exits before readiness) → the first poll response that CONNECTS
+  is the capture (status; body capped at `WEB_PROBE_MAX_BODY_BYTES`;
+  snippet bounded at `WEB_PROBE_SNIPPET_BYTES`) → teardown via
+  `killTreeVerified` on EVERY path while the target is live, unproven kill
+  outcomes on the GateResult's `cleanupFailures`, nothing-to-kill (spawn
+  refusal, already-exited target) recorded in the `.log` honestly, never
+  fabricated. Success = launched AND ready within the deadline AND 2xx AND
+  non-empty body; `error` names the first failed face; a probe that
+  captured no response is success:false, never a pass. Measurements:
+  `http status` (no unit — the captured status code), `body bytes`
+  (bytes), `ready duration` (ms), recorded whenever readiness was reached
+  even on later failure faces; none on capture-failed faces. One
+  GateResult entry for the whole lifecycle (exitCode = the target's own
+  exit when it exited before teardown, null otherwise; durationMs spans
+  launch through teardown's conclusion; outputTail = the probe log's
+  tail). A directly constructed scenario without a valid `url` is refused
+  by the class itself (thrown, the ScreenshotProbe `captureRefusal`
+  precedent — never a silent 5-minute poll of a malformed scenario).
+  `createProbe` gains the web branch (docblock updated).
+- **`src/scheduler.ts`** — the `parseJobsSpec` probes map: `url` joins the
+  allowed probe-field list; the type refusal now reads `type must be
+  "command", "test", "benchmark", "screenshot", or "web"` (the flip); `url`
+  required non-empty http(s) on a web probe (missing / empty / non-string
+  refused as `url must be a non-empty http(s) URL on a web probe`;
+  `ftp://host/` and URL junk refused as `url must be an http:// or
+  https:// URL` — `new URL` parse + protocol check, both naming the
+  offense) and refused on command/test/benchmark/screenshot probes (`url
+  is only valid on a web probe`); the parsed spec carries `url` only on
+  web probes.
+- **`scripts/check-probe.mjs`** (Gate 1.15 extended in place — no new gate
+  number): THE FLIP executed as named in the criteria — the unknown-type
+  message pin gained `"web"` and `'godot'` stays the genuinely-unknown
+  example (only the message string changed), plus positive coverage (a web
+  probe with `url` parses and is preserved verbatim). New P2 `url` legs
+  (missing/''/non-number-string 8080/`ftp://host/`/junk on web; `url` on
+  command/test/benchmark/screenshot). New P3 web legs, token-free, against
+  zero-dependency `node:http` fixture servers generated in the sandbox per
+  leg (the demo-target write-and-run pattern; each leg's server binds a
+  free port a new `freePort()` helper picks — ports are machine-global,
+  the documented limitation): happy (200 + known body → success true,
+  `http status` 200, snippet equals the body, response artifact on disk
+  parsing to {url, status, contentType, bodySnippet, bodyBytes},
+  validator-clean, one GateResult passed with exitCode null, **server tree
+  verified dead on the real process table after run() returns**); the
+  bounds pinned exactly (`/big` 5000 chars → snippet exactly
+  `WEB_PROBE_SNIPPET_BYTES`; `/huge` 1.5 MiB → bodyBytes exactly
+  `WEB_PROBE_MAX_BODY_BYTES`, both still success true); wrong status (500
+  → success false, the `http status` measurement STILL records 500, ready
+  duration recorded, artifact records it); empty body (200 + zero-byte →
+  success false, body bytes 0 recorded, artifact carries bodyBytes 0);
+  target exits early (exit 3 without serving → success false naming the
+  exit, zero measurements, no response artifact, exitCode 3 on the
+  GateResult, `nothing to kill` in the log with NO `cleanupFailures`
+  fabricated); never-ready (the P4 sleeper shape, binds nothing → deadline
+  expiry, error names the readiness timeout with the last poll error
+  ECONNREFUSED, exitCode null, durationMs ≥ timeoutMs, multiple poll
+  attempts logged inside the one budget, **spawned tree parent+child
+  verified dead on the real process table**, kill evidence on the
+  GateResult); every leg sweeps its server (the P4 sweep fallback). The
+  P5 drive extended: job-a gains a PASSING web probe and job-b a FAILING
+  one (inline `node -e` servers, source as argv), pinning the probes[] ↔
+  bundlePath correspondence, the response artifact on disk under the
+  artifacts dir NEVER inside the worktree (pinned against the report's
+  `workspacePath`), and a passing-gates/FAILING-web job still passes.
+  101 assertions, 0 FAIL, zero model tokens. The existing per-job
+  probes[] length/order pins were extended for the new drive members
+  (job-a 4→5, job-b 3→4; the on-disk report.json probes length 4→5) —
+  coverage added, nothing weakened, recorded in VERIFICATION.md's flip
+  paragraph.
+- **`VERIFICATION.md`** — Gate 1.15 section: the type list gains `"web"`
+  and `url` (required non-empty http(s) on web, refused elsewhere; the web
+  budget documented as WHOLE-LIFECYCLE vs the benchmark's PER-REPEAT), the
+  T-024 web-semantics paragraph (launch/poll/capture/teardown contract,
+  the three constants with their exact values, the every-path teardown
+  rule, success semantics, measurements, artifacts, the machine-global
+  port limitation), the recorded T-024 flip paragraph (beside T-018's and
+  T-019's), all three legs extended with the web pins, and the carve list
+  updated — Web (server-lifecycle) moves from carved to pinned;
+  Godot/Blender app-specific lifecycle, browser-automation Web proper
+  (§12.1:925-935), screenshot integration on a launched target,
+  ephemeral-port allocation, and multi-URL/health-endpoint logic are
+  recorded as carves so they are neither silently assumed nor silently
+  owed; T-019's target-lifecycle carve sentence annotated with the T-024
+  pin.
+- **`README.md`** — the `--jobs` probes doc: the type list gains `"web"`
+  and `url`; a web-probe paragraph (launches without awaiting exit, polls
+  `url`, one whole-lifecycle budget, status + capped body bytes + ready
+  duration, the bounded `response.json`, the always-verified teardown,
+  2xx + non-empty success, the machine-global port caveat).
+- **`docs/ROADMAP.md`** — stage-4 row: web/server probe landed (T-024),
+  Gate 1.15 extended; remaining: Godot/Blender + browser-automation Web
+  proper.
+- **`docs/tickets/`** — this ticket flipped to done with the boxes
+  checked, index row updated, in the same change-set.
+
+Change-set exactly as pinned (`git status --porcelain`): `src/probe.ts`,
+`src/scheduler.ts`, `scripts/check-probe.mjs`, `VERIFICATION.md`,
+`docs/ROADMAP.md`, `README.md`, this ticket + the index. Zero edits to
+`src/runner.ts`, `src/cli.ts`, `src/types.ts`, `src/store/`,
+`package.json`, or `package-lock.json` — no runner/CLI/report-shape/store
+drift (`ProbeRunSummary` untouched, the verdict ladder byte-identical,
+`probe_runs` persisting type-agnostically through Gate 1.6's probes
+variant), no new npm dependencies, the launch through the new list-form
+`launchTarget` (never exec), the poll/capture on stdlib `fetch`.
+
+Gates measured this session (lane, node v22.23.1, Windows):
+
+- **Gate 0** `tsc --noEmit` → exit 0 (run at each step).
+- Pre-change baseline (clean lane at 88a1f60, before any edit): Gate 1.15
+  standalone → **ALL GREEN, exit 0, 79 `ok:` assertions**; full fast tier
+  → **"verify (fast) complete: ALL GREEN"**.
+- **Gate 1.15** `node node_modules/tsx/dist/cli.mjs
+  scripts/check-probe.mjs` → **ALL GREEN, exit 0, 101 `ok:` assertions**
+  (22 new: 3 P2, 19 P3/P5), run four times back-to-back during iteration —
+  green on the first post-change execution, no red-then-fixed bars needed
+  on any web leg.
+- **Fast tier** `node scripts/verify.mjs fast` (Gate 0 + Gate 1 + 0.5 +
+  1.5 + 1.6–1.20, including the flipped Gate 1.15) → **"verify (fast)
+  complete: ALL GREEN"**, 1003 `ok:` lines, exit 0.
+- **Gate 2 NOT owed** per the recorded trigger analysis in the criteria
+  (no `src/runner.ts`, no adapter, no gate code, no workspace handling, no
+  report-shape change; Gate 2 is additionally a `--goal`-mode run that
+  executes no probe code). **Gate 3 n/a** (no adapter touched). **Gate 2
+  was not run** — not skipped silently.
