@@ -87,6 +87,16 @@ export interface SkeletonOptions {
   maxAttempts: number
   gates: Gate[]
   worker: WorkerAdapter
+  /**
+   * T-025 per-role harness selection: the planner's and reviewer's own
+   * adapters. Optional — absent (the default) resolves to `worker`, so all
+   * three roles ride the run-level adapter exactly as before and direct
+   * `runSkeleton` callers compile and behave unchanged. The CLI builds a
+   * role's adapter through the same createWorker only for a non-default
+   * `--planner-worker`/`--reviewer-worker` selection.
+   */
+  plannerWorker?: WorkerAdapter
+  reviewerWorker?: WorkerAdapter
   workspaces: WorkspaceProvider
   artifactsDir: string
   /** Dispose workspaces after evidence capture instead of leaving them for inspection. */
@@ -258,6 +268,10 @@ function reviewerPrompt(brief: string, workspacePath: string, diff: string, gate
 }
 
 async function runPlannerPhase(opts: SkeletonOptions): Promise<PlannerReport> {
+  // T-025: the planner rides its own adapter when one was selected,
+  // otherwise the run-level worker — the flags-absent default is today's
+  // behavior exactly. One local covers both execute calls (they share baseReq).
+  const worker = opts.plannerWorker ?? opts.worker
   const count = opts.candidateIds.length
   const prompt = plannerPrompt(opts.goal, count)
   const logPath = join(opts.artifactsDir, 'planner.log')
@@ -283,14 +297,14 @@ async function runPlannerPhase(opts: SkeletonOptions): Promise<PlannerReport> {
       timeoutMs: opts.timeoutMs,
       executionPolicy: 'artifact-only',
     } as const
-    let result = await opts.worker.execute({ ...baseReq, prompt })
+    let result = await worker.execute({ ...baseReq, prompt })
     let attempts = 1
     let briefs = result.ok ? parseBriefs(result.responseTail, count) : null
 
     if (!briefs && !result.timedOut) {
       attempts = 2
       console.log('planner: output was not a valid JSON array, running one bounded repair attempt')
-      result = await opts.worker.execute({
+      result = await worker.execute({
         ...baseReq,
         prompt: [
           prompt,
@@ -329,6 +343,10 @@ async function runReview(
   opts: SkeletonOptions,
   ctx: { id: string; dir: string; workspacePath: string; brief: string; diff: string; gateLines: string[] },
 ): Promise<ReviewReport> {
+  // T-025: the reviewer rides its own adapter when one was selected (in BOTH
+  // modes — review runs post-gates in both), otherwise the run-level worker.
+  // One local covers both execute calls (they share baseReq).
+  const worker = opts.reviewerWorker ?? opts.worker
   const prompt = reviewerPrompt(ctx.brief, ctx.workspacePath, ctx.diff, ctx.gateLines)
   const logPath = join(ctx.dir, 'reviewer.log')
   const rawOutputPath = join(ctx.dir, 'review-raw.txt')
@@ -350,14 +368,14 @@ async function runReview(
     timeoutMs: opts.timeoutMs,
     executionPolicy: 'worktree-read',
   } as const
-  let result = await opts.worker.execute({ ...baseReq, prompt })
+  let result = await worker.execute({ ...baseReq, prompt })
   let attempts = 1
   let review = result.ok ? parseReview(result.responseTail) : null
 
   if (!review && !result.timedOut) {
     attempts = 2
     console.log(`[${ctx.id}] review: output was not a valid observation object, running one bounded repair attempt`)
-    result = await opts.worker.execute({
+    result = await worker.execute({
       ...baseReq,
       prompt: [
         prompt,

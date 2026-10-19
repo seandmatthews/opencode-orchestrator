@@ -585,6 +585,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.21: per-role harness selection (T-025) ----------
+section('Gate 1.21 — per-role harness selection (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-per-role-harness.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'per-role harness self-check exit 0')
+} catch (e) {
+  fail(`per-role harness self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

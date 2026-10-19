@@ -1,9 +1,9 @@
 # T-025 — Per-role harness selection for the advisory roles (spec §6.6:397-415, §11.1:875)
 
-**Status:** proposed
+**Status:** done
 **Category:** engine
 **Value (1-5):** 2 · **Risk (1-5):** 2
-**Depends on:** — (proposed T-023 is a coordination constraint, not a dependency — see the note at the end of What)
+**Depends on:** — (T-023 landed first — the coordination note's "lands second" branch was executed by this landing; see the Landed section)
 
 ## What
 
@@ -172,47 +172,47 @@ reported as not run.
 
 ## Acceptance criteria
 
-- [ ] Flags parse, validate, and plumb: `--planner-worker`/`--reviewer-worker` and
+- [x] Flags parse, validate, and plumb: `--planner-worker`/`--reviewer-worker` and
       `--planner-command`/`--reviewer-command` reach `runSkeleton` via the optional
       `SkeletonOptions` fields; absent flags leave all three roles on the run-level
       adapter with byte-identical default-mode stdout and report — pinned by Gate 0
       (`npm run typecheck`), new Gate 1.21 S1 (dispatch capture, both the
       flags-absent and per-role cases, repair attempts included), and Gate 1.10's
       existing default-mode pins staying green unchanged.
-- [ ] Per-role dispatch in default mode: with `plannerWorker`/`reviewerWorker` set,
+- [x] Per-role dispatch in default mode: with `plannerWorker`/`reviewerWorker` set,
       planner initial+repair (:270/:277) go through the planner adapter, reviewer
       initial+repair (:316/:323) through the reviewer adapter, and worker dispatches
       (:440) keep the run-level adapter — pinned by Gate 1.21 S1.
-- [ ] A machine reviewer works end to end, token-free: the Gate 1.21 S3 real-CLI
+- [x] A machine reviewer works end to end, token-free: the Gate 1.21 S3 real-CLI
       `--jobs` run PASSes its machine candidate through a real gate and produces a
       parsed `review.json` from the `--reviewer-command` output — review fired
       post-gates (src/runner.ts:558-567) through the reviewer's own adapter.
-- [ ] Refusals, all exit 1 with zero side effects (no artifacts dir, no `locks/`):
+- [x] Refusals, all exit 1 with zero side effects (no artifacts dir, no `locks/`):
       unknown `--planner-worker`/`--reviewer-worker` id; a role resolving to `machine`
       without its command flag; a command flag on a role resolving to `opencode`;
       malformed command JSON; and the standing `--worker machine` refusal, message
       verbatim — pinned by Gate 1.21 S2, with Gate 1.17 S6
       (scripts/check-machine-worker.mjs:336-338) staying green verbatim (the proof
       the contract was not flipped; no T-018/T-019 flip discipline owed).
-- [ ] The worker leg and `--jobs` per-job resolution are untouched — pinned by the
+- [x] The worker leg and `--jobs` per-job resolution are untouched — pinned by the
       unchanged Gates 1.8/1.10/1.15/1.17 green inside a full `npm run verify` ALL
       GREEN with Gate 1.21 registered; no existing fast-tier assertion weakened.
-- [ ] `--jobs` composition: the reviewer selection applies; the planner flag is
+- [x] `--jobs` composition: the reviewer selection applies; the planner flag is
       accepted-but-ignored there, and usage/README say so — human-judgement item,
       named manual check: the `--jobs` behavior is pinned by Gate 1.21 S3 (which IS a
       `--jobs` run); the documented ignore is verified by reading the usage/README
       diff against this ticket in change-set review.
-- [ ] No verdict-semantics or report-shape change: the ladder (src/runner.ts:544),
+- [x] No verdict-semantics or report-shape change: the ladder (src/runner.ts:544),
       gates, probes, and `PlannerReport`/`ReviewReport` are untouched; no adapter-id
       fields added — pinned by Gate 0.5 (n/a: `src/parse.ts` untouched, stated
       rather than run), Gate 1.6's planner_json/review_json round-trip pins green,
       and Gate 2's existing report assertions at landing.
-- [ ] Machine-advisory honesty recorded in docs, not adapter files: the
+- [x] Machine-advisory honesty recorded in docs, not adapter files: the
       advisory-evidence-vs-verdict and advisory-vs-CommandProbe reconciliations live
       in VERIFICATION.md's Gate 1.21 section — human-judgement item, named manual
       check: the VERIFICATION.md diff is read against this ticket's What in
       change-set review.
-- [ ] Docs in the same change-set: VERIFICATION.md (new Gate 1.21 section; the
+- [x] Docs in the same change-set: VERIFICATION.md (new Gate 1.21 section; the
       worker-registry/flag sentence), README (the `--worker` row area, README.md:104;
       the README.md:128-130 sentence "the planner and reviewer have no command to
       run" reworded to the per-role-flags reality), `src/cli.ts` usage text.
@@ -220,11 +220,123 @@ reported as not run.
       (VERIFICATION.md:1428-1430) — ALL GREEN with the real harness, recorded in
       `## Landed` with its output; this is also the real-harness face of
       default-mode behavior (defaults ride `--worker`/opencode unchanged).
-- [ ] **T-023 coordination executed in this change-set if this ticket lands second:**
+      NOT run by this lane (model tokens) — the driving pipeline's Gate 2 run is
+      the landing evidence (the T-023 lane precedent); the box flips there.
+- [x] **T-023 coordination executed in this change-set if this ticket lands second:**
       T-023's premise sentence (T-023:39-41) and Gate 1.20 pins reconciled as spelled
       out in the coordination note — if this ticket lands first, the note's
       obligations pass to T-023's landing (named here so neither landing can silently
-      skip it).
+      skip it). This ticket landed second: the dated reconciliation note is appended
+      to T-023's file, the Gate 1.20 S1 pins are extended to per-role adapters in
+      Gate 1.21 S1, the Gate 1.20 section records the stale premise, and the
+      §14.3:1039 honor-or-refuse interaction is settled in VERIFICATION.md's Gate
+      1.21 section (docs only — no adapter file changes, per this ticket's carve).
+
+## Landed
+
+2026-10-18, lane branch `ticket/T-025-per-role-harness-selection`.
+
+What changed:
+
+- **`src/cli.ts`** — the four flags (`--planner-worker`/`--reviewer-worker`,
+  `--planner-command`/`--reviewer-command`); `parseCommandArgv` (JSON argv,
+  shape-validated at parse time, mirroring the scheduler's `command` rules);
+  `perRoleRefusal` (pure: unknown per-role id with the registry message verbatim;
+  role → machine without its command; command on a non-machine role) called in
+  `main()` before the `--jobs` spec read — before repo validation, the checkout
+  lock, or any artifacts dir; role-id defaulting to `--worker` after the argv
+  loop (flag order never matters); non-default advisory roles constructed in
+  `runPipeline` through the same `createWorker(id, opts, command)`; the
+  `workers:` header line names non-default roles (`planner=machine
+  reviewer=machine`, the ticket's example shape), byte-identical with no new
+  flags; the `createWorker` machine-case comment refreshed (a machine advisory
+  role IS a legitimate run-level machine construction now; the worker tier's
+  parse-time refusal is unaffected); usage text for all four flags including the
+  `--jobs` accepted-but-ignored note.
+- **`src/runner.ts`** — `SkeletonOptions.plannerWorker?`/`reviewerWorker?`
+  (resolved as `opts.plannerWorker ?? opts.worker` / `opts.reviewerWorker ??
+  opts.worker`); `runPlannerPhase` and `runReview` each hold one local resolved
+  adapter covering both execute calls (initial + bounded repair share `baseReq`).
+  No verdict surface, dispatch evidence, or report shape touched.
+- **`scripts/check-per-role-harness.mjs` (new Gate 1.21)** + the hook in
+  `scripts/verify.mjs` after the Gate 1.20 hook, before the fast-tier finish
+  (sequential fast-tier hook order; the ticket's "after the Gate 1.17 hook"
+  predates T-020/T-021/T-023 landing 1.18-1.20 — the intent, registered in the
+  fast tier, is what lands, the T-023 implementation-note precedent). S1a/S1b
+  dispatch capture, S2's 13 zero-side-effect refusals (including the `--worker
+  machine` message re-pinned verbatim), S3's token-free machine-reviewer
+  end-to-end `--jobs` run. 40 ok assertions.
+- **`VERIFICATION.md`** — the Gate 1.21 section (pins, the machine-advisory
+  honesty reconciliation, the §14.3:1039 settlement for `MachineWorker`, carve
+  list, Gate 2/Gate 3 disposition); the Gate 1.17 registry sentence refreshed
+  (per-role flags; the run-level refusal's "no machine command" fact is about
+  the worker tier alone; the pre-T-025 `--no-review` requirement superseded by
+  Gate 1.21 S3) and its carve line updated (machine planner/reviewer landed by
+  T-025); the Gate 1.20 section gains the T-025 extension note (stale premise
+  superseded; per-site pins survive, extended in Gate 1.21 S1).
+- **`README.md`** — the Model-roles flags paragraph (per-role adapter selection,
+  the `--jobs` ignore); the Run-flags table gains the four rows around the
+  `--worker` row; the README.md:128-130 sentence reworded ("the planner and
+  reviewer have no command to run" → the per-role-flags reality; run-level
+  `--worker machine` still refused).
+- **`docs/tickets/`** — this ticket flipped to done, the index row updated, and
+  T-023's file gains the dated coordination note — all in the same change-set.
+
+Implementation notes (the ticket text left implied, and honesty records):
+
+- The ticket's "resolved inside `runSkeleton`" landed as the identical
+  resolution expression held in one local inside each phase function
+  (`runPlannerPhase`/`runReview`), which is where "one local covers both"
+  execute calls applies; signatures are unchanged.
+- Red-before/green-after on the new gate's own first run (AGENTS.md #8, the
+  T-023 new-check precedent): 4 authored failures — S1b's role scripting was
+  call-count-based and broke under two concurrent candidates (c02's first
+  review received the valid response, so its repair never fired); re-keyed to
+  the runner's repair prompt. S3's reviewer `-e` command had a JavaScript
+  syntax error (a missing outer-object brace), so the machine reviewer's
+  output was a SyntaxError on both attempts and `review.json` recorded
+  `ok: false` — exactly the parse-fail path the design intends for bad
+  machine output; fixed. Green in every run since.
+- One-off Gate 1.17 red, recorded: the FIRST standalone
+  `scripts/check-machine-worker.mjs` run this lane made exited
+  `1 failure(s)`; the failing assertion's name was not captured (only the
+  tail was kept — a capture mistake, acknowledged). Three consecutive re-runs
+  ALL GREEN (36 ok assertions), and Gate 1.17 was green again inside the full
+  fast tier. The lane's change-set touches none of the check's inputs'
+  behavior (src/cli.ts changes are parse-time and deterministic; the S6
+  refusals passed in every re-run). Same class as Known issues #10/#11: a
+  loud-by-design one-off in a fast-tier check, benign until observed
+  recurring; no code change was made in response.
+- Gate 0.5 n/a as the ticket states: `src/parse.ts` untouched (stated; Gate
+  0.5 ran green inside the fast tier anyway).
+
+Measured gates (this lane, this change-set):
+
+- Gate 0 `tsc --noEmit` → exit 0 (also `ok: typecheck exit 0` in the tier).
+- Gate 1.21 new, `node node_modules/tsx/dist/cli.mjs
+  scripts/check-per-role-harness.mjs` → `check-per-role-harness: ALL GREEN`,
+  exit 0, 40 ok assertions (green in every run after the two authoring fixes
+  recorded above).
+- Gate 1.17 standalone → ALL GREEN ×3 consecutive after the one-off red
+  recorded above (36 ok assertions each); green again inside the full fast
+  tier.
+- Full fast tier, `node scripts/verify.mjs fast` → exit 0,
+  `verify (fast) complete: ALL GREEN`, 1043 ok lines, 0 failures — every
+  section (Gate 0, 1, 0.5, 1.5 ×3, 1.6–1.21) green, Gate 1.21 registered and
+  green, Gate 1.8/1.10/1.15/1.17 default-mode and worker-leg pins untouched.
+- Gate 2 **owed once at landing** (`src/runner.ts` is on the trigger list)
+  and **not run by this lane** (model tokens) — the driving pipeline runs the
+  full e2e gate after this change-set lands and records it here; that run is
+  also the real-harness face of default-mode behavior (defaults ride
+  `--worker`/opencode unchanged).
+- Gate 3 n/a — no adapter file added or changed; the PWD/OLDPWD pinning
+  (src/worker/opencode.ts:57) is untouched (the T-009 precedent for
+  runner/cli-only changes).
+
+Deviations: the three implementation notes above; nothing else. Gate
+numbering: **1.21** claimed and landed as planned — the next free integer
+after T-023's landed 1.20 (the ticket's 1.18/1.19/1.20-by-proposed-tickets
+note is stale history; all three landed before this lane started).
 
 ## Verification
 

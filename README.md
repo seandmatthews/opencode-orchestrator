@@ -49,8 +49,16 @@ table shows the defaults.
 | Reviewer | `zai-coding-plan/glm-5.3` | reads each passing candidate's diff afterward and writes notes to `review.json` (notes only — they cannot change the outcome) |
 
 Flags: `--planner-model`, `--model`, `--reviewer-model`, `--no-planner`,
-`--no-review`. The planner's raw output is saved to `planner-raw.txt`, and
-the brief each candidate received is recorded in `report.json`.
+`--no-review`. Each advisory role can also ride its own worker adapter:
+`--planner-worker`/`--reviewer-worker` select it (default: the `--worker`
+value), and a role resolved to `machine` carries its own deterministic
+command (`--planner-command`/`--reviewer-command`, a JSON argv list) — a
+machine reviewer, for example, turns `--jobs` runs into fully token-free
+runs with a real advisory review. In `--jobs` mode the reviewer selection
+applies; the planner flags are accepted but ignored (the planner is skipped
+there, like `--planner-model`). The planner's raw output is saved to
+`planner-raw.txt`, and the brief each candidate received is recorded in
+`report.json`.
 
 ## Usage
 
@@ -101,7 +109,11 @@ continues.
 | `--timeout-min <n>` | Per-worker time limit in minutes (default 15) |
 | `--max-attempts <n>` | Retry a candidate whose worker crashed or timed out, up to n attempts (default 1) |
 | `--clean` | Delete candidate worktrees after their logs and diffs are saved |
-| `--worker <id>` | Which worker adapter to use (default `opencode`; `machine` is per-job only — see Job files) |
+| `--worker <id>` | Which worker adapter to use (default `opencode`; `machine` is per-job only — see Job files). Also the default adapter for the planner and reviewer roles |
+| `--planner-worker <id>` | Adapter for the planner role (default: the `--worker` value; `machine` requires `--planner-command`) |
+| `--reviewer-worker <id>` | Adapter for the reviewer role (default: the `--worker` value; `machine` requires `--reviewer-command`). Applies in both `--goal` and `--jobs` mode |
+| `--planner-command <json>` | The machine command for a planner resolved to `machine` — a JSON argv list like `["node", "scripts/task.js"]`. Accepted but ignored in `--jobs` mode |
+| `--reviewer-command <json>` | The machine command for a reviewer resolved to `machine` — a JSON argv list |
 | `--db <path>` | The SQLite database for run records |
 | `--run-root <path>` | Where runs are stored (default `C:\swarm`) |
 | `--force-lock` | Take the checkout lock even if another process still appears to hold it |
@@ -125,8 +137,11 @@ job's `command` — an argument list like `["node", "scripts/codemod.mjs"]`,
 spawned directly in the candidate's worktree with no shell — and whatever
 files it changes become that candidate's diff, judged by the same gates as
 any other candidate. A machine job must carry a `command`, and `command` is
-only valid on machine jobs; `--worker machine` at run level is refused,
-because the planner and reviewer have no command to run. The brief stays
+only valid on machine jobs; `--worker machine` at run level is still refused
+(the worker tier has no run-level command), but the advisory roles select
+`machine` through their own flags — `--reviewer-worker machine
+--reviewer-command '["node", "review.js"]'` gives any run a deterministic,
+token-free advisory review. The brief stays
 prose for humans and evidence — it is recorded, never executed.
 
 If a worker crashes, times out, or throws an error, the engine retries it as

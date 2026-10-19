@@ -396,6 +396,24 @@ Round-1 measured gates:
   is the landing evidence, and the Gate 2 acceptance box above stays
   unchecked until then.
 
+### T-025 coordination (2026-10-18 — recorded by the T-025 landing)
+
+T-023 landed first, so per T-025's coordination note the reconciliation
+falls to T-025's landing and is recorded here for traceability. The premise
+sentence in What §1 — *"MachineWorker never receives a non-default policy:
+planner/reviewer cannot dispatch through it (the run-level `--worker machine`
+parse-time refusal, src/cli.ts:135-147, stands)"* — was true of this ticket's
+own change-set and is **superseded since T-025**: the advisory roles select
+their own adapter (`--planner-worker`/`--reviewer-worker` + their command
+flags), so a machine advisory dispatch now CAN carry a non-default policy.
+The run-level `--worker machine` refusal itself stands unflipped (Gate 1.17
+S6 still pins the message verbatim). This ticket's Gate 1.20 S1 pins are
+per-site and survived per-role adapters unchanged; Gate 1.21's S1 extends
+them to the per-role world, and VERIFICATION.md's Gate 1.21 section settles
+the §14.3:1039 honor-or-refuse interaction for `MachineWorker` (no
+harness/tool layer to restrict; the cwd postures are engine-side and stand;
+the settlement is documented, not an adapter behavior).
+
 ## Verification
 
 Gate 0, Gate 0.5, Gate 1 including new Gate 1.20 (fast tier, token-free) on
