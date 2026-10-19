@@ -62,3 +62,4 @@ Rules:
 | T-023 | Planner/reviewer capability restriction: §14 execution policy at the WorkerAdapter seam (spec §3.6, §14, §34 M5) | high | done 2026-10-18 |
 | T-024 | Web/server probe: launch target → bounded readiness poll → HTTP status + body-snippet evidence → verified teardown (spec §12.1, stage-4 breadth) | high | done 2026-10-18 |
 | T-025 | Per-role harness selection for the advisory roles: `--planner-worker`/`--reviewer-worker` + their machine command flags (spec §6.6:397-415, §11.1:875) | medium | done 2026-10-18 |
+| T-026 | Binary-safe diff capture: `git diff HEAD --binary` end to end (closes T-005 carve #2; spec §16.1:1148, §17.2:1185) | high | proposed |
