@@ -349,3 +349,25 @@ confirmed empty for those ids before and after; `PRAGMA integrity_check` ok), an
 the fix proven green by a full `node scripts/verify.mjs fast` run with
 sha256(`C:\swarm\refinery.db`) identical before and after — no fast-tier
 invocation touches a real store.
+
+**Review round 2 (2026-10-20) — the driving fast tier went red at Gate 1.12;
+not this change-set.** The driving workflow's fast tier failed with
+`FAIL: kill-tree self-check failed: 1` (verify.mjs's wrapper line at the Gate
+1.12 section — the per-gate wrapper exits the tier there, so Gates 1.13–1.21
+did not run in that pass). The T-028 change-set contains no kill-tree code:
+`git log` over `scripts/check-kill-tree.mjs`, `src/kill-tree.ts`,
+`src/gate/command.ts`, and `src/worker/run-with-timeout.ts` names T-027's
+6abd977 as the last touch, pre-dating this lane. The red did not reproduce —
+measured this round, all in the lane: standalone
+`node node_modules/tsx/dist/cli.mjs scripts/check-kill-tree.mjs` ×4 and one
+full `node scripts/verify.mjs fast`, every run `ALL GREEN (30 assertions)` /
+`=== verify (fast) complete: ALL GREEN ===`. Classification: the Known issue
+#10 class (a transient snapshot/kill hiccup reported as evidence-only cleanup
+failure — loud by design), now observed twice (2026-10-17 T-017 lane,
+2026-10-20 this driving run), still not reproducible on demand, zero shared
+change-set code; VERIFICATION.md's Known issue #10 records the second
+observation and the threshold (a third observation must arrive with the
+check's own `FAIL: <name>` line captured — the reviewer-side log again lost
+it in tier noise — before any code change is considered). No assertion
+weakened and no kill-tree file touched; the only round-2 edits are this
+record and the Known issue #10 extension.

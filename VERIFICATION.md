@@ -2356,6 +2356,25 @@ landing in T-017's Landed section).
    that change-set). Benign until observed recurring; the exact triggering
    line (snapshot failure vs already-gone root vs survivor) is not captured
    by the check's output and was not diagnosed post-hoc.
+   **2026-10-20 second observation (T-028 review round 2) — same class,
+   still not reproducible.** The driving workflow's fast tier aborted at
+   Gate 1.12 with verify.mjs's wrapper line `FAIL: kill-tree self-check
+   failed: 1` (the per-gate wrapper `finish()`es on a failed gate, so
+   Gates 1.13–1.21 did not run in that pass — aborting loudly is the
+   tier's design; the response is a re-run, not a code change). The
+   check's own per-assertion `FAIL: <name>` line was again not captured
+   reviewer-side (lost in the tier's stderr noise — the Known issue #11
+   capture gap). The T-028 change-set touches no kill-tree file
+   (`git log` over scripts/check-kill-tree.mjs, src/kill-tree.ts,
+   src/gate/command.ts, src/worker/run-with-timeout.ts: last touch is
+   T-027's 6abd977, pre-dating the lane), and the red did not reproduce:
+   lane standalone check-kill-tree ×4 and the lane full fast tier all
+   ALL GREEN (30 assertions each) the same hour. Now observed twice —
+   three days apart, different lanes, zero shared change-set code — so
+   the threshold for "recurring" is close: a third observation must come
+   with the check's captured `FAIL: <name>` line before any code change
+   is considered, and the honest classification until then is a
+   loud-by-design one-off, benign, evidence-only.
 11. **A one-off Gate 1.17 red with a single failed assertion, not
    reproducible (observed once, 2026-10-18, T-021 lane review round 1).**
    One fast-tier run failed inside `scripts/check-machine-worker.mjs` — exit
