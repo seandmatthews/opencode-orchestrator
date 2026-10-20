@@ -103,11 +103,19 @@ npm run integrate -- --run <runId> --candidate cXX --gate "name=command" [...]
 Replays a surviving candidate's captured `diff.patch` onto a fresh detached
 worktree of the target repo at its **current HEAD** and re-runs the
 operator-supplied gates there (spec §17.2 steps 1-4 and 6; no model
-involvement anywhere). The `--gate` name set must exactly match the gates the
-candidate passed in the run — gate commands are not recorded in `report.json`,
-so the name set is the integrity check. Policy refusals (non-zero, nothing
-created): non-survivor candidate, missing/empty diff (a NO-OP is never a
-pass), unknown candidate id, gate-name mismatch, already-present integration
+involvement anywhere). The replay contract is **compare-when-recorded**
+(T-027): the `--gate` name set must exactly match the gates the candidate
+passed in the run, and when a recorded gate result carries its `command`
+(`GateResult.command` — stamped by `CommandGate` on every resolve, pass, fail,
+and timeout alike; absent for non-shell gates and pre-existing reports), the
+re-supplied command must equal it exactly, so a replay proves it exercised
+the same commands the run survived instead of trusting the name set alone. A
+report that predates command recording replays on the name set alone — the
+T-005 contract, byte-for-byte. Policy refusals (non-zero, nothing created):
+non-survivor candidate, missing/empty diff (a NO-OP is never a
+pass), unknown candidate id, gate-name mismatch, gate-command mismatch
+against a recorded command (refused from the pre-lock policy-refusal block —
+no integration worktree, no lock taken), already-present integration
 worktree. `git apply --check` then `git apply` (atomic — a rejecting patch
 leaves the tree untouched); an apply that lands but changes nothing is a NO-OP
 refusal. Capture is binary-safe (T-026): `WorktreeProvider.diff` runs
@@ -125,7 +133,9 @@ historical); a genuinely drifted binary — the pre-image blob no longer
 matches at current HEAD — fails `apply --check` with an ordinary "patch does
 not apply" and is refused through the ordinary conflict path. The
 verdict artifact `<runDir>/integrate/<id>.json` records
-applied/treeChanged/gates/passed; exit 0 iff applied + treeChanged + all gates
+applied/treeChanged/gates/passed — its gate entries carrying the re-supplied
+commands verbatim (`gates[].command`, T-027, riding the `CommandGate` stamp);
+exit 0 iff applied + treeChanged + all gates
 passed. Replay never commits, never branches, never moves a ref (§17.4).
 
 The replayed worktree is left in place for inspection, dirty by construction:
@@ -149,7 +159,17 @@ the binary byte-identical (sha256 asserted) and the verdict recording applied
 capture's output shape) refuses as historical evidence with an empty
 worktree; a post-fix patch whose pre-image drifted refuses through the
 ordinary apply-check path, worktree untouched; and the binary replay worktree
-goes through both disposal faces with its evidence surviving.
+goes through both disposal faces with its evidence surviving. Recorded gate
+commands (T-027), three faces plus the back-compat pins: a report whose
+recorded gates carry commands refuses a differing re-supplied command with
+exit 1 from the pre-lock policy-refusal block — no integration worktree, the
+sandbox repo's `worktree list` untouched, and no lock ever taken (the
+sandbox's `locks/` directory never appears); an exact names-and-commands
+match replays with exit 0 and the verdict recording the re-supplied commands
+verbatim; an old-shape report (no recorded command) replays name-only
+including a different command under a matching name — and the existing
+command-less `REPORT_GATES` fixtures run unchanged as the back-compat pins
+(the T-005 name-set contract stays for every report that lacks commands).
 
 ## Gate 1.6 — store ingest (seconds, fast tier)
 
@@ -1203,6 +1223,13 @@ gate has three legs, all token-free:
   bundles, each naming the offense; since T-019 the kind refusal reads
   `kind must be "log", "report", or "screenshot"` and a well-formed bundle
   carrying a kind-`'screenshot'` artifact validates (the T-019 P1 flip);
+  since T-027 `validateGateResult` also enforces **command, if present, is a
+  non-empty string** — a GateResult `command` of `''` and a non-string
+  `command` are each refused naming the offense, a well-formed command
+  validates and is preserved verbatim, and command-less entries stay valid
+  untouched (every probe-bundle `GateResult` fixture is command-less — those
+  entries are argv-form evidence of a different shape and remain
+  legitimately so);
   `parseJobsSpec` accepts a well-formed
   `probes` array verbatim — since T-018 including a benchmark probe with
   `repeats`, since T-019 a screenshot probe with `capture`, and since T-024
@@ -1514,7 +1541,11 @@ Zero new npm dependencies (`node:child_process` only, decisions.md
   `diff.patch` captured its own marker-file change), and the no-op job is
   eliminated as NO-OP, never a pass (AGENTS.md #7) even with its gate
   passing — the ladder's `diffBytes > 0` leg pinned against the real
-  adapter.
+  adapter. Since T-027 the S5 assertions also pin the recorded gate commands
+  end-to-end: the on-disk `report.json`'s gate entries for
+  `codemod-a`/`codemod-b` carry `command` exactly equal to the job spec's
+  gate commands (`GateResult.command` — the only uniform place a command can
+  meet its verdict is inside the producer's own `GateResult`).
 - **S6 — refusals, all exit 1 with zero side effects** (no artifacts dir,
   no `locks/`, asserted after each — each through the real CLI with a
   non-git `--repo`, so the refusals precede repo validation): `--worker

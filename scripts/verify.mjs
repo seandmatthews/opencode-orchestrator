@@ -347,6 +347,63 @@ function makeIntRun(runId, { diff, id = 'c01', gates = REPORT_GATES, passedAllGa
   return runDir
 }
 
+// T-027 — recorded gate commands: the compare-when-recorded replay contract.
+// Three faces against a report whose recorded gate results carry `command`
+// (what CommandGate now stamps), plus the old-shape fallback. The run ids
+// sort BEFORE the 2099101103xxxx block below, so the existing tidy sweeps
+// still dispose this block's replay worktrees unchanged — and this block
+// runs before any other integrate invocation on this run root, so the
+// mismatch face can pin "no lock taken" as `locks/` never appearing.
+const diffT27 = captureDiff((maker) => {
+  writeFileSync(join(maker, 'file.txt'), 'alpha\nbeta\ngamma\ndelta-t27\n')
+  writeFileSync(join(maker, 'extra-t27.txt'), 'new file\n')
+})
+const T27_CMD = 'node -e "process.exit(0)"'
+const REPORT_GATES_CMDED = REPORT_GATES.map((g) => ({ ...g, command: T27_CMD }))
+
+// Face 1 — a re-supplied command that differs from a recorded command refuses
+// from the pre-lock policy-refusal block: exit 1, no integration worktree,
+// the sandbox repo's worktree list untouched, and no checkout lock ever taken.
+makeIntRun('20991010030000', { diff: diffT27, id: 't01', gates: REPORT_GATES_CMDED })
+const intMismatch = expectIntegrate(1, 'command mismatch', ['--run', '20991010030000', '--candidate', 't01',
+  '--gate', 'check-a=node -e "process.exit(7)"', '--gate', `check-b=${T27_CMD}`, '--run-root', intRuns])
+ok(intMismatch.code === 1, `a re-supplied command differing from a recorded command refuses (got ${intMismatch.code})`)
+ok(/command/.test(intMismatch.out) && /check-a/.test(intMismatch.out), 'the refusal names the command mismatch and the offending gate')
+ok(!existsSync(join(intRuns, '20991010030000', 'wt')), 'command-mismatch refusal happens before any worktree exists')
+ok(igit('worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).length === 1, 'command-mismatch refusal leaves the sandbox repo worktree list untouched')
+ok(!existsSync(join(intRuns, 'locks')), 'command-mismatch refusal took no checkout lock (no locks/ dir ever created)')
+
+// Face 2 — exact match (names AND commands equal) replays, and the verdict
+// records what ran: its gate entries carry the re-supplied commands verbatim.
+makeIntRun('20991010030001', { diff: diffT27, id: 't02', gates: REPORT_GATES_CMDED })
+const intExact = expectIntegrate(0, 'exact-match replay', ['--run', '20991010030001', '--candidate', 't02', ...CLI_GATES, '--run-root', intRuns])
+ok(intExact.code === 0, `exact names-and-commands match replays with exit 0 (got ${intExact.code})`)
+if (existsSync(join(intRuns, '20991010030001', 'integrate', 't02.json'))) {
+  const t27Verdict = JSON.parse(readFileSync(join(intRuns, '20991010030001', 'integrate', 't02.json'), 'utf8'))
+  ok(t27Verdict.passed === true && t27Verdict.gates.length === 2, 'exact-match verdict passes with both gates recorded')
+  ok(t27Verdict.gates.every((g) => g.command === T27_CMD), 'the replay verdict records the re-supplied commands verbatim (IntegrateVerdict.gates[].command)')
+} else {
+  ok(false, 'the replay verdict records the re-supplied commands verbatim (t02.json missing)')
+}
+
+// Face 3 — old-shape reports replay name-only, exactly today's contract: a
+// recorded gate WITHOUT command replays on the name set alone, including a
+// DIFFERENT command under a matching name (the existing command-less
+// REPORT_GATES fixtures above run unchanged as the back-compat pins).
+makeIntRun('20991010030002', { diff: diffT27, id: 't03' })
+const intOldShape = expectIntegrate(0, 'old-shape name-only', ['--run', '20991010030002', '--candidate', 't03',
+  '--gate', `check-a=node -e "process.stdout.write('differs-from-recorded')"`, '--gate', `check-b=${T27_CMD}`, '--run-root', intRuns])
+ok(intOldShape.code === 0, `old-shape report: a different command under a matching name does NOT refuse (got ${intOldShape.code})`)
+ok(existsSync(join(intRuns, '20991010030002', 'integrate', 't03.json')) && JSON.parse(readFileSync(join(intRuns, '20991010030002', 'integrate', 't03.json'), 'utf8')).passed === true, 'old-shape name-only replay passes end to end')
+
+// The two passing replays kept their dirty worktrees for inspection — dispose
+// them through the house path so the existing tidy sweeps below stay green
+// (they run without --force and rightly refuse dirty worktrees).
+code = expectClean(0, 't27 exact-match disposal', ['--run', '20991010030001', '--run-root', intRuns, '--force'])
+ok(code === 0, `clean --force disposes the exact-match replay worktree (got ${code})`)
+code = expectClean(0, 't27 old-shape disposal', ['--run', '20991010030002', '--run-root', intRuns, '--force'])
+ok(code === 0, `clean --force disposes the old-shape replay worktree (got ${code})`)
+
 // AC#1 — clean replay onto drifted HEAD: exit 0, every gate PASS at post-drift HEAD,
 // change present in the replayed worktree, canonical checkout untouched.
 const diffA = captureDiff((maker) => {

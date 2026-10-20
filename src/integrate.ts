@@ -9,9 +9,13 @@
 // commits, never creates a branch, never moves a ref, and touches no model
 // adapter (decisions.md: machine gates decide survival).
 //
-// The --gate name set must exactly match the gates the candidate passed in the
-// run — gate COMMANDS are not recorded in report.json, so the names are the
-// integrity check that the replay exercises the same gates the run survived.
+// The --gate name set must exactly match the gates the candidate passed in
+// the run, and — since T-027 — when a recorded gate result carries its
+// command (GateResult.command, stamped by CommandGate), the re-supplied
+// command must equal it exactly: compare-when-recorded, so the replay can
+// prove it exercised the same commands the run survived. A report that
+// predates command recording replays on the name set alone (the T-005
+// contract, byte-for-byte).
 //
 // The integration worktree is left in place for inspection, holding the
 // replayed diff as uncommitted changes: plain `npm run clean` refuses it
@@ -26,7 +30,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { CommandGate } from './gate/command.js'
 import { acquireCheckoutLock, CheckoutLockRefused, releaseCheckoutLock } from './lock.js'
-import type { CandidateReport, RunReport } from './types.js'
+import type { CandidateReport, GateResult, RunReport } from './types.js'
 
 const usage = `Integration replay: re-verify a surviving candidate's diff at current HEAD.
 
@@ -37,8 +41,9 @@ Options:
   --run <runId>        Run directory under the run root (required)
   --candidate <id>     Candidate id from the run's report (required)
   --gate "name=cmd"    Machine gate; repeatable. The NAME set must exactly match
-                       the gates the candidate passed in the run (commands are
-                       not recorded — the operator re-supplies them)
+                       the gates the candidate passed in the run; when the run
+                       recorded a gate's command, the re-supplied command must
+                       equal it exactly (compare-when-recorded, T-027)
   --run-root <path>    Where runs live (default: C:\\swarm)
   --force-lock         Take the checkout lock from a suspected-stale holder
   --help               Show this help
@@ -112,14 +117,28 @@ function readReport(runDir: string): RunReport {
   }
 }
 
-function gateContract(recorded: string[], supplied: string[]): string | null {
-  const missing = recorded.filter((n) => !supplied.includes(n))
-  const extra = supplied.filter((n) => !recorded.includes(n))
-  if (missing.length === 0 && extra.length === 0) return null
-  const parts: string[] = []
-  if (missing.length > 0) parts.push(`missing: ${missing.join(', ')}`)
-  if (extra.length > 0) parts.push(`not in the run's recorded gate set: ${extra.join(', ')}`)
-  return `gate names must exactly match the gates the candidate passed (recorded: ${recorded.join(', ')}). ${parts.join('; ')}`
+function gateContract(recorded: GateResult[], supplied: { name: string; command: string }[]): string | null {
+  const missing = recorded.filter((g) => !supplied.some((s) => s.name === g.name)).map((g) => g.name)
+  const extra = supplied.filter((s) => !recorded.some((g) => g.name === s.name)).map((s) => s.name)
+  if (missing.length > 0 || extra.length > 0) {
+    const parts: string[] = []
+    if (missing.length > 0) parts.push(`missing: ${missing.join(', ')}`)
+    if (extra.length > 0) parts.push(`not in the run's recorded gate set: ${extra.join(', ')}`)
+    return `gate names must exactly match the gates the candidate passed (recorded: ${recorded.map((g) => g.name).join(', ')}). ${parts.join('; ')}`
+  }
+  // Compare-when-recorded (T-027): a gate whose run recorded its command
+  // (GateResult.command — stamped by CommandGate) pins the re-supplied
+  // command exactly; a recorded result without command (a pre-T-027 report)
+  // falls back to name-only, the T-005 contract byte-for-byte.
+  const mismatched = recorded.filter((g) => {
+    const s = supplied.find((x) => x.name === g.name)
+    return s !== undefined && g.command !== undefined && s.command !== g.command
+  })
+  if (mismatched.length > 0) {
+    const parts = mismatched.map((g) => `${g.name}: recorded "${g.command}" but re-supplied "${supplied.find((x) => x.name === g.name)?.command}"`)
+    return `re-supplied gate commands must match the commands recorded in the run's report — a replay must exercise the same commands the run survived. ${parts.join('; ')}`
+  }
+  return null
 }
 
 interface IntegrateVerdict {
@@ -130,7 +149,7 @@ interface IntegrateVerdict {
   runBaseSha: string
   applied: boolean
   treeChanged: boolean
-  gates: { name: string; passed: boolean; exitCode: number | null; durationMs: number; outputTail: string }[]
+  gates: { name: string; passed: boolean; exitCode: number | null; durationMs: number; outputTail: string; command?: string }[]
   passed: boolean
   worktreePath: string
 }
@@ -152,9 +171,7 @@ async function main(): Promise<number> {
   if (!existsSync(candidate.diffPath)) refuse(`captured diff missing on disk: ${candidate.diffPath}`)
   if (candidate.diffBytes === 0) refuse(`zero-byte diff for ${opts.candidate} — a NO-OP is never a pass`)
 
-  const recordedNames = candidate.gates.map((g) => g.name)
-  const suppliedNames = opts.gates.map((g) => g.name)
-  const contract = gateContract(recordedNames, suppliedNames)
+  const contract = gateContract(candidate.gates, opts.gates)
   if (contract) refuse(contract)
 
   // ---- locked region: everything that mutates the target repo ----

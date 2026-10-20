@@ -122,6 +122,17 @@ export interface GateResult {
   durationMs: number
   outputTail: string
   /**
+   * The shell command that produced this verdict (T-027), present when the
+   * gate was a shell command (`CommandGate`, the only real producer); absent
+   * for non-shell gates and pre-existing reports. Same optional-field pattern
+   * as `cleanupFailures`: evidence only, never a verdict — nothing in the
+   * elimination ladder reads it (the ladder computes from `passed` and
+   * `diffBytes` alone), and `integrate`'s compare-when-recorded contract uses
+   * it only to refuse a replay that would exercise a different command than
+   * the run survived.
+   */
+  command?: string
+  /**
    * Present only when this gate timed out and its verified process-tree kill
    * could not fully prove the tree dead (T-011, spec §15.3). Evidence only,
    * never a verdict. Absent on every non-timeout path.
