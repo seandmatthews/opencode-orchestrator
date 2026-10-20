@@ -221,11 +221,25 @@ including the exact key-set pin (Gate 1.20 S1) and Gate 1.6's exact-value
 store pins, both green with zero change to their files.
 
 **Gate 2:** owed by this ticket (gate code + report shape are both on its
-trigger list; pre-charged by T-005:100-102/:225-226) and NOT run in this
-lane — per the lane protocol the driving pipeline runs `npm run
-verify:full` against the landed change-set; that acceptance box stays
-unchecked until that run is recorded. Gate 0.5 n/a (`src/parse.ts`
-untouched); Gate 3 n/a (no adapter — zero model involvement).
+trigger list; pre-charged by T-005:100-102/:225-226). Review round 1's
+driving run went red — NOT through any gate assertion but through the
+driving workflow's own hard wrapper budget: `WorkflowError: world.run
+'node' timed out after 900000ms`. The run's dispatch evidence
+(`C:\swarm\verify\20261020032701\dispatch.jsonl`) shows both workers
+completed ok (c02 4.5 min, c01 11.2 min alive throughout), c02 fully
+reviewed, c01's reviewer just started when the wrapper fired — a
+slow-model day, ~18 min legitimately needed against a 15-min wrapper, with
+this file's 20-min inner ceiling plus the 1m33s fast tier documented in
+VERIFICATION.md's Known issue #12 follow-up. No repo-side lever shortens
+the gate without weakening its assertions (fewer candidates, skipping
+review, tighter worker budget, slimmer full tier — all refused); the
+remedy is the driving wrapper's `opts.timeoutMs`, which the lane cannot
+set. The killed run's debris was disposed through the house path (clean
+--force --force-lock after verifying the stale holder dead; 4 removed,
+0 refused, 0 failed; fixture pristine; evidence kept). The acceptance box
+stays unchecked until a driving Gate 2 completes inside the wrapper's
+budget and is recorded. Gate 0.5 n/a (`src/parse.ts` untouched); Gate 3
+n/a (no adapter — zero model involvement).
 
 ## Verification
 

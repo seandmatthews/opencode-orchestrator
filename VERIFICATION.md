@@ -2277,6 +2277,33 @@ landing in T-017's Landed section).
     the next driving Gate 2 is the next observation. Same class as
     Known issues #10/#11: loud-by-design one-offs; benign until observed
     recurring.
+    **2026-10-20 follow-up (T-027 review round 1) — the next observation
+    arrived, and the failure came from the other direction: not a stall.**
+    The driving workflow's gate wrapper killed `npm run verify:full` at its
+    own hard 900000ms budget (`WorkflowError: world.run 'node' timed out
+    after 900000ms`) while the skeleton run was ~1-2 min from finishing —
+    run 20261020032701's dispatch evidence: BOTH workers completed ok (c02
+    in 4.5 min, c01 in 11.2 min alive throughout — the runner's per-worker
+    budget never fired because nothing stalled), c02 fully reviewed
+    (review.json written), c01's reviewer just started (`reviewer.log`
+    269 bytes) when the wrapper fired; no report.json yet. The fast tier
+    measured 1m33s the same day, so the landing gate legitimately needed
+    ~18 min against a 15-min wrapper on a slow-model day — below the
+    wrapper's cap sits this file's own 20-min inner ceiling, whose designed
+    stall path (~17 min skeleton + ~1.5 min fast tier) the wrapper can
+    therefore preempt. Repo-side "narrow the work" levers all weaken Gate
+    2 (fewer candidates, skipping review, a tighter `--timeout-min` that
+    converts a slow success into a red, slimming the full tier) and were
+    refused; the remedy is the driving wrapper's budget — raise
+    `opts.timeoutMs` to cover the inner ceiling plus the fast tier — which
+    no lane change-set can set. The killed run's debris (two registered
+    worktrees, two `swarm/*` branches, one stale lock whose holder pid was
+    verified dead first) was disposed through the house path (`clean --run
+    20261020032701 --run-root C:\swarm\verify --force --force-lock`;
+    4 removed, 0 refused, 0 failed; fixture verified pristine after: only
+    `main` in `worktree list`, no `swarm/*` branches, clean status;
+    evidence kept — dispatch.jsonl, both diff.patch, worker/reviewer logs,
+    c02's review.json).
 
 ## Definition of done (per ticket)
 
