@@ -18,14 +18,20 @@
 // the filesystem artifact store (schema v5): the artifacts + probe_runs
 // rows, hash-at-ingest pinned on a controlled sandbox variant, and the
 // derived ARTIFACT_CREATED block at report-carried stamps — re-ingest stays
-// idempotent over state rows while events append.
+// idempotent over state rows while events append. T-028 extends it with the
+// store-backed integrate pieces: `diffArtifactId` pinned by exact literals
+// in both scopes and matched against the actually-ingested diff rows (no
+// handle drift), and `recordIntegrateVerdict` — the verdict artifacts row
+// (hash-at-ingest of the verdict file) plus the INTEGRATE_REPLAYED event at
+// the verdict's own appliedAt, gate_results value-identical throughout and
+// re-record idempotent with append-only events.
 import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
-import { SCHEMA_VERSION, artifactId, cycleRefusal, deriveDag, ingest, unknownDependencyRefusal } from '../src/store/index.ts'
+import { SCHEMA_VERSION, artifactId, cycleRefusal, deriveDag, diffArtifactId, ingest, recordIntegrateVerdict, unknownDependencyRefusal } from '../src/store/index.ts'
 
 const failures = []
 const t = (name, cond) => {
@@ -581,6 +587,93 @@ try {
       hashEvents.map((e) => [e.type, e.at, e.payload])))
   t('hash sandbox: integrity_check ok', hashDb.prepare('PRAGMA integrity_check').get()['integrity_check'] === 'ok')
   hashDb.close()
+
+  // ---------- T-028: diffArtifactId + recordIntegrateVerdict (store-backed integrate) ----------
+  // The replay's diff handle is the EXACT id the ingest derivation pushes, so
+  // it is pinned twice over: exact literals over fixed inputs (both scopes,
+  // matching the pinned artifactId scheme above) and — no handle drift —
+  // equality with the actually-ingested diff rows on the fixture (pre-T-007
+  // scope) and the retried variant (T-007 scope: the FINAL attempt's row).
+  t('diffArtifactId: pre-T-007 candidate (no attempts array) scopes j:<id>, the pinned literal',
+    diffArtifactId({ id: 'c02', diffPath: 'C:\\r\\c02\\diff.patch' }) === 'j:c02/diff.patch-4a4fddce720a60b1')
+  t('diffArtifactId: T-007-shaped candidate scopes the FINAL attempt j:<id>@a<n>, the pinned literal',
+    diffArtifactId({ id: 'c01', diffPath: 'X:\\y\\diff.patch', attempts: [{ number: 1 }, { number: 2 }] }) === 'j:c01@a2/diff.patch-d70d8dd8fa28ee1b')
+  t('diffArtifactId: no diffPath is null (nothing to verify, never a fabricated handle)',
+    diffArtifactId({ id: 'c09', diffPath: null }) === null)
+  t('diffArtifactId matches the ingested diff rows on the fixture exactly (no handle drift, pre-T-007 scope)',
+    artifactRows.filter((r) => r.kind === 'diff').every((r) => {
+      const c = report.candidates.find((x) => x.id === r.job_id)
+      return c !== undefined && r.artifact_id === diffArtifactId(c)
+    }))
+  const t28FinalDiffRow = retriedArtifacts.find((r) => r.path === retried.candidates[0].diffPath && r.attempt_number === 2)
+  t('diffArtifactId matches the FINAL attempt\'s ingested diff row on the retried variant (T-007 scope, no drift)',
+    t28FinalDiffRow !== undefined && t28FinalDiffRow.artifact_id === diffArtifactId(retried.candidates[0]))
+
+  // The replay verdict through the store: one artifacts row for
+  // integrate/<id>.json (kind report, producer triple (candidateId, NULL,
+  // path), hash-at-ingest of the verdict file) + one INTEGRATE_REPLAYED
+  // event at the verdict's own appliedAt — and gate_results NEVER touched.
+  const t28VerdictDir = join(sandbox, 'integrate-rec', 'integrate')
+  mkdirSync(t28VerdictDir, { recursive: true })
+  const t28VerdictPath = join(t28VerdictDir, 'c01.json')
+  const t28AppliedAt = '2026-10-19T12:00:00.000Z'
+  const t28WorktreePath = 'C:\\swarm\\int-sandbox\\wt\\int-c01'
+  const t28VerdictJson = JSON.stringify({
+    runId: report.runId, candidateId: 'c01', appliedAt: t28AppliedAt,
+    targetHead: 'a'.repeat(40), runBaseSha: report.baseSha,
+    applied: true, treeChanged: true,
+    gates: [{ name: 'build', passed: true, exitCode: 0, durationMs: 10, outputTail: 'ok', command: 'node build.js' }],
+    passed: true, worktreePath: t28WorktreePath,
+  }, null, 2)
+  writeFileSync(t28VerdictPath, t28VerdictJson)
+  const t28DbPath = join(sandbox, 'integrate.db')
+  ingest(report, t28DbPath)
+  const t28Db = new DatabaseSync(t28DbPath)
+  const t28GateResultsBefore = t28Db.prepare('SELECT * FROM gate_results ORDER BY candidate_id, gate_name').all()
+  const t28ArtifactsBefore = t28Db.prepare('SELECT * FROM artifacts ORDER BY artifact_id').all()
+  const t28EventsBefore = t28Db.prepare('SELECT seq, type, at, payload FROM events ORDER BY seq').all()
+  recordIntegrateVerdict(t28DbPath, report.runId, {
+    candidateId: 'c01', appliedAt: t28AppliedAt, targetHead: 'a'.repeat(40),
+    applied: true, treeChanged: true, passed: true,
+    worktreePath: t28WorktreePath, verdictPath: t28VerdictPath,
+  })
+  const t28Row = t28Db.prepare('SELECT * FROM artifacts WHERE run_id = ? AND path = ?').get(report.runId, t28VerdictPath)
+  t('integrate verdict: exactly one artifacts row for integrate/<id>.json (absent before, added once)',
+    t28ArtifactsBefore.every((r) => r.path !== t28VerdictPath)
+    && t28Db.prepare('SELECT COUNT(*) AS n FROM artifacts WHERE path = ?').get(t28VerdictPath).n === 1)
+  t('integrate verdict: the row is kind report under the producer triple (candidateId, NULL, path), id the deterministic derivation',
+    t28Row?.kind === 'report' && t28Row?.job_id === 'c01' && t28Row?.attempt_number === null
+    && t28Row?.artifact_id === artifactId('c01', null, t28VerdictPath))
+  t('integrate verdict: size_bytes/content_hash equal the written verdict file (hash-at-ingest of the replay\'s own evidence)',
+    t28Row?.size_bytes === Buffer.byteLength(t28VerdictJson)
+    && t28Row?.content_hash === createHash('sha256').update(t28VerdictJson).digest('hex'))
+  const t28ReplayEvents = t28Db.prepare('SELECT seq, type, at, payload FROM events WHERE type = ?').all('INTEGRATE_REPLAYED')
+  t('integrate verdict: exactly one INTEGRATE_REPLAYED event, at the verdict\'s own appliedAt (never Date.now()), prior events untouched',
+    t28ReplayEvents.length === 1 && t28ReplayEvents[0]?.at === t28AppliedAt
+    && eq(t28Db.prepare('SELECT seq, type, at, payload FROM events WHERE seq <= ? ORDER BY seq').all(t28EventsBefore.length), t28EventsBefore))
+  t('integrate verdict: the event payload names candidateId/targetHead/applied/treeChanged/passed/worktreePath/verdictPath',
+    eq(JSON.parse(t28ReplayEvents[0]?.payload), {
+      candidateId: 'c01', targetHead: 'a'.repeat(40), applied: true, treeChanged: true,
+      passed: true, worktreePath: t28WorktreePath, verdictPath: t28VerdictPath,
+    }))
+  t('integrate verdict: gate_results value-identical before and after (a replay never writes gate_results — the PK upsert would overwrite the run\'s own verdicts)',
+    eq(t28Db.prepare('SELECT * FROM gate_results ORDER BY candidate_id, gate_name').all(), t28GateResultsBefore))
+  t('integrate verdict: the run\'s own artifacts rows untouched (the verdict row is the only addition)',
+    eq(t28Db.prepare('SELECT * FROM artifacts WHERE path <> ? ORDER BY artifact_id').all(t28VerdictPath), t28ArtifactsBefore))
+  // Re-record idempotency: the same verdict twice → the same ONE row, events append-only.
+  recordIntegrateVerdict(t28DbPath, report.runId, {
+    candidateId: 'c01', appliedAt: t28AppliedAt, targetHead: 'a'.repeat(40),
+    applied: true, treeChanged: true, passed: true,
+    worktreePath: t28WorktreePath, verdictPath: t28VerdictPath,
+  })
+  t('integrate re-record: the verdict row is idempotent (same natural key, same values)',
+    eq(t28Db.prepare('SELECT * FROM artifacts WHERE path = ?').all(t28VerdictPath), [t28Row]))
+  t('integrate re-record: events append-only (a second INTEGRATE_REPLAYED appended, nothing rewritten)',
+    t28Db.prepare('SELECT COUNT(*) AS n FROM events WHERE type = ?').get('INTEGRATE_REPLAYED').n === 2
+    && eq(t28Db.prepare('SELECT seq, type, at, payload FROM events ORDER BY seq').all().slice(t28EventsBefore.length + 1),
+      [{ seq: t28EventsBefore.length + 2, type: 'INTEGRATE_REPLAYED', at: t28AppliedAt, payload: t28ReplayEvents[0]?.payload }]))
+  t('integrate re-record: integrity_check ok', t28Db.prepare('PRAGMA integrity_check').get()['integrity_check'] === 'ok')
+  t28Db.close()
 
   // ---------- T-006: pure validators on hand-built inputs (Gate 0.5 pattern) ----------
   // The derived DAG is acyclic by construction; the interesting validator

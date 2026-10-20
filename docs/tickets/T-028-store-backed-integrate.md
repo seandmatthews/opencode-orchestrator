@@ -1,6 +1,6 @@
 # T-028 — Store-backed integrate: verify-when-recorded diff evidence + store-recorded replay verdicts (closes T-005 carve #5)
 
-**Status:** proposed
+**Status:** done 2026-10-19
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 2
 **Depends on:** T-016 (done — consumes its artifacts rows, `artifactId` handles, and the `verifyRunArtifacts` primitive), T-005 (done — extends its landed replay command; T-005:104-111 names this successor)
@@ -216,3 +216,95 @@ Baseline this session, on clean main at d3e4d97: `npm run typecheck` → exit 0 
 only Known issue #7's node:sqlite ExperimentalWarning); `node
 node_modules/tsx/dist/cli.mjs scripts/check-artifacts.mjs` → exit 0 (Gate 1.16). Not
 run this session: Gate 1 demo and the full fast tier; Gate 2 not owed per above.
+
+## Landed
+
+2026-10-19, one change-set: `src/store/index.ts`, `src/integrate.ts`,
+`scripts/verify.mjs`, `scripts/check-store.mjs`, VERIFICATION.md, this ticket, and
+the index row. Note on line numbers: this ticket was authored against main at
+d3e4d97; T-026 and T-027 landed since (both were "proposed" siblings in the ticket's
+sequencing note), so every `src/integrate.ts` citation below uses the landed file's
+line numbers, not the ticket's.
+
+- `src/store/index.ts` — `diffArtifactId(c)` exported beside `deriveArtifacts`
+  (`:380-393` in the landed file), returning `artifactId(c.id,
+  finalAttemptNumber(c), c.diffPath)` when `diffPath` exists, else null — the exact
+  triple the derivation pushes (`push(c.id, fin, c.diffPath)`); `finalAttemptNumber`
+  stays module-private. Header docs: the first-READ-that-gates-an-action scoping
+  paragraph under the "persistence records verdicts" line (`:14-20`), the fourth
+  wall-clock scoping case after T-010's (`:38-52`), and `INTEGRATE_REPLAYED` in the
+  vocabulary block per the T-008/T-009 precedent. New writer `recordIntegrateVerdict`
+  (`:455-536`): upserts ONE `artifacts` row via the existing `upsertArtifact` under
+  the producer triple `(candidateId, NULL, verdictPath)` (kind `'report'` by the path
+  rule), `size_bytes`/`content_hash` from the same `measureEvidenceFile` read after
+  the file is written; appends one `INTEGRATE_REPLAYED` event at the verdict's own
+  `appliedAt`; never touches `gate_results`. Opens with `enableForeignKeyConstraints:
+  false` (`recordAbandonedAttempts` precedent — the replayed run may never have been
+  ingested) and runs the schema (`CREATE TABLE IF NOT EXISTS`, the other writers'
+  posture).
+- `src/integrate.ts` — `--db <path>` (default `C:\swarm\refinery.db`), documented in
+  the usage text (`:61-63`, `:75-78`, `:88`, `:95`). Verify-when-recorded sits
+  entirely in the pre-lock policy-refusal sequence, deliberately BEFORE the on-disk
+  `existsSync(diffPath)` check so the store's `missing` status is the refusal a
+  deleted diff produces (`:266-296`): `verified` → proceed with one log line naming
+  the handle ("unmutated since ingest"); `mutated` → refuse, message naming the
+  since-ingest scope + spec §17.3; `missing` → refuse naming "existed at ingest";
+  a present-but-unopenable store → refuse with a clear message (the ticket's stated
+  choice); no DB / no row / null-hash (`unverified`) → fall through, today's behavior
+  byte-for-byte. `writeVerdict` now records through the store best-effort
+  (`recordVerdict`, `:338-379`) on BOTH call sites (NO-OP refusal + normal): no DB
+  file skips the record with one stdout line (nothing creates a `refinery.db` as a
+  side effect — the T-006 refusal pattern, and the sandbox discipline the fast tier
+  keeps); a failed write logs `PERSISTENCE FAILED` loudly and changes neither the
+  exit code nor the verdict file. Replay semantics untouched: detached worktree,
+  `gateContract` (T-027's compare-when-recorded verbatim), NO-OP guard, binary stub
+  refusal, prepare-only §17.4, checkout-lock flow.
+- `scripts/verify.mjs` — Gate 1.5 faces for every acceptance criterion: help/flag
+  (`--db <path>` + the `C:\swarm\refinery.db` default in the usage text), intact-
+  store replay exit 0 with the verified handle logged, mutated-since-ingest refusal
+  (no worktree / sandbox `worktree list` untouched / no lock files / no artifact,
+  refusal naming the since-ingest scope), deleted-since-ingest refusal (store status
+  `missing`), junk-file-at-`--db` refusal (present but unopenable), null-hash
+  fallback replay exit 0 without claiming verification, and the failed-write face
+  (DB ingested then made read-only → exit stays gate-determined, verdict intact,
+  `PERSISTENCE FAILED` logged). Fixture runs are ingested into temp DBs through the
+  real store via a generated tsx helper in the section's sandbox. One plumbing
+  change, no assertion change: `expectIntegrate` moved from `execFileSync` to
+  `spawnSync` so stdout AND stderr are captured on exit-0 runs — three faces pin log
+  lines the command prints on success paths (help text, verified-handle line,
+  PERSISTENCE FAILED); the failure-path data every existing face reads is identical.
+  Each passing replay disposes its own dirty worktree through `clean --force` (the
+  T-027 pattern); run ids `20991010030010-30015` sort before the existing blocks so
+  the tidy sweeps are untouched.
+- `scripts/check-store.mjs` — Gate 1.6 extensions: `diffArtifactId` exact literals
+  in BOTH scopes over the pinned fixed inputs, matched against the actually-ingested
+  diff rows on the fixture (pre-T-007) and the retried variant (FINAL attempt's row)
+  — no handle drift; `recordIntegrateVerdict` row shape (kind/job/attempt/id,
+  hash-at-ingest of the written verdict file), event shape (exactly one
+  `INTEGRATE_REPLAYED` at the verdict's own `appliedAt`, payload naming all seven
+  fields), `gate_results` value-identical before/after (full-table compare), the
+  run's own artifacts rows untouched, prior events untouched with exactly one
+  appended, re-record idempotent (same ONE row, events append-only),
+  `PRAGMA integrity_check` ok.
+- Docs: VERIFICATION.md — the Gate 1.5 integrate section documents
+  verify-when-recorded with the since-ingest honesty boundary, the extended refusal
+  list, the verdict recording, and the seven new fast-tier faces; the Gate 1.6
+  section gains the T-028 bullet and notes the header's fourth wall-clock case +
+  READ-scoping paragraph where the T-016 third case is described; the Gate 1.16
+  section notes integrate as `verifyRunArtifacts`'s first pipeline consumer (the
+  recover carve stands). No existing assertion weakened anywhere — the fast tier is
+  ALL GREEN with only additions.
+
+**Gates measured in the lane:** `npm run typecheck` → exit 0 (Gate 0);
+`node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs` → exit 0, ALL GREEN
+(Gate 1.6, incl. the new T-028 assertions — one ordering bug in a NEW assertion
+fixed during iteration: an unordered `SELECT` vs an `ORDER BY` snapshot; no engine
+change involved); `node node_modules/tsx/dist/cli.mjs scripts/check-artifacts.mjs`
+→ exit 0 (Gate 1.16, green and untouched);
+`node scripts/verify.mjs fast` → `=== verify (fast) complete: ALL GREEN ===`
+(Gate 0, Gate 1 demo, Gate 0.5, Gate 1.5 with the new faces, Gates 1.6–1.21;
+three intermediate reds were plumbing-only — success-path output was discarded by
+`expectIntegrate` — fixed by the spawnSync change above). Gate 2 not owed and not
+run: `src/runner.ts`, adapters, gates, workspace handling, and report shape are
+untouched; `src/integrate.ts` is none of those. Gate 0.5 n/a (`src/parse.ts`
+untouched); Gate 3 n/a (no adapter).
