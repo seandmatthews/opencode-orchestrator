@@ -285,6 +285,12 @@ async function main() {
       && byId.get('codemod-b')?.workerId === 'machine' && byId.get('codemod-b')?.workerOk === true
       && byId.get('codemod-b')?.diffBytes > 0 && byId.get('codemod-b')?.passedAllGates === true
       && byId.get('codemod-b')?.gates?.[0]?.name === 'marker-b' && byId.get('codemod-b')?.gates?.[0]?.passed === true)
+    // T-027: the CommandGate stamp end-to-end — the on-disk report's gate
+    // entries carry the job spec's commands exactly (the only uniform place
+    // a command can meet its verdict is inside the producer's GateResult).
+    t('S5 (T-027): the report\'s gate entries carry the job spec\'s command end-to-end (CommandGate stamps GateResult.command)',
+      byId.get('codemod-a')?.gates?.[0]?.command === 'node -e "require(\'fs\').accessSync(\'marker-a.txt\')"'
+      && byId.get('codemod-b')?.gates?.[0]?.command === 'node -e "require(\'fs\').accessSync(\'marker-b.txt\')"')
     t('S5: the no-op machine command is eliminated as NO-OP, never a pass (AGENTS.md #7) — worker ok, zero-byte diff, gates irrelevant',
       byId.get('noop')?.workerOk === true && byId.get('noop')?.diffBytes === 0
       && byId.get('noop')?.passedAllGates === false && byId.get('noop')?.error === undefined

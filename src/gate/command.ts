@@ -56,6 +56,10 @@ export class CommandGate implements Gate {
             exitCode,
             durationMs: Date.now() - started,
             outputTail: output.slice(-TAIL_BYTES),
+            // T-027: the verdict carries a photograph of the command that
+            // produced it — every resolve path (pass, fail, and timeout
+            // alike: a killed shell still ran a known command).
+            command: this.command,
             ...(cleanupFailures.length > 0 ? { cleanupFailures } : {}),
           })
         },

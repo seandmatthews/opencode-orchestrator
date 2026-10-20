@@ -282,6 +282,16 @@ async function main() {
         ...wellFormed,
         gateResults: [{ ...wellFormed.gateResults[0], cleanupFailures: ['CLEANUP FAIL: pid 1 survived taskkill /T /F'] }],
       }).gateResults[0]?.cleanupFailures?.length === 1)
+    // T-027: command, if present, is a non-empty string — refuse '' and
+    // non-string; absent accepted (the well-formed fixture above is
+    // command-less and stays green untouched; probe-bundle GateResult
+    // entries are argv-form evidence of a different shape and stay
+    // legitimately command-less).
+    t('P1 (T-027): a GateResult command that is a non-empty string validates and is preserved verbatim',
+      validateEvidenceBundle({
+        ...wellFormed,
+        gateResults: [{ ...wellFormed.gateResults[0], command: 'node build.js' }],
+      }).gateResults[0]?.command === 'node build.js')
     const refusesWith = (mutate, needle) => {
       const raw = JSON.parse(JSON.stringify(wellFormed))
       mutate(raw)
@@ -308,6 +318,14 @@ async function main() {
       refusesWith((r) => { r.artifacts[0].kind = 'blob' }, 'kind must be "log", "report", or "screenshot"')
       && refusesWith((r) => { r.measurements[0].value = 'two' }, 'value must be a finite number')
       && refusesWith((r) => { r.gateResults[0].passed = 1 }, 'passed must be a boolean'))
+    // T-027: command, if present, is a non-empty string — refuse '' and
+    // non-string; absent accepted (the command-less fixtures stay green
+    // untouched; probe-bundle GateResult entries are argv-form evidence of
+    // a different shape and stay legitimately command-less).
+    t('P1 (T-027): an empty-string GateResult command is refused',
+      refusesWith((r) => { r.gateResults[0].command = '' }, 'command, if present, must be a non-empty string'))
+    t('P1 (T-027): a non-string GateResult command is refused',
+      refusesWith((r) => { r.gateResults[0].command = 42 }, 'command, if present, must be a non-empty string'))
     // T-019 flip (recorded in the ticket as one of this change-set's two
     // intentional invalidations of existing assertions): the kind-refusal
     // message previously pinned `kind must be "log" or "report"` — the

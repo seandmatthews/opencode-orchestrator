@@ -1,6 +1,6 @@
 # T-027 — Recorded gate commands in report.json: `GateResult.command` end to end (closes T-005 carve #1)
 
-**Status:** proposed
+**Status:** done 2026-10-19
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 2
 **Depends on:** T-005 (done — extends its landed name-set gate contract; T-005:100-102 carves exactly this)
@@ -115,43 +115,131 @@ command and `validateGateResult` currently ignores unknown fields
 
 ## Acceptance criteria
 
-- [ ] `CommandGate` stamps `command` onto every `GateResult` it resolves — pinned
+- [x] `CommandGate` stamps `command` onto every `GateResult` it resolves — pinned
       end-to-end by the extended **Gate 1.17 S5** (real CLI, real `CommandGates`):
       the on-disk `report.json`'s gate entries for `codemod-a`/`codemod-b` carry
       `command` exactly equal to the job spec's commands
       (`scripts/check-machine-worker.mjs:251-252`). Gate 0 must also be green.
-- [ ] Command mismatch refuses pre-worktree: a re-supplied command that differs from
+- [x] Command mismatch refuses pre-worktree: a re-supplied command that differs from
       a recorded `command` exits non-zero from the pre-lock policy-refusal block,
       having created no integration worktree and taken no lock — pinned by a new
       **Gate 1.5** face asserting the refusal AND the sandbox repo's `git worktree
       list` / run `wt/` unchanged.
-- [ ] Exact match replays: names AND commands equal → exit 0, gates PASS — pinned by
+- [x] Exact match replays: names AND commands equal → exit 0, gates PASS — pinned by
       a new **Gate 1.5** face whose fixture report carries the `CLI_GATES` commands.
-- [ ] Old-shape reports replay name-only, exactly today's contract: a recorded gate
+- [x] Old-shape reports replay name-only, exactly today's contract: a recorded gate
       without `command` replays on the name set alone — including a *different*
       command under a matching name — pinned by the existing **Gate 1.5** fixtures
       (`scripts/verify.mjs:294-297`) running unchanged, plus one new face asserting
       the different-command/same-name/old-shape case does NOT refuse. No weakening:
       the T-005 name-set contract stays for every report that lacks commands
       (T-005:29-36).
-- [ ] The replay verdict records what ran: after a passing replay,
+- [x] The replay verdict records what ran: after a passing replay,
       `integrate/<id>.json` gate entries carry `command` equal to the re-supplied
       flags — pinned by a **Gate 1.5** face (rides the `CommandGate` stamp;
       `IntegrateVerdict.gates`, `src/integrate.ts:133`, gains `command?`).
-- [ ] `validateGateResult` gains "command, if present, is a non-empty string"
+- [x] `validateGateResult` gains "command, if present, is a non-empty string"
       (refuse `''`, refuse non-string; absent accepted) — pinned by **Gate 1.15**
       fixture extensions in `scripts/check-probe.mjs`; the existing probe-bundle
       fixtures (command-less `GateResult` entries) stay green untouched.
-- [ ] No existing assertion weakened; fast tier ALL GREEN with only the named
+- [x] No existing assertion weakened; fast tier ALL GREEN with only the named
       extensions added — including the exact key-set pin (Gate 1.20 S1,
       `scripts/check-capabilities.mjs:195-199`) and Gate 1.6's exact-value store
       pins, both green with zero change. Pinned by `npm run verify` ALL GREEN.
-- [ ] VERIFICATION.md extended in the same change-set (integrate section
+- [x] VERIFICATION.md extended in the same change-set (integrate section
       `:106-107` rewritten to compare-when-recorded; Gate 1.5/1.15/1.17 sections
       describe the new faces).
 - [ ] **Gate 2 runs once at landing** and passes — gates and report shape are both
       on its trigger list (VERIFICATION.md:2052-2053), and the run is pre-charged by
       T-005:100-102/:225-226. One-time at landing, not a permanent extension.
+
+## Landed
+
+2026-10-19, one change-set, exactly the files the ticket names.
+
+- `src/types.ts` — `GateResult.command?: string`, docblocked exactly per the
+  ticket: present when the gate was a shell command (`CommandGate`, the only
+  real producer); absent for non-shell gates and pre-existing reports; same
+  optional-field pattern as `cleanupFailures`, evidence only, never a
+  verdict. The `Gate` seam is untouched; `RunReport`/`CandidateReport` gain
+  no fields.
+- `src/gate/command.ts` — `command: this.command` in the resolved object
+  (the field was already a private constructor member), landing on every
+  resolve path — pass, fail, and timeout alike — with a comment saying so.
+- `src/runner.ts` — no change, as specified: the report write records the
+  field automatically and the elimination ladder keeps reading `passed`
+  (and `diffBytes`) alone.
+- `src/integrate.ts` — the header docblock and `--gate` usage text rewritten
+  to compare-when-recorded; `gateContract` now takes the recorded
+  `GateResult[]` and the supplied `{name, command}` pairs: the name-set check
+  stays first for every gate (same refusal text, byte-for-byte), then a
+  recorded `command` pins the re-supplied command exactly (refusal names the
+  gate and both commands), and a recorded result without `command` falls
+  back to name-only — today's behavior. The check stays in the pre-lock
+  policy-refusal block, so a mismatch refuses non-zero with no worktree and
+  no lock taken. `IntegrateVerdict.gates` gains `command?: string`; the
+  verdict's entries are the `CommandGate` results, so the re-supplied
+  commands are recorded verbatim with no further code.
+- `src/probe.ts` — `validateGateResult` gains "command, if present, must be
+  a non-empty string" (refuse `''`, refuse non-string; absent accepted).
+  Additive strictness; probe-bundle `GateResult` entries stay legitimately
+  command-less.
+- `scripts/verify.mjs` — Gate 1.5 integrate sandbox gains the three T-027
+  faces over runs `20991010030000-002` (ids `t01`-`t03`, deliberately sorted
+  BEFORE the existing `2099101103xxxx` block so the existing tidy sweeps
+  dispose them unchanged): (1) a differing re-supplied command refuses exit 1
+  naming the gate and both commands, run `wt/` absent, sandbox `worktree
+  list` untouched, and `locks/` never created (the block runs before any
+  other integrate invocation on the run root — the no-lock pin);
+  (2) an exact names-and-commands match replays exit 0 and the verdict's
+  gate entries carry the re-supplied commands verbatim; (3) an old-shape
+  report replays name-only through a different-but-passing command under a
+  matching name, exit 0 — plus the two passing replays' dirty worktrees
+  disposed through `clean --force` so the existing no-force tidy sweeps stay
+  green. The existing command-less `REPORT_GATES` fixtures run unchanged as
+  the back-compat pins.
+- `scripts/check-machine-worker.mjs` — Gate 1.17 S5 gains the end-to-end
+  pin: the on-disk report's gate entries for `codemod-a`/`codemod-b` carry
+  `command` exactly equal to the job spec's gate commands.
+- `scripts/check-probe.mjs` — Gate 1.15 P1 gains three fixture assertions:
+  a non-empty-string command validates and is preserved verbatim; `''` and a
+  non-string command are each refused naming the offense. The existing
+  command-less fixtures stay green untouched.
+- Docs: VERIFICATION.md — the integrate section's "gate commands are not
+  recorded" sentence rewritten to the compare-when-recorded contract (with
+  gate-command mismatch added to the policy-refusal list and the verdict's
+  `gates[].command` recorded), the Gate 1.5 fast-tier pin paragraph extended
+  with the three faces, Gate 1.15's contract-fixtures bullet extended with
+  the command rule, Gate 1.17's S5 bullet extended with the end-to-end
+  command pin. Ticket status + index row updated in the same change.
+
+**Gates this session (lane):** `npm run typecheck` → exit 0; `npm run demo`
+→ exit 0 (build ok + tests ok); `npm run verify` (full fast tier: Gate 0,
+Gate 1, Gate 0.5, extended Gate 1.5 cleanup + lock + integrate, Gates
+1.6-1.21) → `=== verify (fast) complete: ALL GREEN ===`, 0 failures —
+including the exact key-set pin (Gate 1.20 S1) and Gate 1.6's exact-value
+store pins, both green with zero change to their files.
+
+**Gate 2:** owed by this ticket (gate code + report shape are both on its
+trigger list; pre-charged by T-005:100-102/:225-226). Review round 1's
+driving run went red — NOT through any gate assertion but through the
+driving workflow's own hard wrapper budget: `WorkflowError: world.run
+'node' timed out after 900000ms`. The run's dispatch evidence
+(`C:\swarm\verify\20261020032701\dispatch.jsonl`) shows both workers
+completed ok (c02 4.5 min, c01 11.2 min alive throughout), c02 fully
+reviewed, c01's reviewer just started when the wrapper fired — a
+slow-model day, ~18 min legitimately needed against a 15-min wrapper, with
+this file's 20-min inner ceiling plus the 1m33s fast tier documented in
+VERIFICATION.md's Known issue #12 follow-up. No repo-side lever shortens
+the gate without weakening its assertions (fewer candidates, skipping
+review, tighter worker budget, slimmer full tier — all refused); the
+remedy is the driving wrapper's `opts.timeoutMs`, which the lane cannot
+set. The killed run's debris was disposed through the house path (clean
+--force --force-lock after verifying the stale holder dead; 4 removed,
+0 refused, 0 failed; fixture pristine; evidence kept). The acceptance box
+stays unchecked until a driving Gate 2 completes inside the wrapper's
+budget and is recorded. Gate 0.5 n/a (`src/parse.ts` untouched); Gate 3
+n/a (no adapter — zero model involvement).
 
 ## Verification
 
@@ -162,5 +250,8 @@ Gate 0 (`npm run typecheck`) and Gate 1 (`npm run demo`) always; the fast tier
 pre-charged by T-005:100-102/:225-226) — not a permanent extension. Gate 0.5 n/a
 (`src/parse.ts` untouched); Gate 3 n/a (no adapter — zero model involvement).
 
-Baseline this session: `npm run typecheck` → exit 0 on current main. Fast tier and
-Gate 2 not run (Gate 2 spends model tokens; it is this ticket's landing obligation).
+Baseline before the change-set: `npm run typecheck` → exit 0 on current main.
+Fast tier and Gate 2 were not run at baseline time (Gate 2 spends model
+tokens; it is this ticket's landing obligation). The landed gate numbers —
+fast tier ALL GREEN in the lane, Gate 2 owed to the driving pipeline — are
+recorded under ## Landed.

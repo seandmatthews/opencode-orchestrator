@@ -370,6 +370,13 @@ function validateGateResult(where: string, v: unknown): void {
     refuse(`${where} durationMs must be a finite number >= 0`)
   }
   if (typeof v.outputTail !== 'string') refuse(`${where} outputTail must be a string`)
+  // T-027: command, if present, is a non-empty string (refuse '', refuse
+  // non-string; absent accepted). Additive strictness — probe-bundle
+  // GateResult entries are argv-form evidence of a different shape and stay
+  // legitimately command-less.
+  if (v.command !== undefined && (typeof v.command !== 'string' || v.command.length === 0)) {
+    refuse(`${where} command, if present, must be a non-empty string`)
+  }
   if (v.cleanupFailures !== undefined) {
     if (!Array.isArray(v.cleanupFailures) || v.cleanupFailures.some((l) => typeof l !== 'string')) {
       refuse(`${where} cleanupFailures must be an array of strings`)
