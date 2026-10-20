@@ -66,4 +66,4 @@ Rules:
 | T-027 | Recorded gate commands in report.json: `GateResult.command` end to end (closes T-005 carve #1; spec §17.3:1192, §9.1:700) | high | done 2026-10-19 |
 | T-028 | Store-backed integrate: verify-when-recorded diff evidence + store-recorded replay verdicts (closes T-005 carve #5; spec §17.3:1192, §29:1877) | high | done 2026-10-19 |
 | T-029 | Worker prompt version: `Attempt.promptVersion` producer — hash-at-composition of the builder prompt (closes T-007's reserved null producer; spec §6.7:446, §18:1207) | medium | done 2026-10-20 |
-| T-030 | Bounded R&D loop: survivor-evidence feedback rounds (`--rounds`) + the T-012-reserved packet→prompt composer (ROADMAP stage 6; spec §34 M6 composition, M8 feedback edge) | high | proposed |
+| T-030 | Bounded R&D loop: survivor-evidence feedback rounds (`--rounds`) + the T-012-reserved packet→prompt composer (ROADMAP stage 6; spec §34 M6 composition, M8 feedback edge) | high | done 2026-10-20 |

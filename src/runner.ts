@@ -4,10 +4,11 @@ import { join } from 'node:path'
 import { parseBriefs, parseReview } from './parse.js'
 import { evidenceBundlePath, failedBundle, writeEvidenceBundle } from './probe.js'
 import type { Probe } from './probe.js'
+import { composeRoundPacket } from './rounds.js'
 import { buildSchedule, readyJobs } from './scheduler.js'
 import type { PhaseSpec } from './scheduler.js'
 import { DERIVED_PHASE_ID } from './store/index.js'
-import type { Attempt, CandidateReport, FailureRecord, Gate, GateResult, PlannerReport, ProbeRunSummary, ReviewReport, RunReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
+import type { Attempt, CandidateReport, FailureRecord, Gate, GateResult, PlannerReport, ProbeRunSummary, ReviewReport, RoundRecord, RunReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
 
 /**
  * Best-effort append to <runDir>/dispatch.jsonl (T-010) — the in-run evidence
@@ -97,6 +98,20 @@ export interface SkeletonOptions {
    */
   plannerWorker?: WorkerAdapter
   reviewerWorker?: WorkerAdapter
+  /**
+   * T-030 bounded R&D loop: total planning/implementation rounds (1..2 —
+   * capped at 2 this slice, refused beyond that at the CLI). Default/absent
+   * = 1 = the single-pass behavior exactly; no `rounds` block on the report.
+   * At 2, round 1 runs as today and — when it produced at least one gate
+   * survivor — the round composer (src/rounds.ts) renders the survivors'
+   * evidence into the round-2 planner prompt, and a fresh candidate wave
+   * (ids `<survivorId>-r2`, same baseSha) repeats the mechanics. Only
+   * meaningful in planner mode (`--goal`): a `--jobs` run or `--no-planner`
+   * has no planner phase to feed (refused at the CLI; a direct caller
+   * passing `rounds: 2` with either gets round 2 recorded as not executed,
+   * never fabricated).
+   */
+  rounds?: number
   workspaces: WorkspaceProvider
   artifactsDir: string
   /** Dispose workspaces after evidence capture instead of leaving them for inspection. */
@@ -172,11 +187,119 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
     gates: opts.gates,
   }))
 
-  // Scheduler loop (T-009): repeatedly take the deterministic ready list and
-  // dispatch up to the concurrency cap. dispatchIndex is a job's position in
-  // the run's dispatch order; terminal states feed the next ready call. A
-  // job whose dependencies can never reach terminal success (an upstream
-  // failure) is simply never dispatched — recorded, not fabricated.
+  const round1 = await driveJobs(jobs, opts)
+  let candidates = jobs.map((j) => round1.reports.get(j.id)).filter((r): r is CandidateReport => r !== undefined)
+  const schedule = opts.scheduled
+    ? buildSchedule(opts.scheduled.phases, round1.nodes, round1.terminal, round1.dispatchIndexOf)
+    : undefined
+
+  // The bounded R&D loop (T-030): round 1's survivors are planning evidence
+  // for one more round. The composer (src/rounds.ts) is pure and renders a
+  // fixed-framing text block; the block rides the round-2 planner prompt —
+  // prompt text, never capability — and round 2 re-enters the SAME
+  // mechanics: runPlannerPhase unchanged (same artifact-only scratch-dir
+  // posture, parseBriefs unchanged), then a fresh candidate wave through the
+  // same scheduler loop on fresh state, leased at the SAME baseSha (survivor
+  // diffs are planning evidence, never stacked patches — candidate lineage
+  // is M8). Round-2 ids are `<survivorId>-r2` (SPEC_ID_PATTERN-safe), so
+  // branches, store rows, and report entries never collide across rounds.
+  // One runId, one checkout lock (held by the caller across both rounds);
+  // dispatch.jsonl keeps its line shapes — round 2 is just more dispatch
+  // lines after the one run header written above.
+  const roundsWanted = opts.rounds ?? 1
+  let rounds: RoundRecord[] | undefined
+  if (roundsWanted >= 2) {
+    const round1Survivors = candidates.filter((c) => c.passedAllGates)
+    rounds = [{ round: 1, executed: true, survivorIds: round1Survivors.map((c) => c.id) }]
+    // Round 2 needs a planner phase to feed: --jobs mode has none (the CLI
+    // refuses the combination; a direct caller gets the round recorded as
+    // not executed, never fabricated), and so does --no-planner. No
+    // round-1 survivor means there is no evidence to compose from — round 2
+    // is recorded not-executed rather than run blind.
+    if (!opts.scheduled && opts.plannerModel !== null && round1Survivors.length > 0) {
+      const composition = composeRoundPacket({ candidates, model: opts.plannerModel, finishedRound: 1 })
+      const renderedBlockPath = join(opts.artifactsDir, 'round-2-context-block.txt')
+      writeFileSync(renderedBlockPath, composition.renderedBlock)
+      const round2Ids = round1Survivors.map((s) => `${s.id}-r2`)
+      let briefs2: string[] = round2Ids.map(() => opts.goal)
+      const planner2 = await runPlannerPhase(opts, {
+        count: round2Ids.length,
+        contextBlock: composition.renderedBlock,
+        evidenceTag: '-r2',
+      })
+      if (planner2.ok) briefs2 = planner2.briefs
+      console.log(`planner (round 2): ${planner2.ok ? `${briefs2.length} briefs` : 'no valid output, using raw goal'} in ${(planner2.durationMs / 1000).toFixed(0)}s (${planner2.attempts} attempt${planner2.attempts > 1 ? 's' : ''})`)
+      console.log('')
+      const jobs2: ResolvedJob[] = round2Ids.map((id, i) => ({
+        id,
+        phaseId: DERIVED_PHASE_ID,
+        dependencies: [],
+        brief: briefs2[i]!,
+        model: opts.model,
+        worker: opts.worker,
+        timeoutMs: opts.timeoutMs,
+        gates: opts.gates,
+      }))
+      const round2 = await driveJobs(jobs2, opts)
+      const candidates2 = jobs2.map((j) => round2.reports.get(j.id)).filter((r): r is CandidateReport => r !== undefined)
+      rounds.push({
+        round: 2,
+        executed: true,
+        survivorIds: candidates2.filter((c) => c.passedAllGates).map((c) => c.id),
+        packetFingerprint: composition.packet.fingerprint.hash,
+        renderedBlockPath,
+      })
+      candidates = [...candidates, ...candidates2]
+      planner = planner2
+    } else {
+      rounds.push({ round: 2, executed: false, survivorIds: [] })
+    }
+  }
+
+  const report: RunReport = {
+    runId: opts.runId,
+    repo: opts.repo,
+    baseSha: opts.baseSha,
+    goal: opts.goal,
+    model: opts.model,
+    // The last executed planner phase's report — round 2's when the loop
+    // ran (the planner whose briefs the final candidate wave rode), round
+    // 1's otherwise. Round 1's planner evidence stays on disk at today's
+    // paths (planner.log / planner-raw.txt).
+    planner,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    // Report order follows the spec order (candidateIds order in default
+    // mode) — today's summary/ingest order. Only dispatched jobs appear: a
+    // never-dispatched job is recorded as not-dispatched in the schedule
+    // block, never fabricated as a candidate. Round-2 candidates append
+    // after round 1's, in round-1 survivor order.
+    candidates,
+  }
+  if (schedule) {
+    report.schedule = schedule
+  }
+  if (rounds !== undefined) {
+    report.rounds = rounds
+  }
+  writeFileSync(join(opts.artifactsDir, 'report.json'), JSON.stringify(report, null, 2))
+  return report
+}
+
+/** The scheduler loop (T-009): repeatedly take the deterministic ready list
+ *  and dispatch up to the concurrency cap. dispatchIndex is a job's position
+ *  in the run's dispatch order; terminal states feed the next ready call. A
+ *  job whose dependencies can never reach terminal success (an upstream
+ *  failure) is simply never dispatched — recorded, not fabricated. Each
+ *  round of the bounded loop (T-030) drives its own job wave through this
+ *  one loop with fresh state — the round-2 wave shares no terminal/dispatch
+ *  bookkeeping with round 1's. */
+async function driveJobs(jobs: ResolvedJob[], opts: SkeletonOptions): Promise<{
+  reports: Map<string, CandidateReport>
+  terminal: Map<string, 'succeeded' | 'failed'>
+  dispatchIndexOf: Map<string, number>
+  nodes: { id: string; phaseId: string; dependencies: string[] }[]
+}> {
   const nodes = jobs.map((j) => ({ id: j.id, phaseId: j.phaseId, dependencies: j.dependencies }))
   const byId = new Map(jobs.map((j) => [j.id, j]))
   const terminal = new Map<string, 'succeeded' | 'failed'>()
@@ -202,33 +325,23 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
     if (inFlight.size === 0) break
     await Promise.race([...inFlight])
   }
-
-  const report: RunReport = {
-    runId: opts.runId,
-    repo: opts.repo,
-    baseSha: opts.baseSha,
-    goal: opts.goal,
-    model: opts.model,
-    planner,
-    startedAt,
-    finishedAt: new Date().toISOString(),
-    // Report order follows the spec order (candidateIds order in default
-    // mode) — today's summary/ingest order. Only dispatched jobs appear: a
-    // never-dispatched job is recorded as not-dispatched in the schedule
-    // block, never fabricated as a candidate.
-    candidates: jobs.map((j) => reports.get(j.id)).filter((r): r is CandidateReport => r !== undefined),
-  }
-  if (opts.scheduled) {
-    report.schedule = buildSchedule(opts.scheduled.phases, nodes, terminal, dispatchIndexOf)
-  }
-  writeFileSync(join(opts.artifactsDir, 'report.json'), JSON.stringify(report, null, 2))
-  return report
+  return { reports, terminal, dispatchIndexOf, nodes }
 }
 
-function plannerPrompt(goal: string, count: number): string {
-  return [
+function plannerPrompt(goal: string, count: number, contextBlock?: string): string {
+  const lines = [
     'You are the planning tier of a multi-candidate implementation system.',
     `GOAL: ${goal}`,
+  ]
+  // T-030: the round composer's rendered block rides as an optional section
+  // between the goal and the output contract — prompt text, never
+  // capability: the planner keeps its artifact-only scratch-dir posture and
+  // parseBriefs parses the reply exactly as round 1's. Absent (every n=1
+  // run) ⇒ the prompt is byte-identical to the pre-T-030 text.
+  if (contextBlock !== undefined) {
+    lines.push('', contextBlock)
+  }
+  lines.push(
     '',
     `Produce exactly ${count} distinct implementation briefs, one per candidate worker.`,
     'Each brief must be self-contained, concrete, and independently implementable as a small diff.',
@@ -236,7 +349,8 @@ function plannerPrompt(goal: string, count: number): string {
     'Do not reference "the other briefs"; each worker sees only its own.',
     '',
     `Output ONLY a JSON array of ${count} strings. No markdown fences, no commentary.`,
-  ].join('\n')
+  )
+  return lines.join('\n')
 }
 
 const MAX_DIFF_CHARS = 30_000
@@ -267,15 +381,26 @@ function reviewerPrompt(brief: string, workspacePath: string, diff: string, gate
   ].join('\n')
 }
 
-async function runPlannerPhase(opts: SkeletonOptions): Promise<PlannerReport> {
+/** One planner phase's round-scoped inputs (T-030): the candidate count the
+ *  prompt asks briefs for, the composer's rendered context block to embed
+ *  (round 2 only), and the evidence-filename tag keeping a second round's
+ *  planner evidence from overwriting round 1's (round 2 writes
+ *  planner-r2.log / planner-r2-raw.txt; round 1 keeps today's paths). */
+interface PlannerRound {
+  count: number
+  contextBlock?: string
+  evidenceTag?: string
+}
+
+async function runPlannerPhase(opts: SkeletonOptions, round?: PlannerRound): Promise<PlannerReport> {
   // T-025: the planner rides its own adapter when one was selected,
   // otherwise the run-level worker — the flags-absent default is today's
   // behavior exactly. One local covers both execute calls (they share baseReq).
   const worker = opts.plannerWorker ?? opts.worker
-  const count = opts.candidateIds.length
-  const prompt = plannerPrompt(opts.goal, count)
-  const logPath = join(opts.artifactsDir, 'planner.log')
-  const rawOutputPath = join(opts.artifactsDir, 'planner-raw.txt')
+  const count = round?.count ?? opts.candidateIds.length
+  const prompt = plannerPrompt(opts.goal, count, round?.contextBlock)
+  const logPath = join(opts.artifactsDir, `planner${round?.evidenceTag ?? ''}.log`)
+  const rawOutputPath = join(opts.artifactsDir, `planner${round?.evidenceTag ?? ''}-raw.txt`)
   const started = Date.now()
 
   // T-023 (spec §3.6:144, §14): the planner's capability posture is

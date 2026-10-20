@@ -66,6 +66,16 @@ Options:
                            "machine" — a JSON argv list. Refused on a
                            reviewer resolving to "opencode".
   --candidates <n>         Number of candidates (default: 3)
+  --rounds <n>             Bounded R&D loop rounds (T-030; default: 1 = the
+                           single-pass behavior exactly). 2 = round 1's gate
+                           survivors are composed (src/rounds.ts) into the
+                           round-2 planner prompt and a fresh candidate wave
+                           (ids <survivorId>-r2, same base SHA) repeats the
+                           mechanics; report.json gains an additive "rounds"
+                           block. Values outside 1..2, non-integers, and
+                           --rounds 2 combined with --jobs or --no-planner
+                           are refused before the checkout lock, repo
+                           validation, or any artifacts dir exists.
   --concurrency <n>        Parallel lanes (default: same as candidates)
   --base <ref>             Base commit: branch or SHA (default: HEAD)
   --gate "name=command"    Machine gate; repeatable (e.g. --gate "build=node build.js")
@@ -104,6 +114,8 @@ interface Options {
   plannerCommand: string[] | null
   reviewerCommand: string[] | null
   candidates: number
+  /** T-030 bounded R&D loop rounds; 1 = today's single-pass behavior. */
+  rounds: number
   concurrency: number
   base: string
   runRoot: string
@@ -148,6 +160,7 @@ function parseArgs(argv: string[]): Options {
     plannerCommand: null,
     reviewerCommand: null,
     candidates: 3,
+    rounds: 1,
     concurrency: 0,
     base: 'HEAD',
     runRoot: 'C:\\swarm',
@@ -196,6 +209,18 @@ function parseArgs(argv: string[]): Options {
       case '--planner-command': opts.plannerCommand = parseCommandArgv('--planner-command', value()); break
       case '--reviewer-command': opts.reviewerCommand = parseCommandArgv('--reviewer-command', value()); break
       case '--candidates': opts.candidates = Number(value()); break
+      case '--rounds': {
+        // T-030: refused at parse time — parseArgs runs before repo
+        // validation, the checkout lock, and any artifacts dir exists (the
+        // --max-attempts zero-side-effects refusal pattern). Bounded 1..2
+        // this slice: the loop is capped at one feedback round.
+        const n = Number(value())
+        if (!Number.isInteger(n) || n < 1 || n > 2) {
+          throw new Error(`--rounds expects an integer between 1 and 2 (the loop is capped at one feedback round this slice), got: ${argv[i]}`)
+        }
+        opts.rounds = n
+        break
+      }
       case '--concurrency': opts.concurrency = Number(value()); break
       case '--base': opts.base = value(); break
       case '--run-root': opts.runRoot = value(); break
@@ -222,6 +247,17 @@ function parseArgs(argv: string[]): Options {
       case '--help': case '-h': console.log(usage); process.exit(0)
       default: throw new Error(`unknown option: ${arg}\n\n${usage}`)
     }
+  }
+
+  // T-030: the loop's round-2 needs a planner phase to feed. Both
+  // combinations are refused at parse time — before repo validation, the
+  // checkout lock, or any artifacts dir exists (zero side effects; the whole
+  // argv is read first, so flag order never matters).
+  if (opts.rounds >= 2 && opts.jobs) {
+    throw new Error('--rounds 2 requires planner mode — a --jobs run drives a fixed DAG and has no planner phase to feed survivor evidence into')
+  }
+  if (opts.rounds >= 2 && opts.plannerModel === null) {
+    throw new Error('--rounds 2 requires the planner — --no-planner leaves no planning phase to feed round-1 survivor evidence into')
   }
 
   if (!opts.repo) throw new Error(`--repo is required\n\n${usage}`)
@@ -424,6 +460,8 @@ async function runPipeline(opts: Options, jobsSpec: JobsSpec | null): Promise<vo
     reviewerModel: opts.reviewerModel,
     candidateIds: jobsSpec ? [] : Array.from({ length: opts.candidates }, (_, i) => `c${String(i + 1).padStart(2, '0')}`),
     concurrency: opts.concurrency,
+    // T-030: the bounded loop flag; 1 (the default) = today's single pass.
+    rounds: opts.rounds,
     timeoutMs: opts.timeoutMs,
     maxAttempts: opts.maxAttempts,
     gates: opts.gates.map((g) => new CommandGate(g.name, g.command)),

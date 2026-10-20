@@ -6,12 +6,16 @@
 //
 // A pure module: no I/O at the core, no model knowledge, zero npm
 // dependencies (node:crypto sha256 only — decisions.md: TypeScript on Node
-// 22). Nothing in the pipeline produces or consumes a packet after this
-// slice; the value is the pinned, re-derivable contract plus inspectability
-// (src/context-inspect.ts is the reader). Context selection can therefore
-// never influence promotion or elimination — machine gates decide survival,
-// models advise (decisions.md 2026-10-10; AGENTS.md #2) — honored by
-// construction here: nothing downstream exists yet.
+// 22). Until T-030 nothing in the pipeline produced or consumed a packet;
+// the value was the pinned, re-derivable contract plus inspectability
+// (src/context-inspect.ts is the reader). T-030's round composer
+// (src/rounds.ts) is now the packet's first pipeline consumer: it builds
+// packets from a finished round's survivor evidence and renders them into
+// the next round's planner prompt — context selection still never
+// influences promotion or elimination (a packet feeds planning prompts,
+// never a verdict — machine gates decide survival, models advise,
+// decisions.md 2026-10-10; AGENTS.md #2), honored by construction: nothing
+// downstream of a packet reads a gate, a diff, or a candidate verdict.
 //
 // Vocabulary, chosen here and documented (the T-007 choose-and-document
 // move — spec §7.1:500-512 uses ArtifactQuery / SelectionRule /
@@ -98,10 +102,16 @@
 // reasoning configuration, project-manifest version (§13:971) — ride as
 // null fields, recorded in the packet and documented. `jobId` (the T-006
 // job identity — the candidate id in today's world) is recorded when
-// provided and is NOT fingerprinted: it is not a §7.7 component. A later
-// packet→prompt composer must reconcile this fingerprint with T-007's
-// `input_context_hash` (composed prompt with the workspace-path line
-// excluded) — one hash or a documented relationship, that slice's duty.
+// provided and is NOT fingerprinted: it is not a §7.7 component. The
+// packet→prompt composer's reconciliation duty for this fingerprint (vs
+// T-007's `input_context_hash`) was discharged by T-030: the two hashes are
+// documented in src/rounds.ts's header as disjoint provenance hashes — the
+// packet fingerprint hashes the context a planner sees ({ model, planHash,
+// selected }, workspace-free), `input_context_hash` hashes one worker
+// attempt's composed input modulo its lease path — recorded side by side on
+// rounds-carrying reports (RoundRecord.packetFingerprint beside every
+// attempt's inputContextHash), neither deriving from the other, neither
+// ever a verdict input.
 import { createHash } from 'node:crypto'
 
 // ---------------------------------------------------------------------------

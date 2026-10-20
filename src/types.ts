@@ -365,6 +365,44 @@ export interface RunSchedule {
   jobs: ScheduleJob[]
 }
 
+/**
+ * One executed round of the bounded R&D loop (T-030), in the additive
+ * `RunReport.rounds` block — present only when `--rounds 2` was given;
+ * absent otherwise, so default-mode report.json is unchanged (the
+ * `CandidateReport.probes` pattern: optional fields present only when they
+ * have a producer). Per round the block records the executed flag, the
+ * round's gate survivors, and — only on a round that was seeded by the
+ * composer (round ≥ 2 that ran) — the composed context packet's §7.7
+ * fingerprint and where the rendered block lives under the run artifacts
+ * dir. Recorded evidence only: never a verdict input (decisions.md
+ * 2026-10-10 — gates decide survival; the composer feeds planning prompts,
+ * never the ladder).
+ */
+export interface RoundRecord {
+  /** 1-based round index. */
+  round: number
+  /** False = the round did not run (round 2 with no round-1 survivor, or a
+   *  direct-caller shape the loop does not drive — no planner, or a
+   *  scheduled/DAG run). Recorded, never fabricated as executed. */
+  executed: boolean
+  /** The gate survivors of THIS round (`passedAllGates`, in report order).
+   *  Round 2's survivors are its own candidates' verdicts — the loop never
+   *  advances past 2 this slice, so they feed nothing yet; recorded because
+   *  they are the round's outcome. */
+  survivorIds: string[]
+  /** Present only on a composed round (round ≥ 2 that executed): the
+   *  fingerprint of the context packet composed from the previous round's
+   *  survivors — the packet the round's planner prompt was seeded with.
+   *  Disjoint from T-007's per-attempt `input_context_hash` (the
+   *  relationship is documented in src/rounds.ts's header; both ride the
+   *  report side by side, neither ever a verdict input). */
+  packetFingerprint?: string
+  /** Present only on a composed round: where the rendered context block
+   *  lives under the run artifacts dir (decisions.md 2026-10-10: run
+   *  evidence lives under the run root). */
+  renderedBlockPath?: string
+}
+
 export interface RunReport {
   runId: string
   repo: string
@@ -377,4 +415,8 @@ export interface RunReport {
   candidates: CandidateReport[]
   /** Present only in --jobs mode (T-009): the recorded schedule. */
   schedule?: RunSchedule
+  /** Present only when `--rounds 2` (T-030): the bounded R&D loop's
+   *  per-round record. Absent otherwise — default-mode report.json is
+   *  unchanged byte-for-byte in shape. */
+  rounds?: RoundRecord[]
 }

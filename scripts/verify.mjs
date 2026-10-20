@@ -873,6 +873,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.22: bounded R&D loop (T-030) ----------
+section('Gate 1.22 — bounded R&D loop (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-rounds.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'rounds self-check exit 0')
+} catch (e) {
+  fail(`rounds self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
@@ -886,6 +896,12 @@ const skeletonArgs = [
   '--gate', 'build=node build.js',
   '--gate', 'test=node test.js',
   '--candidates', '2',
+  // T-030: Gate 2 is a real 2-round run (the ticket's mandate — this
+  // change-set touches src/runner.ts and report shape, and the loop's
+  // round-2 planner input must demonstrably carry round-1 survivor evidence
+  // on a real run). The single-pass default stays pinned token-free by
+  // Gates 1.10/1.21/1.22.
+  '--rounds', '2',
   '--run-root', verifyRoot.replace(/\//g, '\\'),
 ]
 console.log('$ tsx src/cli.ts', skeletonArgs.slice(3).join(' '))
@@ -893,15 +909,14 @@ console.log('$ tsx src/cli.ts', skeletonArgs.slice(3).join(' '))
 // machinery (T-023 review round 1, VERIFICATION.md Known issue #12): the
 // runner's per-worker budget is --timeout-min (default 15, src/cli.ts) per
 // attempt, resolved by the T-011 verified tree kill into a FAILED candidate
-// verdict, and the planner/reviewer calls carry the same per-call budget.
-// Realistic stall path = planner (~1 min) + worker runner-timeout (15 min) +
-// gates/summary ⇒ ~17 min; 20 min gives margin while still reaping a
-// genuinely stuck run. Historical happy path is 3–5 min, unchanged. At the
-// previous 8-min ceiling a single silent worker SIGTERM'd the whole run
-// before the runner could produce its verdict — an uninformative red that
-// also skips report writing and disposal (stale worktrees, branches, lock).
+// verdict, and the planner/gates/reviewer legs carry the same per-call budget.
+// Since T-030 the run is a real 2-round loop, so the runner's worst legitimate
+// path is TWO such legs (planner + 15-min worker + gates/review, twice — a
+// stall in each round) ⇒ ~34 min; 35 gives margin while still reaping a
+// genuinely stuck run. The historical single-pass happy path was 3–5 min; the
+// loop adds a second planner+worker+review pass over the same fixture.
 try {
-  run(process.execPath, skeletonArgs, { cwd: root, stdio: 'inherit', timeout: 20 * 60_000 })
+  run(process.execPath, skeletonArgs, { cwd: root, stdio: 'inherit', timeout: 35 * 60_000 })
 } catch (e) {
   fail(`skeleton run failed: ${e.status ?? e.signal ?? e.message}`)
   finish()
@@ -918,7 +933,47 @@ const runDir = join(verifyRoot, runDirs[0])
 const report = JSON.parse(readFileSync(join(runDir, 'report.json'), 'utf8'))
 
 ok(report.planner?.ok === true && report.planner?.fallbackUsed === false, `planner produced briefs (attempts=${report.planner?.attempts})`)
-ok(report.planner?.briefs?.length === report.candidates.length, 'one brief per candidate')
+
+// T-030 loop assertions on the real 2-round run. The `rounds` block must be
+// present (the run passed --rounds 2), round 1 must have produced survivors
+// (otherwise no real loop ran), round 2 must have executed with the composed
+// packet's fingerprint and an on-disk rendered block carrying every round-1
+// survivor's evidence, and round-2 candidates must exist per survivor. The
+// round-2 planner INPUT carrying that evidence is pinned token-free by Gate
+// 1.22(b) (the machine planner logs req.prompt verbatim); here the real run
+// pins the artifacts plus the planner input growth visible in the adapter's
+// argv log lines (`<prompt: N chars>` — the block grows round 2's input).
+ok(Array.isArray(report.rounds) && report.rounds.length === 2
+  && report.rounds[0]?.round === 1 && report.rounds[0]?.executed === true
+  && report.rounds[1]?.round === 2 && report.rounds[1]?.executed === true, 'the rounds block records two executed rounds')
+const round1Survivors = report.rounds?.[0]?.survivorIds ?? []
+ok(round1Survivors.length > 0, `round 1 produced survivors (${round1Survivors.join(', ')}) — a real 2-round run`)
+ok(typeof report.rounds?.[1]?.packetFingerprint === 'string' && /^[0-9a-f]{64}$/.test(report.rounds[1].packetFingerprint),
+  'the composed round-2 packet fingerprint is recorded (64-hex)')
+const blockPath = report.rounds?.[1]?.renderedBlockPath
+ok(typeof blockPath === 'string' && existsSync(blockPath), 'the round-2 rendered context block exists under the run artifacts dir')
+if (existsSync(blockPath)) {
+  const block = readFileSync(blockPath, 'utf8')
+  ok(round1Survivors.every((id) => block.includes(id)), 'the rendered block carries every round-1 survivor id')
+}
+const round2Ids = round1Survivors.map((id) => `${id}-r2`)
+ok(round2Ids.length > 0 && round2Ids.every((id) => report.candidates.some((c) => c.id === id)),
+  `round 2 dispatched one candidate per round-1 survivor (${round2Ids.join(', ')})`)
+ok(report.planner?.briefs?.length === round2Ids.length, 'one round-2 brief per round-2 candidate (the report\'s planner block is the final wave\'s)')
+{
+  const promptChars = (logPath) => {
+    try {
+      const m = readFileSync(logPath, 'utf8').match(/<prompt: (\d+) chars>/)
+      return m === null ? null : Number(m[1])
+    } catch {
+      return null
+    }
+  }
+  const round1Chars = promptChars(join(runDir, 'planner.log'))
+  const round2Chars = promptChars(join(runDir, 'planner-r2.log'))
+  ok(round1Chars !== null && round2Chars !== null && round2Chars > round1Chars,
+    `the round-2 planner input grew by the composed block (round 1: ${round1Chars} chars, round 2: ${round2Chars} chars)`)
+}
 for (const c of report.candidates) {
   ok(c.workerOk === true && !c.workerTimedOut, `${c.id}: worker exited 0 in ${(c.workerDurationMs / 1000).toFixed(0)}s`)
   ok(c.diffBytes > 0, `${c.id}: diff non-empty (${c.diffBytes} bytes)`)
