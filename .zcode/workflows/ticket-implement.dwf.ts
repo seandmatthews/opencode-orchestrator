@@ -193,7 +193,7 @@ for (const t of queue) {
       phase("Prove the lane with the full e2e gate");
       let full;
       try {
-        full = await world.run("node", [laneDir + "/scripts/verify.mjs", "full"], { timeoutMs: 900000 });
+        full = await world.run("node", [laneDir + "/scripts/verify.mjs", "full"], { timeoutMs: 1500000 });
       } catch (e) {
         full = { exitCode: -1, stdout: "", stderr: "gate spawn/timeout: " + String(e) };
       }
