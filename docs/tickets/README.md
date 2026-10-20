@@ -64,3 +64,4 @@ Rules:
 | T-025 | Per-role harness selection for the advisory roles: `--planner-worker`/`--reviewer-worker` + their machine command flags (spec §6.6:397-415, §11.1:875) | medium | done 2026-10-18 |
 | T-026 | Binary-safe diff capture: `git diff HEAD --binary` end to end (closes T-005 carve #2; spec §16.1:1148, §17.2:1185) | high | proposed |
 | T-027 | Recorded gate commands in report.json: `GateResult.command` end to end (closes T-005 carve #1; spec §17.3:1192, §9.1:700) | high | proposed |
+| T-028 | Store-backed integrate: verify-when-recorded diff evidence + store-recorded replay verdicts (closes T-005 carve #5; spec §17.3:1192, §29:1877) | high | proposed |
