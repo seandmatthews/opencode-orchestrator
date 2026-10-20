@@ -76,8 +76,12 @@ export class WorktreeProvider implements WorkspaceProvider {
   diff(lease: WorkspaceLease): string {
     // --intent-to-add makes untracked new files appear in `git diff`;
     // diffing against HEAD also captures anything the worker staged.
+    // --binary (T-026) records binary hunks as `GIT binary patch` literal
+    // sections carrying the full 40-hex index lines git apply requires,
+    // instead of the lossy "Binary files … differ" stub that can never
+    // replay. Output stays printable ASCII + newlines — still a string.
     git(lease.path, ['add', '-A', '--intent-to-add', '.'])
-    return git(lease.path, ['diff', 'HEAD'])
+    return git(lease.path, ['diff', 'HEAD', '--binary'])
   }
 
   dispose(lease: WorkspaceLease): void {

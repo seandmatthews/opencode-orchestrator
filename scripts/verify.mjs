@@ -4,6 +4,7 @@
 // All subprocesses are list-form and shell-free: npm.cmd shims and string-joined
 // commands are exactly how Windows quoting bugs happen (AGENTS.md #4).
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -279,11 +280,24 @@ const expectIntegrate = (expectedCode, label, args) => {
   return { code, out }
 }
 
+// Deterministic binary bytes (NUL + non-UTF8 octets, so git records the file
+// as binary) for the T-026 scenario: the sandbox baseline commits asset.bin,
+// and a candidate edit to it produces a binary-hunk diff whose pre-image
+// matches the run base.
+const binaryAsset = (seed) => Buffer.concat([
+  Buffer.from([0x00, 0xff, 0xfe, seed]),
+  Buffer.from(Array.from({ length: 60 }, (_, i) => (i * seed + 7) & 0xff)),
+])
+const ASSET_BASE = binaryAsset(37)
+const ASSET_CANDIDATE = binaryAsset(53)
+const ASSET_DRIFTED = binaryAsset(97)
+const ASSET_MAIN_DRIFT = binaryAsset(101)
 try {
   mkdirSync(intRepo, { recursive: true })
   igit('init', '-b', 'main')
   writeFileSync(join(intRepo, 'file.txt'), 'alpha\nbeta\ngamma\n')
   writeFileSync(join(intRepo, 'other.txt'), 'unrelated\n')
+  writeFileSync(join(intRepo, 'asset.bin'), ASSET_BASE)
   igit(...identity, 'add', '-A')
   igit(...identity, 'commit', '-m', 'baseline')
 } catch (e) {
@@ -297,14 +311,14 @@ const REPORT_GATES = [
 ]
 const CLI_GATES = ['--gate', 'check-a=node -e "process.exit(0)"', '--gate', 'check-b=node -e "process.exit(0)"']
 
-// Capture a diff exactly like src/workspace/worktree.ts: add -A --intent-to-add, diff HEAD.
+// Capture a diff exactly like src/workspace/worktree.ts: add -A --intent-to-add, diff HEAD --binary.
 function captureDiff(modifier) {
   const maker = join(intRoot, 'wt-maker')
   igit('worktree', 'add', maker, '--detach', 'HEAD')
   try {
     modifier(maker)
     run('git', ['-C', maker, 'add', '-A', '--intent-to-add', '.'])
-    return run('git', ['-C', maker, 'diff', 'HEAD'])
+    return run('git', ['-C', maker, 'diff', 'HEAD', '--binary'])
   } finally {
     igit('worktree', 'remove', '--force', maker)
   }
@@ -415,6 +429,74 @@ const intRenamed = expectIntegrate(1, 'renamed gate', ['--run', '20991011030006'
 ok(intRenamed.code === 1 && /missing: check-a/.test(intRenamed.out) && /check-x/.test(intRenamed.out), 'renamed gate name refuses')
 ok(!existsSync(join(intRuns, '20991011030006', 'wt')), 'gate-contract refusals happen before any worktree exists')
 
+// T-026 — binary-safe capture and replay. The sandbox baseline carries
+// asset.bin; a candidate edit to it is captured through the flipped
+// captureDiff mirror (`git diff HEAD --binary`), so the diff.patch carries
+// `GIT binary patch` sections with the full 40-hex index lines git apply
+// requires — never the lossy "Binary files … differ" stub the pre-fix
+// capture emitted. Three faces (the ticket's behavior contract):
+//   post-fix diff, clean target    → exit 0, byte-identical replay
+//   pre-fix lossy stub             → historical-evidence refusal
+//   post-fix diff, drifted binary  → ordinary apply-check refusal
+// Every refusal leaves the integration worktree untouched (atomic
+// git apply --check; the historical-stub check fires before any apply).
+const binaryPatchFor = (assetBytes) => captureDiff((maker) => writeFileSync(join(maker, 'asset.bin'), assetBytes))
+const sha256 = (data) => createHash('sha256').update(data).digest('hex')
+
+// Face 1 — green byte-identical replay.
+const diffBin = binaryPatchFor(ASSET_CANDIDATE)
+ok(diffBin.includes('GIT binary patch') && !/^Binary files .* differ$/m.test(diffBin), 'binary-safe capture: diff.patch carries GIT binary patch, never the lossy stub')
+makeIntRun('20991011030007', { diff: diffBin, id: 'c08' })
+const intBin = expectIntegrate(0, 'binary replay', ['--run', '20991011030007', '--candidate', 'c08', ...CLI_GATES, '--run-root', intRuns])
+ok(intBin.code === 0, `binary-touching replay exits 0 (got ${intBin.code})`)
+const binWorktreeAsset = join(intRuns, '20991011030007', 'wt', 'int-c08', 'asset.bin')
+ok(existsSync(binWorktreeAsset) && sha256(readFileSync(binWorktreeAsset)) === sha256(ASSET_CANDIDATE), 'replayed binary is byte-identical to the candidate version (sha256)')
+if (existsSync(join(intRuns, '20991011030007', 'integrate', 'c08.json'))) {
+  const binArtifact = JSON.parse(readFileSync(join(intRuns, '20991011030007', 'integrate', 'c08.json'), 'utf8'))
+  ok(binArtifact.applied === true && binArtifact.treeChanged === true && binArtifact.passed === true, 'binary artifact records applied + treeChanged + passed')
+  ok(binArtifact.gates.length === 2 && binArtifact.gates.every((g) => g.passed), 'binary artifact records every gate PASS')
+} else {
+  ok(false, 'binary artifact records applied + treeChanged + passed (c08.json missing)')
+}
+// disposal: the kept replay worktree is dirty by construction — plain clean
+// refuses it, --force disposes it, and the binary evidence survives.
+const refusedBinClean = runClean(['--run', '20991011030007', '--run-root', intRuns])
+ok(refusedBinClean.code === 1, `plain clean refuses the dirty binary replay worktree (got ${refusedBinClean.code})`)
+const forcedBinClean = runClean(['--run', '20991011030007', '--run-root', intRuns, '--force'])
+ok(forcedBinClean.code === 0, `clean --force disposes the binary replay worktree (got ${forcedBinClean.code})`)
+ok(!existsSync(join(intRuns, '20991011030007', 'wt', 'int-c08')), 'binary replay worktree removed by clean --force')
+ok(existsSync(join(intRuns, '20991011030007', 'integrate', 'c08.json')) && existsSync(join(intRuns, '20991011030007', 'c08', 'diff.patch')), 'binary evidence (verdict, diff.patch) survives cleanup')
+
+// Face 2 — pre-fix historical stub, hand-written to exactly the pre-fix
+// capture's output shape (abbreviated index + the lossy stub line, the real
+// pre-fix emission for this candidate change): refuses non-zero with the
+// historical-evidence message, integration worktree untouched.
+const STUB_PATCH = [
+  'diff --git a/asset.bin b/asset.bin',
+  'index afa8867..381bafd 100644',
+  'Binary files a/asset.bin and b/asset.bin differ',
+  '',
+].join('\n')
+makeIntRun('20991011030008', { diff: STUB_PATCH, id: 'c09' })
+const intStub = expectIntegrate(1, 'historical stub', ['--run', '20991011030008', '--candidate', 'c09', ...CLI_GATES, '--run-root', intRuns])
+ok(intStub.code === 1 && /predates binary-safe capture/.test(intStub.out), `pre-fix binary stub refuses as historical evidence (got ${intStub.code})`)
+ok(run('git', ['-C', join(intRuns, '20991011030008', 'wt', 'int-c09'), 'status', '--porcelain']).trim() === '', 'historical stub leaves the integration worktree untouched')
+ok(!existsSync(join(intRuns, '20991011030008', 'integrate')), 'historical stub produces no artifact')
+
+// Face 3 — drifted binary: a post-fix patch whose pre-image no longer
+// matches at current HEAD (same-file drift committed after the run base)
+// falls through to the ordinary apply-check refusal.
+const diffBinDrift = binaryPatchFor(ASSET_DRIFTED)
+ok(diffBinDrift.includes('GIT binary patch'), 'drifted-binary fixture is a post-fix binary patch')
+makeIntRun('20991011030009', { diff: diffBinDrift, id: 'c10' })
+writeFileSync(join(intRepo, 'asset.bin'), ASSET_MAIN_DRIFT)
+igit(...identity, 'add', '-A')
+igit(...identity, 'commit', '-m', 'binary drift')
+const intBinDrift = expectIntegrate(1, 'drifted binary', ['--run', '20991011030009', '--candidate', 'c10', ...CLI_GATES, '--run-root', intRuns])
+ok(intBinDrift.code === 1 && /no longer applies/.test(intBinDrift.out), `drifted binary refuses through the ordinary apply-check path (got ${intBinDrift.code})`)
+ok(run('git', ['-C', join(intRuns, '20991011030009', 'wt', 'int-c10'), 'status', '--porcelain']).trim() === '', 'drifted binary leaves the integration worktree untouched (atomic)')
+ok(!existsSync(join(intRuns, '20991011030009', 'integrate')), 'drifted binary produces no artifact')
+
 // AC#6 — disposal, both faces: plain clean refuses the dirty integration worktree,
 // --force disposes it via wt/-discovery, evidence survives.
 const refusedClean = runClean(['--run', '20991011030000', '--run-root', intRuns])
@@ -430,7 +512,7 @@ ok(existsSync(join(intRuns, '20991011030000', 'integrate', 'c01.json'))
 // tidy: dispose the remaining replay worktrees.
 code = expectClean(0, 'integrate sweep --all', ['--all', '--run-root', intRuns])
 ok(code === 0, `--all sweep over the integrate sandbox exits 0 (got ${code})`)
-code = expectClean(0, 'integrate sweep last', ['--run', '20991011030006', '--run-root', intRuns])
+code = expectClean(0, 'integrate sweep last', ['--run', '20991011030009', '--run-root', intRuns])
 ok(code === 0, `last integrate run disposes (got ${code})`)
 ok(igit('worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).length === 1, 'only main remains in the integrate sandbox')
 ok(lockFilesIn(intRuns).length === 0, 'no residual lock files after the integrate checks (released on every path)')
