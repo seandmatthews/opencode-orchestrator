@@ -262,12 +262,71 @@ Gates measured in the lane (all run this session, exact commands):
   ticket's landing pipeline.
 - Gate 3 n/a — no adapter file touched.
 
-Manual spot-check (AC#7) — stated exactly: NOT yet satisfied at lane-commit
-time, because the only producer of a real-model `report.json` with non-null
-`promptVersion` is a `verify:full`-class run, which this lane must not run
-(real model tokens; the driving landing pipeline runs it). Once the landing
-Gate 2 run exists, the check is: read `report.json` of that run — every
-dispatched attempt's `promptVersion` must be a 64-hex value, and any retry
-attempts must carry distinct values (the default Gate 2 run has one attempt
-per candidate, so distinctness there is exercised by Gate 1.8 S1's fake-adapter
-drive, which is where retries exist token-free).
+Manual spot-check (AC#7) — SATISFIED by the driving pipeline's own Gate 2 run
+(2026-10-20, run `20261020053845`, the round-1 red — see below): its
+`report.json` shows non-null 64-hex `promptVersion` on every dispatched
+attempt — c01-a1 `de4a6bbed6a71422…` (`de4a6bbed6a7142277fb2906c9bafd6f8d875f13a878f894d2f1da40cf1b42fe`)
+and c02-a1 `cadb5d40d632059c…` (`cadb5d40d632059ca2425ed96f48c58c96b30da29820d99c3c8ed82287c573f5`) —
+distinct per candidate (distinct briefs → distinct composed prompts), real
+workers (opencode), real model tokens. No retries occurred in that run, so
+retry distinctness stays pinned by Gate 1.8 S1's fake-adapter drive (the
+token-free place retries exist). The same run also proves the
+persistence-only posture: the planner's parse failure changed no candidate
+verdict (both candidates ran and passed — decisions.md 2026-10-10).
+
+## Review round 1 — the Gate 2 red, diagnosed and fixed
+
+The driving pipeline's Gate 2 (`npm run verify:full`) went red AFTER the first
+lane commit: exit 1 with `FAIL: planner produced briefs (attempts=2)` and
+`FAIL: one brief per candidate` (scripts/verify.mjs Gate 2 assertions — the
+designed bar, not weakened). Everything else in the reported output is
+known-benign noise (the fast-tier refusal messages' stderr leak — Known issue
+#11; CRLF warnings #5; the SQLite warning #7). Byte-level diagnosis from the
+failed run's own evidence (`C:\swarm\verify\20261020053845\`), reproduced in
+this lane:
+
+- Attempt 1 produced NO array: the plan agent, dropped into the EMPTY planner
+  scratch dir, spent its turn exploring — `Glob "**/*" 0 matches`, then
+  `Get-ChildItem` reaching outside → `permission requested: external_directory
+  (…); auto-rejecting` twice → tool errors (planner.log verbatim). This is
+  also the FIRST-HAND confirmation of Known issue #6's "unverified" headless
+  auto-deny question — updated there.
+- Attempt 2 produced the COMPLETE two-brief array with ONE defect: a
+  duplicated closing quote at the element separator —
+  `…including tests."," "BRIEF B…` where `…including tests.", "BRIEF B…` was
+  meant (raw offset 2168: `Expected ',' or ']' after array element`).
+  `parseBriefs` returned null on the exact recorded bytes (reproduced in this
+  lane before the fix) → fallback → the two Gate 2 planner FAILs.
+- Not attributable to this change-set's diff: the planner path
+  (`runPlannerPhase`/`plannerPrompt`/`src/parse.ts`/the adapter) is untouched
+  by T-029 — the red is model-output flakiness (attempt 1) plus a one-char
+  model JSON slip (attempt 2) hitting a parser that had no tolerance for it.
+
+The fix (this round's change-set, red-before/green-after per AGENTS.md #8):
+
+- `src/parse.ts` — `parseBriefs` gains a LAST-RESORT separator repair: when no
+  `[..]` slice parses, the scan retries once over text with the observed slip
+  repaired (`/","\s+"/g` → `","`). It runs only on input the plain scan
+  already failed, so every input that parsed before parses byte-identically;
+  `parseReview` is untouched (no observed failure); the original bytes are
+  never rewritten — `planner-raw.txt` keeps them verbatim.
+- `scripts/check-parse.mjs` (Gate 0.5) — three new pins, zero existing
+  fixtures changed: the recorded defect shape (inner brackets + the captured
+  OpenCode final frame `> plan · glm-5.3` included) now yields both briefs;
+  the repair is inert on valid input whose string content contains the slip's
+  byte pattern (plain path parses it untouched); hopeless input still returns
+  null (the repair fabricates nothing).
+- Green bar ON THE RECORDED BYTES, run in this lane:
+  `parseBriefs(readFileSync('C:/swarm/verify/20261020053845/planner-raw.txt'), 2)`
+  returned both briefs after the fix (returned null before it — the recorded
+  red).
+
+Round-2 gates run in the lane: Gate 0 (`npm run typecheck`, exit 0), Gate 0.5
+standalone (`node node_modules/tsx/dist/cli.mjs scripts/check-parse.mjs` — ALL
+GREEN), and the full fast tier (`node scripts/verify.mjs fast` — ALL GREEN;
+see the round-1 section's gate list for the per-gate record, re-measured
+round 2). Gate 2 itself is NOT run by the lane (real model tokens; the
+driving pipeline re-runs it after this commit — with the parser hardened, the
+recorded attempt-2 output shape now parses, so the planner leg's failure mode
+is closed; a fresh model-output defect class would land its own red bar per
+the house discipline).

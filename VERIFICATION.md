@@ -20,7 +20,20 @@ node node_modules/tsx/dist/cli.mjs scripts/check-parse.mjs
 
 Pins the JSON extraction rules for planner briefs and reviewer observations
 (prose-tolerant scanning, cycling, rejection shapes) without spending model tokens.
-Required whenever `src/parse.ts` changes.
+Since T-029's review round 1 it also pins `parseBriefs`'s LAST-RESORT separator
+repair: when no `[..]` slice parses, the scan retries once over text with the
+observed LLM slip repaired — a duplicated closing quote at an element boundary
+(`"," "` where `", "` was meant; recorded verbatim from real run
+20261020053845's `planner-raw.txt`, the driving Gate 2 red that landed it: a
+complete two-brief array whose single malformed separator made both planner
+attempts fall back to the raw goal). Fixtures pin the repaired parse of
+exactly that recorded shape (inner brackets + the captured OpenCode final
+frame included), that the repair never fabricates briefs from hopeless input,
+and that it is INERT whenever the plain scan parses — valid input whose string
+content contains the slip's byte pattern parses through the plain path with
+content intact. Every input that parsed before this change parses
+byte-identically; no existing fixture changed. Required whenever `src/parse.ts`
+changes.
 
 ## Gate 1 — fixture baseline (seconds)
 
@@ -2319,18 +2332,22 @@ landing in T-017's Landed section).
      into evidence files, and the worktree is disposable
      (src/runner.ts: diff capture → gates → review → dispose).
    - Whether a headless non-TTY `opencode run` auto-denies `ask`-action
-     permissions (the plan agent's `external_directory → ask`) is
-     **unverified** — no model session exercising the plan agent was run
-     for this ticket's fast tier (the lane's Gate 3 probe drove the
-     default build agent; S2's stub is not the harness). First real-run
-     observation (2026-10-19 landing attempt, Known issue #12's run):
+     permissions (the plan agent's `external_directory → ask`) —
+     **observed first-hand 2026-10-20** (run 20261020053845's
+     `planner.log`, the driving Gate 2 red): `permission requested:
+     external_directory (C:\swarm\verify\20261020053845\*); auto-rejecting`
+     — headless runs auto-reject, the containment works as designed. The
+     recorded residual: the plan agent, dropped into the EMPTY planner
+     scratch dir, burned attempt 1 exploring it (Glob 0 matches, then
+     `Get-ChildItem` reaching outside → two auto-rejections → tool errors)
+     and produced no JSON at all; the designed bounded repair attempt then
+     produced a complete array whose one duplicated separator quote still
+     failed to parse (fixed by Gate 0.5's last-resort separator repair, this
+     change-set). Earlier 2026-10-19 observation (Known issue #12's run):
      BOTH restricted postures ran headless with `--agent plan` to
-     completion — the planner's briefs parsed (two distinct briefs: the
-     workers' composed prompts differ, 3013 vs 3199 chars) and the
-     reviewer's observations parsed (`review.json` `ok: true`) — no
-     permission stall occurred. The auto-deny semantics themselves
-     remain unverified; a run that requests no external directory
-     cannot probe them.
+     completion — the planner's briefs parsed and the reviewer's
+     observations parsed (`review.json` `ok: true`) — no permission stall
+     occurred.
    - Output-content threats (e.g. a planner brief containing a hostile
      path) are a *different* threat class — §14 governs execution
      capability, not output content; sanitization is carved (T-023).
