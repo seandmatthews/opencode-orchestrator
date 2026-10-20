@@ -205,15 +205,23 @@ async function replay(
 
   // git apply is atomic: a rejecting patch leaves the tree untouched, so
   // there is no partial state to clean up.
+  //
+  // Binary-safe replay (T-026): capture is `git diff HEAD --binary`, so every
+  // binary hunk carries the full 40-hex index line git apply requires and a
+  // clean target replays byte-identically. A patch carrying the lossy stub
+  // line ("Binary files … differ") predates binary-safe capture — historical
+  // evidence that cannot be reconstructed (spec §17.3: prior evidence is
+  // marked historical). A genuinely drifted binary — pre-image no longer at
+  // current HEAD — fails apply --check with an ordinary "patch does not
+  // apply" and is refused below like any other conflict.
+  if (/^Binary files .* differ$/m.test(readFileSync(diffPath, 'utf8'))) {
+    console.error(`refused: the captured diff contains the lossy pre-fix binary stub ("Binary files … differ") — it predates binary-safe capture (git diff HEAD --binary) and cannot be reconstructed; this evidence is historical (spec §17.3).`)
+    return 1
+  }
   try {
     git(worktreePath, ['apply', '--check', diffPath])
   } catch (e) {
     const msg = errorMessage(e)
-    if (/binary patch/i.test(msg)) {
-      console.error(`refused: the captured diff touches a binary file — diff capture (git diff HEAD, no --binary) cannot record binaries, so the patch can never replay. See the capture fix carved off in T-005.`)
-      console.error(msg)
-      return 1
-    }
     console.error(`refused: git apply --check failed — the patch no longer applies at current HEAD ${targetHead.slice(0, 12)}:`)
     console.error(msg)
     return 1

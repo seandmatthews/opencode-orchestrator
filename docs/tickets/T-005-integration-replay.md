@@ -48,7 +48,7 @@ human act (§17.4).
      `git status --porcelain` empty), so there is no partial state to clean up.
      Unrelated drift applies cleanly (scout-probed: same probe, modified + new files
      land). A diff touching a BINARY file can never replay: capture lacks `--binary`
-     (`src/workspace/worktree.ts:38-39`), so `git apply` rejects the whole patch
+     (`src/workspace/worktree.ts:76-85`), so `git apply` rejects the whole patch
      ("cannot apply binary patch ... without full index line" — scout-probed); the
      refusal message says so and points at the carved-off capture fix below.
   6. No-op guard: after a successful apply, `git status --porcelain` in the worktree
@@ -100,7 +100,7 @@ n/a), `src/gate/command.ts` (consumed as-is), `src/workspace/worktree.ts`, or th
 VERIFICATION.md:85-86's trigger list is touched. Carved off for later tickets: (1)
 recording gate commands into `report.json` (report-shape change → owns its own Gate 2
 run); (2) binary-safe diff capture (`git diff HEAD --binary` at
-`src/workspace/worktree.ts:39` — pipeline behavior change, own red/green ticket; until
+`src/workspace/worktree.ts:76-85` — pipeline behavior change, own red/green ticket; until
 then integrate refuses binary stubs loudly, per the probed behavior above); (3) §17.2
 steps 5/7/8 (integration-repair model job; Sol verification, spec Milestone 5; approval
 queue, spec Milestone 7); (4) configurable §17.3 staleness policy — this slice always
@@ -136,7 +136,7 @@ is small, token-free, and makes T-002's disposal safe rather than lossy.
 
 - [x] Clean replay onto drifted HEAD: sandbox repo (Gate 1.5 throwaway pattern,
       `scripts/verify.mjs:62-143`) → recorded `report.json` + non-empty `diff.patch`
-      (capture method identical to `src/workspace/worktree.ts:38-39`) → target main
+      (capture method identical to `src/workspace/worktree.ts:76-85`) → target main
       advanced with an unrelated commit → integrate exits 0,
       `<runDir>/integrate/<candidateId>.json` records every gate PASS with the
       post-drift HEAD as `targetHead`, the replayed worktree contains the change, and

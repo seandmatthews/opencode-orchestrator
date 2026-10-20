@@ -1,6 +1,6 @@
 # T-026 — Binary-safe diff capture: `git diff HEAD --binary` end to end (closes T-005 carve #2)
 
-**Status:** proposed
+**Status:** done 2026-10-19
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 2
 **Depends on:** T-005
@@ -114,16 +114,16 @@ changes nothing about it.
 
 ## Acceptance criteria
 
-- [ ] Capture is binary-safe: a candidate worktree that edits a binary file yields a
+- [x] Capture is binary-safe: a candidate worktree that edits a binary file yields a
       `diff.patch` containing `GIT binary patch` sections and never the lossy
       `Binary files … differ` stub — pinned by the new Gate 1.5 binary scenario,
       whose diff is captured through the flipped `captureDiff` mirror. (Gate 1.5)
-- [ ] Binary replay is faithful: `integrate` on a binary-touching survivor exits 0,
+- [x] Binary replay is faithful: `integrate` on a binary-touching survivor exits 0,
       every gate PASS, and the replayed binary is byte-identical to the candidate's
       version (sha256 or `cmp` asserted in the sandbox), with the verdict artifact
       recording applied + treeChanged + passed — pinned by the same Gate 1.5
       scenario. (Gate 1.5)
-- [ ] Red bar reproduced before the flip (AGENTS.md #8): with the pre-fix capture,
+- [x] Red bar reproduced before the flip (AGENTS.md #8): with the pre-fix capture,
       the same sandbox scenario produces the lossy stub and `integrate` exits 1 with
       the apply refusal ("cannot apply binary patch … without full index line") —
       the exact behavior scout-probed at T-005:50-53 and never gated. Reproduced in
@@ -131,22 +131,22 @@ changes nothing about it.
       with its output in this ticket's Landed; the landed gate keeps the green face
       (there is no permanent assertion of the old capture — it no longer exists).
       (Gate 1.5 sandbox, pre-flip run recorded here)
-- [ ] Pre-fix historical diffs still refuse, honestly: a `diff.patch` containing the
+- [x] Pre-fix historical diffs still refuse, honestly: a `diff.patch` containing the
       lossy stub line (`Binary files a/asset.bin and b/asset.bin differ`) refuses
       non-zero with the historical-evidence message (predates binary-safe capture;
       §17.3:1199), and the integration worktree's `git status --porcelain` is empty
       — pinned by a new Gate 1.5 assertion that hand-writes such a stub (exactly the
       pre-fix output shape). (Gate 1.5)
-- [ ] Real binary conflicts fall through to the ordinary refusal: a post-fix binary
+- [x] Real binary conflicts fall through to the ordinary refusal: a post-fix binary
       patch whose pre-image no longer matches at current HEAD (same-file drift
       committed after the run base) exits non-zero through the ordinary apply-check
       refusal path (`src/integrate.ts:217-219`), worktree untouched (atomic) —
       pinned by a new Gate 1.5 drifted-binary assertion. (Gate 1.5)
-- [ ] The mirror cannot silently diverge: `scripts/verify.mjs:300-307` flips in the
+- [x] The mirror cannot silently diverge: `scripts/verify.mjs:300-307` flips in the
       same change-set, and the existing Gate 1.5 clean-replay, conflict, and
       policy-refusal scenarios stay green with the flipped mirror — proving
       text-only capture behavior is unchanged. (Gate 1.5 + change-set review)
-- [ ] Text-only end-to-end behavior unchanged: Gate 1 (demo), Gate 1.6
+- [x] Text-only end-to-end behavior unchanged: Gate 1 (demo), Gate 1.6
       (hash-at-ingest over the new-format diff.patch — content-agnostic by
       construction), Gate 1.17 S5 (format-agnostic: "diff.patch captured its own
       marker-file change"), Gate 1.19 (diffBytes self-consistency) all green.
@@ -156,15 +156,81 @@ changes nothing about it.
 - [ ] Gate 2 runs once at landing: workspace handling is on Gate 2's trigger list
       (VERIFICATION.md:2052-2053) and T-005:225-227 names capture changes
       explicitly. (Gate 2, `npm run verify:full`)
-- [ ] Typecheck green with the one-argv change, list-form preserved (AGENTS.md #4);
+- [x] Typecheck green with the one-argv change, list-form preserved (AGENTS.md #4);
       the `WorkspaceProvider` seam (`src/types.ts:109-116`) is untouched — pinned
       by Gate 0 plus change-set review.
-- [ ] Docs in the same change-set (AGENTS.md #6, decisions.md 2026-10-10 process
+- [x] Docs in the same change-set (AGENTS.md #6, decisions.md 2026-10-10 process
       entry): VERIFICATION.md Gate 1.5 section rewritten (`:113-115` refusal
       sentence replaced; the binary scenario and three-way behavior contract
       documented); T-005's stale `worktree.ts:38-39`/`:39` citations corrected to
       `:76-81` (`:50-51`, `:102-103`, `:138-139`); ticket status + index updated in
       the same change. (change-set review)
+
+## Landed
+
+2026-10-19, one change-set, exactly the four files plus docs the ticket names.
+
+- `src/workspace/worktree.ts:76-85` — the one argv element: `['diff', 'HEAD']` →
+  `['diff', 'HEAD', '--binary']` (list-form preserved, AGENTS.md #4); the comment
+  records why. Nothing else in the provider moved; the `diff(lease): string` seam
+  (`src/types.ts:113`) is untouched. The expanded comment moves the method's close
+  from `:81` to `:85` — see the errata note below.
+- `src/integrate.ts:206-224` — the `/binary patch/i` error-regex branch removed; in
+  its place a content check on the patch itself, before the atomic apply:
+  `/^Binary files .* differ$/m` over `diff.patch` refuses non-zero with the
+  historical-evidence message ("predates binary-safe capture … this evidence is
+  historical, spec §17.3"), integration worktree untouched. The ordinary refusal
+  (`git apply --check failed — the patch no longer applies at current HEAD …`) is
+  byte-identical to before and is now the path a drifted binary takes: git says
+  `error: the patch applies to 'asset.bin' (<blob sha>), which does not match the
+  current contents.` / `error: asset.bin: patch does not apply` (observed in the
+  Gate 1.5 sandbox).
+- `scripts/verify.mjs` — the Gate 1.5 sandbox flips with the engine:
+  `captureDiff` mirror gains `--binary`; the baseline commit gains `asset.bin`
+  (deterministic NUL + non-UTF8 bytes, four variants: run base, candidate,
+  drifted patch, main drift). New binary scenario, three faces over runs
+  `20991011030007-30009` (16 assertions): green byte-identical replay (exit 0,
+  sha256 of the replayed binary equal to the candidate's, artifact records
+  applied + treeChanged + passed + every gate PASS, both disposal faces with
+  evidence surviving); a hand-written pre-fix stub — exactly the pre-fix output
+  shape, `index afa8867..381bafd 100644` + `Binary files a/asset.bin and
+  b/asset.bin differ`, the real pre-fix emission for those bytes — refuses as
+  historical evidence with an empty worktree and no artifact; a post-fix patch
+  whose pre-image drifted refuses through the ordinary apply-check path,
+  worktree untouched. The `--all` tail sweep retargets the explicit
+  last-run disposal to the new newest run (`…30009`).
+- Docs: VERIFICATION.md Gate 1.5 integrate section — the "capture lacks
+  `--binary`" refusal sentence replaced by the binary-safe capture description,
+  the three-way behavior contract, and the extended fast-tier pin list. T-005
+  errata: the three stale diff-capture citations corrected, line drift only —
+  T-005:51 and :139 `worktree.ts:38-39` → `:76-85`, T-005:103 `:39` → `:76-85`.
+  One deviation from this ticket's text: the ticket predicted the function's
+  current home as `:76-81`, but the flip's added comment moves the method's
+  close to `:85`, so the corrected range is `:76-85` (same intent — the
+  function's actual current home, verified by line count post-flip).
+
+**Red bar** (AGENTS.md #8), reproduced before the `worktree.ts`/mirror flip with
+the new scenario already in place: `node scripts/verify.mjs fast` → 9 failures,
+all in the new binary faces, everything else (existing Gate 1.5 scenarios,
+Gates 1.6-1.21) green. Recorded output: the sandbox `diff.patch` was exactly the
+lossy stub above, and `integrate c08` exited 1 with
+`error: cannot apply binary patch to 'asset.bin' without full index line` +
+`refused: the captured diff touches a binary file — diff capture (git diff HEAD,
+no --binary) cannot record binaries …` (the old T-005 message, pre-removal).
+
+**Green:** `node scripts/verify.mjs fast` → `=== verify (fast) complete: ALL
+GREEN ===` — Gate 0 typecheck, Gate 1 demo, Gate 0.5, Gate 1.5 cleanup + lock +
+integrate (existing scenarios re-proven under the flipped mirror, proving
+text-only capture unchanged, plus the 16 new binary assertions), Gates 1.6,
+1.7, 1.8, 1.9, 1.10, 1.11, 1.12, 1.13, 1.14, 1.15, 1.16, 1.17, 1.18, 1.19,
+1.20, 1.21 — 0 failures.
+
+**Gate 2:** owed by this ticket (workspace handling is on the trigger list;
+T-005:225-227 names capture changes) and NOT run in this lane — per the lane
+protocol the driving pipeline runs `npm run verify:full` against the landed
+change-set; that acceptance box stays unchecked until that run is recorded.
+Gate 0.5 n/a per the ticket (`src/parse.ts` untouched); Gate 3 n/a (no adapter
+touched).
 
 ## Verification
 

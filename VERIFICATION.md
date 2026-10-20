@@ -110,8 +110,20 @@ created): non-survivor candidate, missing/empty diff (a NO-OP is never a
 pass), unknown candidate id, gate-name mismatch, already-present integration
 worktree. `git apply --check` then `git apply` (atomic — a rejecting patch
 leaves the tree untouched); an apply that lands but changes nothing is a NO-OP
-refusal; a diff touching a binary file can never replay (capture lacks
-`--binary`) and is refused with a pointer at the carved-off capture fix. The
+refusal. Capture is binary-safe (T-026): `WorktreeProvider.diff` runs
+`git diff HEAD --binary` (`src/workspace/worktree.ts:76-85`), so a
+binary-touching candidate's `diff.patch` carries `GIT binary patch` sections —
+git's base85 armor, printable ASCII + newlines only, still a string end to end
+— whose full 40-hex index lines are exactly what `git apply` requires. The
+three-way behavior contract, each refusal leaving the integration worktree
+untouched (the historical check reads the patch before any apply): a post-fix
+binary diff onto a clean target replays byte-identically; a `diff.patch`
+carrying the lossy pre-fix stub line (`Binary files … differ` — exactly what
+pre-T-026 capture emitted) is historical evidence that cannot be reconstructed
+and refuses non-zero naming that (spec §17.3: prior evidence is marked
+historical); a genuinely drifted binary — the pre-image blob no longer
+matches at current HEAD — fails `apply --check` with an ordinary "patch does
+not apply" and is refused through the ordinary conflict path. The
 verdict artifact `<runDir>/integrate/<id>.json` records
 applied/treeChanged/gates/passed; exit 0 iff applied + treeChanged + all gates
 passed. Replay never commits, never branches, never moves a ref (§17.4).
@@ -128,7 +140,16 @@ exactly like `src/workspace/worktree.ts`): clean replay onto drifted HEAD
 untouched, no new branches, detached worktree), conflict refusal with an empty
 worktree, every policy refusal, gate-name contract (extra/missing/renamed)
 refusing before any worktree exists, both disposal faces, and no residual
-lock files afterward.
+lock files afterward. Binary-safe capture and replay (T-026): the sandbox
+baseline commits a small binary file (`asset.bin`), a candidate edit to it is
+captured through the flipped captureDiff mirror, and its diff.patch contains
+`GIT binary patch` sections and never the lossy stub; the replay exits 0 with
+the binary byte-identical (sha256 asserted) and the verdict recording applied
++ treeChanged + passed; a hand-written pre-fix stub (exactly the pre-T-026
+capture's output shape) refuses as historical evidence with an empty
+worktree; a post-fix patch whose pre-image drifted refuses through the
+ordinary apply-check path, worktree untouched; and the binary replay worktree
+goes through both disposal faces with its evidence surviving.
 
 ## Gate 1.6 — store ingest (seconds, fast tier)
 
