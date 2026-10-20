@@ -271,7 +271,8 @@ node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs
 
 Pins the durable run records (T-003), the derived job DAG (T-006), the
 attempt records (T-007), the recorded schedule (T-009), the filesystem
-artifact store (T-016), and the store-backed integrate pieces (T-028):
+artifact store (T-016), the store-backed integrate pieces (T-028), and the
+promptVersion end-to-end copy (T-029):
 `src/store/index.ts` ingests a finished `RunReport`
 into SQLite (`node:sqlite`, schema v5: `runs`, `candidates`, `gate_results`,
 `events`, T-006's `phases`/`jobs`/`job_dependencies`, T-007's `attempts`,
@@ -322,6 +323,13 @@ a verbatim copy of run 20261011022419) into a fresh temp DB and asserts:
   `attempts` array) yielding zero rows, exactly one derived `ATTEMPT_STARTED`
   per attempt with `at` taken from the attempt's own `startedAt` and a
   payload naming job/attempt id/number,
+- the `prompt_version` column end-to-end (T-029), on a hand-built
+  promptVersion-carrying variant of the fixture (the elim-variant pattern):
+  two attempts with DISTINCT 64-hex `promptVersion` values ingest with
+  `attempts.prompt_version` equal to the report value per attempt number —
+  the upsert copy, until now exercised only as null; the retried/probes
+  fixtures above keep their producer-less nulls pinned
+  (`process_identity_json`/`worker_session_id` still producer-less),
 - re-ingest of the same report leaves `runs`/`candidates`/`gate_results` —
   the DAG tables (`phases`/`jobs` upsert by natural key, `job_dependencies`
   re-derived delete+insert) — and the `attempts` rows (upsert by natural
@@ -515,7 +523,14 @@ model tokens. It asserts:
 - **input-context hash**: the same brief+model hashes identically across
   attempts (64-hex sha256 over brief + model + the composed prompt with the
   workspace-path line excluded — the §7.7 fingerprint narrowed to what has a
-  producer); `promptVersion` is null on every attempt.
+  producer); since T-029 `promptVersion` carries its own positive producer
+  pin on the same scenario: every attempt's `promptVersion` is the 64-hex
+  sha256 of the exact prompt text the adapter received, recomputed in the
+  check from the fake worker's `req.prompt` recording (never `builderPrompt`)
+  — and because the exact text embeds each attempt's lease path, retry
+  attempts carry DISTINCT `promptVersion` values while their
+  `inputContextHash` stays identical (the normalization boundary: the two
+  fields answer different questions — same-input vs exact-sent-text).
 - **CLI**: `--help` documents `--max-attempts <n>` (default 1, values < 1
   refused); `--max-attempts 0` (and a non-integer) refuse with exit 1
   naming the flag, before the checkout lock is taken or any artifacts dir

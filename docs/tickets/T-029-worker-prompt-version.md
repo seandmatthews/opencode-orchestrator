@@ -1,6 +1,6 @@
 # T-029 — Worker prompt version: `Attempt.promptVersion` producer — hash-at-composition of the builder prompt (closes T-007's reserved null producer; spec §6.7:446, §18:1207)
 
-**Status:** proposed
+**Status:** done 2026-10-20
 **Category:** engine
 **Value (1-5):** 3 · **Risk (1-5):** 2
 **Depends on:** T-007 (whose reserved null this closes; T-003's store already carries the column)
@@ -179,3 +179,95 @@ reservation this closes); docs/tickets/T-012-context-system-core.md:82-95 (§7.7
 producerless components + packet→prompt-composer reconciliation duty — stands).
 decisions.md 2026-10-10 (machine gates decide survival; the engine is
 model/harness-agnostic — both honored by construction).
+
+## Landed
+
+2026-10-20, one change-set on `ticket/T-029-worker-prompt-version` (lane worktree,
+base 53f3682): `src/runner.ts`, `src/types.ts`, `scripts/check-retry.mjs`,
+`scripts/check-store.mjs`, VERIFICATION.md, this ticket, and the index row. No
+store edit, no adapter edit, no verify.mjs edit (Gates 1.6/1.8 were already wired
+into the fast tier). Line-number note: this ticket cites main's line numbers
+pre-landing; the landed citations below are the change-set's own.
+
+- `src/runner.ts` — in `runJob`'s attempt loop, the builder prompt is composed
+  ONCE per attempt, hoisted above the Attempt construction (`:475-490`):
+  `const prompt = builderPrompt(job.brief, lease.path)` then
+  `const promptVersion = createHash('sha256').update(prompt).digest('hex')` at
+  that same composition point; `attempt.promptVersion = promptVersion` (`:495` —
+  the hardcoded `null` is gone) and the SAME variable feeds the
+  `worker.execute` call (`:517`), so the hashed text and the sent text cannot
+  drift — the ticket's mechanical form of "derived at composition time". The
+  composition-site comment documents the exact-text choice (unique per attempt
+  by construction: the prompt embeds the lease path, runDir carries the
+  timestamped runId, retries lease `wt/<id>-a<n>`) and the division of labor
+  with `inputContextHash` (same-input comparability, workspace-path line
+  excluded) — both audit provenance, neither ever a verdict input
+  (decisions.md 2026-10-10). No other runner change: the verdict ladder,
+  dispatch evidence, retry rule, and report shape are byte-identical.
+- `src/types.ts` — the Attempt doc comment (`:221-225`) now states the
+  producer: "promptVersion is the sha256 hex of the exact builder prompt text
+  sent to the adapter, derived at composition time (T-029, §6.7:446/§18:1207)
+  — a content hash, never a looked-up registry version (the §27
+  prompts/prompt_versions tables are deliberately not built)". The type itself
+  (`string | null`) is untouched.
+- `scripts/check-retry.mjs` — the Gate 1.8 S1 flip (this change-set's only
+  intentional invalidation of an existing assertion; net strictness increases,
+  the T-013 precedent): the fake `WorkerAdapter` records the EXACT `req.prompt`
+  per call (`prompts`, `:55-62`), and the null pin (old `:165-166`) is replaced
+  by two positive producer pins (`:181-186`): every attempt's `promptVersion`
+  is a 64-hex sha256 equal to an INDEPENDENTLY RECOMPUTED hash of the
+  adapter's recording (`createHash('sha256')` over `worker.prompts[n]`;
+  `builderPrompt` is never called to build an expected value), and attempts 1
+  and 2 carry DISTINCT `promptVersion` values while their `inputContextHash`
+  stays identical (the existing `:173-174` pin, unchanged) — the normalization
+  boundary between the two fields, pinned.
+- `scripts/check-store.mjs` — the Gate 1.6 extension: a new promptVersion-carrying
+  variant (the elim-variant pattern, `:346-390`) ingests into a fresh DB and
+  pins `attempts.prompt_version` equal to the report value per attempt number
+  end-to-end (the upsert copy at src/store/index.ts was already
+  `a.promptVersion ?? null` — until now nothing exercised non-null), with two
+  DISTINCT values proven not cross-copied. The existing retried/probes
+  fixtures keep their `promptVersion: null` fixtures and the producer-less
+  null pins (`prompt_version`/`process_identity_json`/`worker_session_id`)
+  unchanged.
+- VERIFICATION.md — the Gate 1.8 input-context-hash bullet (`:523-532`; the
+  ticket's `:350-353` citation had drifted) no longer says "promptVersion is
+  null on every attempt": it pins the positive producer and the
+  distinct-promptVersion/identical-inputContextHash boundary; the Gate 1.6
+  section header names the promptVersion end-to-end copy (T-029) and gained
+  the variant bullet (`:326-333`).
+- This ticket + `docs/tickets/README.md` — status flipped, index row updated,
+  this Landed section, all in the same change-set.
+
+Gates measured in the lane (all run this session, exact commands):
+
+- Gate 0: `npm run typecheck` — exit 0.
+- Gate 1.8 standalone: `node node_modules/tsx/dist/cli.mjs scripts/check-retry.mjs`
+  — ALL GREEN, the two new S1 producer pins printed ok.
+- Gate 1.6 standalone: `node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs`
+  — ALL GREEN, the four new promptVersion-variant pins printed ok.
+- Gate 1.13 standalone: `node node_modules/tsx/dist/cli.mjs scripts/check-context.mjs`
+  — ALL GREEN unmodified (the §7.7 producerless-component pins at
+  scripts/check-context.mjs:270/:304 stay green; this ticket does not claim
+  that component).
+- Gate 1.11 standalone (`scripts/check-recovery.mjs`) — ALL GREEN; abandoned-attempt
+  rows keep their hardcoded NULL (`src/store/index.ts` recovery INSERT untouched;
+  the check pins no `prompt_version`, located by reading).
+- Full fast tier: `node scripts/verify.mjs fast` — ALL GREEN end to end (Gate 0,
+  Gate 1, Gate 0.5, Gates 1.5–1.21), including Gate 1.20 S1's exact-key-set pins
+  unmodified (filling the already-typed field adds no key anywhere) and the
+  untouched Gates 1.10/1.11/1.12/1.15.
+- Gate 2: OWED at landing and NOT run by this lane (`src/runner.ts` is on the
+  trigger list; the lane does not spend model tokens). It runs as part of this
+  ticket's landing pipeline.
+- Gate 3 n/a — no adapter file touched.
+
+Manual spot-check (AC#7) — stated exactly: NOT yet satisfied at lane-commit
+time, because the only producer of a real-model `report.json` with non-null
+`promptVersion` is a `verify:full`-class run, which this lane must not run
+(real model tokens; the driving landing pipeline runs it). Once the landing
+Gate 2 run exists, the check is: read `report.json` of that run — every
+dispatched attempt's `promptVersion` must be a 64-hex value, and any retry
+attempts must carry distinct values (the default Gate 2 run has one attempt
+per candidate, so distinctness there is exercised by Gate 1.8 S1's fake-adapter
+drive, which is where retries exist token-free).

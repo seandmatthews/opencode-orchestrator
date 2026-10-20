@@ -9,8 +9,13 @@
 // verdicts (no-op, gates-failed) are never re-rolled; thrown errors retry;
 // and the CLI refuses --max-attempts < 1 at parse time (exit 1 before the
 // checkout lock or any artifacts dir exists). All git calls are list-form
-// (AGENTS.md #4).
+// (AGENTS.md #4). T-029 extends S1: promptVersion is positively pinned as the
+// 64-hex sha256 of the exact prompt text the fake adapter received
+// (independently recomputed from the adapter's recording — never
+// builderPrompt), distinct per retry attempt while inputContextHash stays
+// identical.
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -42,14 +47,19 @@ const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: 'utf8'
 // Steps: { ok, exitCode?, write?: {file, content} } or { error: Error }.
 // Every call appends to the adapter's logPath first — like the real adapter,
 // which logs before anything can go wrong — so a thrown attempt still leaves
-// its worker.log behind.
+// its worker.log behind. T-029: every call also records the EXACT req.prompt
+// it received (the real adapters log it elided/verbatim as provenance), so
+// the check can recompute promptVersion independently of the engine.
 function fakeWorker(steps) {
   const calls = []
+  const prompts = []
   return {
     id: 'fake',
     calls,
+    prompts,
     async execute(req) {
       calls.push(req.cwd)
+      prompts.push(req.prompt)
       try {
         appendFileSync(req.logPath, `fake worker call ${calls.length}\n`)
       } catch {
@@ -162,8 +172,18 @@ const main = async () => {
       && a1.outputArtifacts.every((p) => existsSync(p)) && a2.outputArtifacts.every((p) => existsSync(p)))
     t('S1: same brief+model hashes identically across attempts (64-hex inputContextHash)',
       a1?.inputContextHash === a2?.inputContextHash && /^[0-9a-f]{64}$/.test(a1?.inputContextHash ?? ''))
-    t('S1: promptVersion is null on every attempt (no producer this slice)',
-      a1?.promptVersion === null && a2?.promptVersion === null)
+    // T-029 flip: the old "promptVersion is null on every attempt" pin is
+    // replaced by positive producer pins. The expected values are recomputed
+    // HERE from the exact text the fake adapter received (worker.prompts) —
+    // builderPrompt is never called to build them — so the hash is proven
+    // against what was actually SENT, not what the engine composed.
+    const sha256Hex = (s) => createHash('sha256').update(s).digest('hex')
+    t('S1: promptVersion is the 64-hex sha256 of the exact prompt text the adapter received, per attempt (recomputed from the recording, never builderPrompt)',
+      /^[0-9a-f]{64}$/.test(a1?.promptVersion ?? '') && /^[0-9a-f]{64}$/.test(a2?.promptVersion ?? '')
+      && a1?.promptVersion === sha256Hex(worker.prompts[0])
+      && a2?.promptVersion === sha256Hex(worker.prompts[1]))
+    t('S1: retry attempts carry DISTINCT promptVersion values (the exact text embeds each lease path) while inputContextHash stays identical',
+      a1?.promptVersion !== a2?.promptVersion && a1?.inputContextHash === a2?.inputContextHash)
     t('S1: attempt stamps are ISO strings, endedAt not before startedAt',
       !Number.isNaN(Date.parse(a1?.startedAt)) && !Number.isNaN(Date.parse(a1?.endedAt))
       && !Number.isNaN(Date.parse(a2?.startedAt)) && !Number.isNaN(Date.parse(a2?.endedAt))

@@ -221,7 +221,10 @@ export interface ProcessIdentity {
  * Date.now()). processIdentity/workerSessionId stay absent from
  * report-carried attempts — the in-run pid evidence lives in
  * <runDir>/dispatch.jsonl (T-010), which ingest never reads; promptVersion
- * is null until prompt versioning exists (§6.7:446/§18:1207).
+ * is the sha256 hex of the exact builder prompt text sent to the adapter,
+ * derived at composition time (T-029, §6.7:446/§18:1207) — a content hash,
+ * never a looked-up registry version (the §27 prompts/prompt_versions
+ * tables are deliberately not built).
  */
 export interface Attempt {
   /** `<candidateId>-a<n>` — unique within the run. */

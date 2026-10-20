@@ -466,6 +466,25 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
     const logPath = join(evidenceDir, 'worker.log')
     const diffPath = join(evidenceDir, 'diff.patch')
 
+    // T-029 (spec §6.7:446 — "Every agent attempt records the exact prompt
+    // version used"): the builder prompt is composed ONCE per attempt, and the
+    // SAME variable is both hashed into `promptVersion` and sent to the
+    // adapter below — the hashed bytes and the sent bytes cannot drift. The
+    // version is an EXACT-TEXT sha256, not a workspace-normalized template
+    // hash: the prompt embeds the lease path, whose runDir carries the
+    // timestamped runId, and retry attempts lease fresh paths (wt/<id>-a<n>),
+    // so promptVersion values are unique per attempt by construction. That is
+    // the point: cross-attempt input comparability is `inputContextHash`'s job
+    // (sha256 over brief + model + the prompt with the workspace-path line
+    // excluded — identical across same-brief attempts). The two fields answer
+    // different questions — inputContextHash: "was this attempt asked the same
+    // thing as that one?"; promptVersion: "is this the hash of the exact text
+    // that produced this attempt's evidence?" Both are audit provenance;
+    // neither ever touches a verdict (decisions.md 2026-10-10: machine gates
+    // decide survival; models advise).
+    const prompt = builderPrompt(job.brief, lease.path)
+    const promptVersion = createHash('sha256').update(prompt).digest('hex')
+
     const attempt: Attempt = {
       id: `${id}-a${n}`,
       jobId: id,
@@ -473,7 +492,7 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
       state: 'running',
       startedAt: new Date().toISOString(),
       inputContextHash: inputContextHash(job.brief, job.model, lease.path),
-      promptVersion: null,
+      promptVersion,
       outputArtifacts: [logPath],
     }
     base.attempts.push(attempt)
@@ -493,7 +512,9 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
     try {
       console.log(`[${id}] attempt ${n}: worker start (${job.worker.id}, model=${job.model})`)
       const result = await job.worker.execute({
-        prompt: builderPrompt(job.brief, lease.path),
+        // The exact text hashed into attempt.promptVersion above (T-029) —
+        // one composition, two consumers, no drift possible.
+        prompt,
         model: job.model,
         cwd: lease.path,
         logPath,
