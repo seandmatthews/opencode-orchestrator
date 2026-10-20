@@ -111,11 +111,45 @@ and timeout alike; absent for non-shell gates and pre-existing reports), the
 re-supplied command must equal it exactly, so a replay proves it exercised
 the same commands the run survived instead of trusting the name set alone. A
 report that predates command recording replays on the name set alone — the
-T-005 contract, byte-for-byte. Policy refusals (non-zero, nothing created):
+T-005 contract, byte-for-byte.
+
+The diff evidence itself is store-backed since T-028 (**verify-when-recorded**):
+`--db <path>` (default `C:\swarm\refinery.db` — the T-006/T-008 defaults
+precedent) addresses the diff by its recorded artifact handle
+(`diffArtifactId` in `src/store/index.ts` — the exact id the T-016 ingest
+derivation pushes, computed beside it so the handle cannot drift from the
+ingested row; pinned by Gate 1.6 literals in both scopes). When the store
+holds a `content_hash` for that handle, the diff on disk is re-verified
+against the hash taken at ingest before anything replays: `verified`
+proceeds (one log line naming the handle, "unmutated since ingest");
+`mutated` refuses — the file changed SINCE INGEST, so replaying it would
+re-verify evidence the run did not produce (spec §17.3: prior evidence is
+marked historical), and the refusal says the since-ingest scope out loud.
+**Honesty boundary:** hash-at-ingest proves unmutated-SINCE-INGEST, not
+since-capture — the capture-time gap is a report-shape change that owns its
+own Gate 2 and stays carved (T-016:57-60). `missing` refuses (the diff
+existed at ingest and is gone from disk). A store that exists but cannot be
+opened refuses with a clear message rather than silently replaying
+unverified — a present-but-unreadable store means integrity evidence was
+expected from it, and silent fallback would hide that. Every one of these
+refusals comes from the pre-lock policy-refusal block: no integration
+worktree, no lock. Fallback, byte-for-byte today's path-convention
+behavior: no DB file at `--db` (ingest is post-run best-effort — the store
+can legitimately not know a run), no row for the handle, or a null-hash row
+(`unverified` — T-016 records NULL when the file was already missing at
+ingest; null is never readable as mutated). This is the store's first READ
+that gates an action — a scoping paragraph in the store module header
+records it: a post-hoc, human-facing replay refusal, machine evidence only
+(a sha256 equality check, zero model involvement, decisions.md 2026-10-10),
+while the run pipeline itself still never reads the DB back.
+
+Policy refusals (non-zero, nothing created):
 non-survivor candidate, missing/empty diff (a NO-OP is never a
 pass), unknown candidate id, gate-name mismatch, gate-command mismatch
 against a recorded command (refused from the pre-lock policy-refusal block —
-no integration worktree, no lock taken), already-present integration
+no integration worktree, no lock taken), a diff mutated since ingest and a
+diff deleted since ingest, and a present-but-unopenable store (all three
+T-028, the same pre-lock block), already-present integration
 worktree. `git apply --check` then `git apply` (atomic — a rejecting patch
 leaves the tree untouched); an apply that lands but changes nothing is a NO-OP
 refusal. Capture is binary-safe (T-026): `WorktreeProvider.diff` runs
@@ -136,7 +170,39 @@ verdict artifact `<runDir>/integrate/<id>.json` records
 applied/treeChanged/gates/passed — its gate entries carrying the re-supplied
 commands verbatim (`gates[].command`, T-027, riding the `CommandGate` stamp);
 exit 0 iff applied + treeChanged + all gates
-passed. Replay never commits, never branches, never moves a ref (§17.4).
+passed. Every replay verdict is recorded through the store (T-028):
+`recordIntegrateVerdict` upserts ONE `artifacts` row for the verdict file
+under the producer triple `(candidateId, NULL, verdictPath)` — attempt NULL,
+because the replay is not an attempt of the run's job; kind `'report'` by
+the path rule — with `size_bytes`/`content_hash` measured by the same
+`measureEvidenceFile` read the run's own evidence gets, after the file is
+written (hash-at-ingest of the replay's own evidence), and appends one
+`INTEGRATE_REPLAYED` event stamped from the verdict's own `appliedAt` (the
+store header's fourth documented wall-clock scoping case; the event is a
+documented §28 vocabulary extension there, per the T-008/T-009 precedent —
+§28 names no integration event). Never `gate_results`: the table's PK
+`(run_id, candidate_id, gate_name)` with its upsert would OVERWRITE the
+run's own recorded verdicts — evidence mutated by a replay — so the
+per-gate outcomes ride inside the hashed verdict file and the event payload
+only. Recording is best-effort, the run-ingest posture: a failed store
+write logs `PERSISTENCE FAILED` loudly and never changes the exit code
+(stays gate-determined) or the on-disk verdict artifact; no DB file at
+`--db` skips the record — nothing creates a `refinery.db` as a side
+effect. The default `--db` (`C:\swarm\refinery.db`) is the operator's
+store: outside the fast tier, an `integrate` run on a machine where that
+file exists verifies against it and records the replay verdict into it —
+that is the designed post-hoc behavior for a run the operator ingested.
+The FAST TIER never touches it: every Gate 1.5 face runs `integrate`
+through one spawn helper that injects `--db` at a deliberately-absent
+sandbox path unless the face passes its own temp store, so no
+fast-tier invocation reads or writes any real store (the T-028 review
+round 1 fix — before it, the DB-less faces consulted the default path and
+each success-path replay recorded its fixture verdict into the live
+store, observed as 5 artifacts rows + 20 `INTEGRATE_REPLAYED` events for
+2099-* run ids pointing at verify-integrate paths the sandbox deletes;
+the polluted rows were removed and the fix proven by a full fast-tier run
+leaving the live store byte-identical). Replay never commits, never
+branches, never moves a ref (§17.4).
 
 The replayed worktree is left in place for inspection, dirty by construction:
 plain `clean` refuses it (dirty-protection proven intact on this worktree
@@ -170,6 +236,32 @@ verbatim; an old-shape report (no recorded command) replays name-only
 including a different command under a matching name — and the existing
 command-less `REPORT_GATES` fixtures run unchanged as the back-compat pins
 (the T-005 name-set contract stays for every report that lacks commands).
+Store-backed replay (T-028), a help/flag pin plus six faces: the usage
+documents `--db` with its `C:\swarm\refinery.db` default (the flag itself
+is exercised by every face); a fixture run ingested into a temp DB (through
+the real store, via a generated tsx helper — the sandbox is removed at the
+top of the section) replays exit 0 with the verified handle logged
+(`j:<id>/diff.patch-<digest>`, "unmutated since ingest"); a diff flipped
+after ingest refuses exit 1 from the pre-lock block — no integration
+worktree, the sandbox repo's `worktree list` untouched, no lock files, no
+verdict artifact, the refusal naming the since-ingest scope; a diff deleted
+after ingest refuses as store status `missing` (the store check precedes
+the on-disk existence check, so the refusal names the recorded evidence);
+a junk file at `--db` (present but unopenable) refuses with a clear message
+rather than replaying unverified, again with no worktree and no lock; a
+temp DB holding a NULL-hash row (the diff absent at ingest, the file
+appearing later) falls back to today's replay — exit 0, never claiming
+store verification — the DB-less fixtures above running unchanged as the
+back-compat pins; and `--db` at an unwritable store (the DB ingested, then
+made read-only) replays with the exit still gate-determined, the on-disk
+verdict intact, and the failure logged `PERSISTENCE FAILED`. Each passing
+replay disposes its own dirty worktree through `clean --force` (the T-027
+pattern) so the section's tidy sweeps stay green. Store isolation (the
+review round 1 fix): every face without its own store — the T-027 faces,
+AC#1-#6, and the T-026 binary faces — runs with `--db` at a
+deliberately-absent sandbox path injected by the section's spawn helper,
+so the no-DB-file fallback branch is what the back-compat claim pins and
+no fast-tier invocation ever consults the default `C:\swarm\refinery.db`.
 
 ## Gate 1.6 — store ingest (seconds, fast tier)
 
@@ -178,8 +270,9 @@ node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs
 ```
 
 Pins the durable run records (T-003), the derived job DAG (T-006), the
-attempt records (T-007), the recorded schedule (T-009), and the filesystem
-artifact store (T-016): `src/store/index.ts` ingests a finished `RunReport`
+attempt records (T-007), the recorded schedule (T-009), the filesystem
+artifact store (T-016), and the store-backed integrate pieces (T-028):
+`src/store/index.ts` ingests a finished `RunReport`
 into SQLite (`node:sqlite`, schema v5: `runs`, `candidates`, `gate_results`,
 `events`, T-006's `phases`/`jobs`/`job_dependencies`, T-007's `attempts`,
 T-008's `approval_gates` — which ingest never writes; Gate 1.9 owns it — and
@@ -272,6 +365,27 @@ a verbatim copy of run 20261011022419) into a fresh temp DB and asserts:
   `probe_runs` row per summary plus a matching probe-bundle `artifacts` row
   (`attempt_number` = the final attempt) and no row for bundle-internal
   `.log` files — the bundle is the addressable unit,
+- the store-backed integrate pieces (T-028): `diffArtifactId` pinned by
+  exact literals in BOTH scopes (the pre-T-007 `j:<id>` and the T-007
+  `j:<id>@a<n>`, over the same fixed inputs as the pinned `artifactId`
+  scheme literals) and matched against the actually-ingested diff rows on
+  the fixture (pre-T-007 scope) and the retried variant (the FINAL
+  attempt's row) — no handle drift from the ingest derivation is possible;
+  `recordIntegrateVerdict` upserts exactly ONE `artifacts` row for
+  `integrate/<id>.json` — kind `'report'` by the path rule, producer triple
+  `(candidateId, NULL, path)`, `artifact_id` the deterministic derivation —
+  whose `size_bytes`/`content_hash` equal the written verdict file
+  (hash-at-ingest of the replay's own evidence), appends exactly one
+  `INTEGRATE_REPLAYED` event at the verdict's own `appliedAt` (never
+  `Date.now()`) with the payload naming
+  candidateId/targetHead/applied/treeChanged/passed/worktreePath/
+  verdictPath, leaves `gate_results` value-identical before and after
+  (a replay NEVER writes gate_results — the PK upsert would overwrite the
+  run's own recorded verdicts) and the run's own artifacts rows untouched
+  (the verdict row the only addition), leaves all prior event rows
+  unchanged with exactly one event appended, is idempotent on re-record
+  (the same verdict twice → the same ONE row, events append-only), and
+  `PRAGMA integrity_check` returns `ok`;
 - hash-at-ingest (the documented third scoping case in the store module
   header — ingest is deterministic as a function of *(report, the evidence
   files it names)*, reads evidence, never writes it, the wall clock never
@@ -281,7 +395,17 @@ a verbatim copy of run 20261011022419) into a fresh temp DB and asserts:
   `size_bytes`/`content_hash` equal the byte length/sha256 of controlled
   file content; a report-named path with no file on disk records NULL for
   both — never fabricated; every controlled evidence file is byte-identical
-  after ingestion and re-ingest recomputes identical rows,
+  after ingestion and re-ingest recomputes identical rows
+  (the store header gained two more entries beside it in T-028, noted here
+  where the T-016 case is described: the FOURTH wall-clock scoping case —
+  the integrate replay's `INTEGRATE_REPLAYED` event and verdict row,
+  wall-clock stamped from the verdict's own `appliedAt`, a primary fact the
+  replay produced that no report carries — and the scoping paragraph for
+  the store's first READ that gates an action, integrate's
+  verify-when-recorded refusal: post-hoc, human-facing, machine sha256
+  evidence only, zero model involvement, while the run pipeline still never
+  reads the DB back — pinned behaviorally by the extended Gate 1.5 faces
+  above),
 - `ARTIFACT_CREATED` events (§28:1854): exactly one per artifacts row,
   appended after every existing derived block (per-candidate, schedule) in
   derivation order, payloads naming artifactId/path/kind/jobId/
@@ -1438,9 +1562,13 @@ files on disk. The store hashes at ingest (the documented third scoping
 case in the store module header: ingest is deterministic as a function of
 *(report, the evidence files it names)* — it reads evidence, never writes
 it, and the wall clock never enters a stamp), so this primitive is what
-makes the recorded hashes *checkable*. Deliberately no CLI this slice — a
-later recovery slice integrates it into `npm run recover` (the T-016
-carve; the T-006/T-008 defaults precedent applies if one ever lands).
+makes the recorded hashes *checkable*. Since T-028 `npm run integrate` is
+the primitive's first pipeline consumer — its verify-when-recorded pre-lock
+check, pinned by the Gate 1.5 faces above — while `verifyRunArtifacts`
+itself and every pin in this section are untouched. Deliberately no CLI
+this slice — a later recovery slice integrates it into `npm run recover`
+(the T-016 carve; the T-006/T-008 defaults precedent applies if one ever
+lands).
 
 No existing gate pins tamper evidence — Gate 1.15 pins bundle writing, not
 store persistence, and Gate 2 spends model tokens — so this gate builds a
@@ -2228,6 +2356,25 @@ landing in T-017's Landed section).
    that change-set). Benign until observed recurring; the exact triggering
    line (snapshot failure vs already-gone root vs survivor) is not captured
    by the check's output and was not diagnosed post-hoc.
+   **2026-10-20 second observation (T-028 review round 2) — same class,
+   still not reproducible.** The driving workflow's fast tier aborted at
+   Gate 1.12 with verify.mjs's wrapper line `FAIL: kill-tree self-check
+   failed: 1` (the per-gate wrapper `finish()`es on a failed gate, so
+   Gates 1.13–1.21 did not run in that pass — aborting loudly is the
+   tier's design; the response is a re-run, not a code change). The
+   check's own per-assertion `FAIL: <name>` line was again not captured
+   reviewer-side (lost in the tier's stderr noise — the Known issue #11
+   capture gap). The T-028 change-set touches no kill-tree file
+   (`git log` over scripts/check-kill-tree.mjs, src/kill-tree.ts,
+   src/gate/command.ts, src/worker/run-with-timeout.ts: last touch is
+   T-027's 6abd977, pre-dating the lane), and the red did not reproduce:
+   lane standalone check-kill-tree ×4 and the lane full fast tier all
+   ALL GREEN (30 assertions each) the same hour. Now observed twice —
+   three days apart, different lanes, zero shared change-set code — so
+   the threshold for "recurring" is close: a third observation must come
+   with the check's captured `FAIL: <name>` line before any code change
+   is considered, and the honest classification until then is a
+   loud-by-design one-off, benign, evidence-only.
 11. **A one-off Gate 1.17 red with a single failed assertion, not
    reproducible (observed once, 2026-10-18, T-021 lane review round 1).**
    One fast-tier run failed inside `scripts/check-machine-worker.mjs` — exit

@@ -11,6 +11,15 @@
 // durations, never from the wall clock — so re-ingest is deterministic.
 // Persistence records verdicts; it never influences them.
 //
+// Scoping of that line (T-028): T-028 makes the store's first READ that
+// gates an action — `npm run integrate` verifies the candidate's diff
+// against the hash recorded at ingest and refuses to replay a diff that
+// mutated since ingest. The refusal is post-hoc and human-facing (a replay
+// the operator asked for), while the run pipeline itself still never reads
+// the DB back; and the refusal is machine evidence only — a sha256
+// equality check, zero model involvement (decisions.md 2026-10-10).
+// Nothing that decides a run's survival reads the store.
+//
 // Wall-clock scoping of the determinism rule (T-008): approval requests and
 // decisions are primary human facts no report carries, so their rows
 // (`requested_at`/`decided_at`) and events (`APPROVAL_REQUESTED` /
@@ -29,6 +38,18 @@
 // itself (`ended_at` and the event's `at`) is the moment of recovery. No
 // report exists to derive from, so the deviation is documented, not
 // smoothed: `ingest` is untouched and stays a pure function of the report.
+//
+// Wall-clock scoping, fourth case (T-028): an integration replay's verdict
+// is a primary fact the replay produced that no report carries — the run
+// finished long before, and §28 names no integration event — so the
+// `INTEGRATE_REPLAYED` event and the verdict's `artifacts` row written by
+// `recordIntegrateVerdict` (the third DB writer, driven by the standalone
+// `npm run integrate`) are legitimately wall-clock stamped: the event's
+// `at` is the verdict's own `appliedAt` (the wall-clock stamp the replay
+// wrote into its verdict artifact), and the verdict file's
+// `size_bytes`/`content_hash` are hash-at-ingest of the replay's own
+// evidence, same as the run's. `ingest` is untouched and stays a pure
+// function of the report.
 //
 // Hash-at-ingest scoping, third case (T-016): ingest is deterministic as a
 // function of *(report, the evidence files it names)*. Every report-named
@@ -222,6 +243,14 @@ CREATE TABLE IF NOT EXISTS probe_runs (
 // post-hoc: exactly one per `artifacts` row, appended after every existing
 // derived block, every `at` a pure function of the report's stamps (never
 // `Date.now()`), so re-ingest appends a fresh deterministic block.
+// T-028 adds INTEGRATE_REPLAYED — §28:1844-1864 names no integration event,
+// so this vocabulary extension is chosen and recorded here per the T-008/
+// T-009 precedent: one event per recorded integration replay, written by
+// `recordIntegrateVerdict` (the only producer), `at` stamped from the
+// verdict's own `appliedAt` (the header's fourth wall-clock scoping case),
+// payload naming candidateId/targetHead/applied/treeChanged/passed/
+// worktreePath/verdictPath. A replay never writes `gate_results` — the
+// table's PK would overwrite the run's own recorded verdicts.
 
 // ---------- T-016: the filesystem artifact store ----------
 
@@ -365,6 +394,22 @@ function deriveArtifacts(report: RunReport): DerivedArtifact[] {
 }
 
 /**
+ * The artifact handle of one candidate's captured diff — exactly the id the
+ * ingest derivation pushes for it (`deriveArtifacts`:
+ * `push(c.id, fin, c.diffPath)`), computed by the same `artifactId` over the
+ * same producer triple `(candidateId, finalAttemptNumber, diffPath)`. Null
+ * when the candidate carries no diffPath — nothing to verify. Computable
+ * from report.json alone, and living beside the derivation it mirrors so
+ * the handle can never drift from the ingested row's id. First consumer:
+ * integrate's verify-when-recorded check (T-028). Pinned by exact literal
+ * in Gate 1.6 for both scopes (pre-T-007 `j:<id>`, T-007 `j:<id>@a<n>`).
+ */
+export function diffArtifactId(c: CandidateReport): string | null {
+  if (!c.diffPath) return null
+  return artifactId(c.id, finalAttemptNumber(c), c.diffPath)
+}
+
+/**
  * Re-verification primitive (spec §29:1877's "validate artifact files/
  * hashes" face): re-hashes one run's recorded artifacts against the files
  * on disk. Per row: 'verified' (the file's hash matches the recorded one),
@@ -402,6 +447,90 @@ export function verifyRunArtifacts(runId: string, dbPath: string): ArtifactVerif
       }
       return { artifactId: r.artifact_id, path: r.path, status }
     })
+  } finally {
+    db.close()
+  }
+}
+
+// ---------- T-028: integration replay verdicts ----------
+
+/**
+ * One integration replay verdict, as recorded by `recordIntegrateVerdict`.
+ * Mirrors the durable fields of the on-disk verdict artifact
+ * (`<runDir>/integrate/<id>.json`, src/integrate.ts) — the store writer
+ * hashes whatever that file contains and never interprets the rest.
+ */
+export interface IntegrateReplayRecord {
+  candidateId: string
+  /** The verdict's own `appliedAt` — the event's `at` stamp. */
+  appliedAt: string
+  targetHead: string
+  applied: boolean
+  treeChanged: boolean
+  passed: boolean
+  worktreePath: string
+  verdictPath: string
+}
+
+/**
+ * Record one integration replay verdict (T-028) — the third DB writer after
+ * `ingest` and `recordAbandonedAttempts`, called by `npm run integrate` on
+ * every replay that writes its verdict artifact (both the normal and the
+ * NO-OP-refusal path). Upserts ONE `artifacts` row for the verdict file
+ * under the producer triple `(candidateId, NULL, verdictPath)` — attempt
+ * NULL, because the replay is not an attempt of the run's job — with kind
+ * `'report'` by the path rule and `size_bytes`/`content_hash` measured by
+ * the same `measureEvidenceFile` read the run's own evidence gets, here
+ * after the file is written: hash-at-ingest of the replay's own evidence.
+ * Appends exactly one `INTEGRATE_REPLAYED` event whose `at` is the verdict's
+ * own `appliedAt` — the header's fourth wall-clock scoping case (a primary
+ * fact the replay produced that no report carries). Idempotent on the row
+ * (upsert by natural key; a re-record of the same verdict rewrites one row),
+ * append-only on events. NEVER writes `gate_results`: the table's PK
+ * `(run_id, candidate_id, gate_name)` with its upsert would OVERWRITE the
+ * run's own recorded verdicts — evidence mutated by a replay; the replay's
+ * per-gate outcomes ride inside the hashed verdict file and the event
+ * payload only.
+ *
+ * The connection opens with foreign-key constraints disabled
+ * (`recordAbandonedAttempts` precedent): the replayed run may never have
+ * been ingested, so no `runs` row need exist, and this writer must not
+ * fabricate one. Throws on failure — the caller (src/integrate.ts) logs
+ * loudly and continues; the replay's exit code stays gate-determined.
+ */
+export function recordIntegrateVerdict(dbPath: string, runId: string, verdict: IntegrateReplayRecord): void {
+  // Hash-at-ingest of the replay's own evidence: the verdict file exists by
+  // the time this is called (writeVerdict fires first); a now-missing file
+  // records NULL for both, never a fabricated value (AGENTS.md #7).
+  const measured = measureEvidenceFile(verdict.verdictPath)
+  const row: DerivedArtifact & { sizeBytes: number | null; contentHash: string | null } = {
+    artifactId: artifactId(verdict.candidateId, null, verdict.verdictPath),
+    kind: artifactKindOf(verdict.verdictPath),
+    jobId: verdict.candidateId,
+    attemptNumber: null,
+    path: verdict.verdictPath,
+    ...measured,
+  }
+  const db = new DatabaseSync(dbPath, { enableForeignKeyConstraints: false })
+  try {
+    db.exec(SCHEMA_SQL)
+    db.exec('BEGIN')
+    try {
+      upsertArtifact(db, runId, row)
+      insertEvent(db, runId, 'INTEGRATE_REPLAYED', verdict.appliedAt, {
+        candidateId: verdict.candidateId,
+        targetHead: verdict.targetHead,
+        applied: verdict.applied,
+        treeChanged: verdict.treeChanged,
+        passed: verdict.passed,
+        worktreePath: verdict.worktreePath,
+        verdictPath: verdict.verdictPath,
+      })
+      db.exec('COMMIT')
+    } catch (e) {
+      try { db.exec('ROLLBACK') } catch { /* nothing to undo */ }
+      throw e
+    }
   } finally {
     db.close()
   }

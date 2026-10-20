@@ -17,6 +17,23 @@
 // predates command recording replays on the name set alone (the T-005
 // contract, byte-for-byte).
 //
+// Since T-028 the replay is store-backed (--db, default C:\swarm\refinery.db).
+// Verify-when-recorded: when the artifact store holds a hash for the
+// candidate's diff (T-016's hash-at-ingest), the diff is proven unmutated
+// SINCE INGEST before anything replays — a mutated or deleted diff refuses
+// from the pre-lock policy-refusal block (no worktree, no lock), because a
+// replay of post-ingest-mutated evidence would re-verify something the run
+// never produced (spec §17.3: prior evidence is marked historical). No DB,
+// no row, or a null-hash row (the file was already missing at ingest)
+// falls back to the path-convention behavior byte-for-byte — the DB can
+// legitimately not exist for a run (ingest is post-run best-effort). The
+// replay's own verdict is recorded back through the store
+// (recordIntegrateVerdict: one artifacts row hash-at-ingest of the verdict
+// file, one INTEGRATE_REPLAYED event) — never as gate_results rows, which
+// would overwrite the run's own recorded verdicts. Recording is
+// best-effort, the run-ingest posture: a failed write logs loudly and
+// never changes the exit code or the verdict artifact.
+//
 // The integration worktree is left in place for inspection, holding the
 // replayed diff as uncommitted changes: plain `npm run clean` refuses it
 // (dirty-protection), `clean --force` disposes it via the existing wt/
@@ -30,6 +47,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { CommandGate } from './gate/command.js'
 import { acquireCheckoutLock, CheckoutLockRefused, releaseCheckoutLock } from './lock.js'
+import { diffArtifactId, recordIntegrateVerdict, verifyRunArtifacts } from './store/index.js'
+import type { ArtifactVerification } from './store/index.js'
 import type { CandidateReport, GateResult, RunReport } from './types.js'
 
 const usage = `Integration replay: re-verify a surviving candidate's diff at current HEAD.
@@ -44,6 +63,12 @@ Options:
                        the gates the candidate passed in the run; when the run
                        recorded a gate's command, the re-supplied command must
                        equal it exactly (compare-when-recorded, T-027)
+  --db <path>          Artifact store DB (default: C:\\swarm\\refinery.db). When
+                       it holds a hash for the candidate's diff, the diff must
+                       be unmutated since ingest or the replay refuses
+                       (verify-when-recorded, T-028); the verdict is recorded
+                       back into it. No DB / no recorded row falls back to the
+                       path-convention behavior
   --run-root <path>    Where runs live (default: C:\\swarm)
   --force-lock         Take the checkout lock from a suspected-stale holder
   --help               Show this help
@@ -58,12 +83,13 @@ interface Options {
   runRoot: string
   run: string
   candidate: string
+  db: string
   forceLock: boolean
   gates: { name: string; command: string }[]
 }
 
 function parseArgs(argv: string[]): Options {
-  const opts: Options = { runRoot: 'C:\\swarm', run: '', candidate: '', forceLock: false, gates: [] }
+  const opts: Options = { runRoot: 'C:\\swarm', run: '', candidate: '', db: 'C:\\swarm\\refinery.db', forceLock: false, gates: [] }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
     const value = (): string => {
@@ -76,6 +102,7 @@ function parseArgs(argv: string[]): Options {
       case '--candidate': opts.candidate = value(); break
       case '--force-lock': opts.forceLock = true; break
       case '--run-root': opts.runRoot = value(); break
+      case '--db': opts.db = value(); break
       case '--gate': {
         const spec = value()
         const eq = spec.indexOf('=')
@@ -168,6 +195,37 @@ async function main(): Promise<number> {
   if (!candidate) refuse(`no such candidate '${opts.candidate}' in run ${report.runId} (candidates: ${report.candidates.map((c) => c.id).join(', ')})`)
   if (candidate.passedAllGates !== true) refuse(`candidate ${opts.candidate} did not pass all gates in the run — integrate replays survivors only`)
   if (!candidate.diffPath) refuse(`candidate ${opts.candidate} has no captured diff (diffPath is null)`)
+
+  // Verify-when-recorded (T-028), entirely inside the pre-lock policy-refusal
+  // block: when the artifact store holds a hash for this diff (T-016's
+  // hash-at-ingest), the diff must be unmutated SINCE INGEST before anything
+  // replays. Every refusal below creates no worktree and takes no lock. The
+  // handle comes from diffArtifactId — the exact id the ingest derivation
+  // pushes — so it cannot drift from the ingested row.
+  const handle = diffArtifactId(candidate)
+  if (handle && existsSync(opts.db)) {
+    let verifications: ArtifactVerification[]
+    try {
+      verifications = verifyRunArtifacts(report.runId, opts.db)
+    } catch (e) {
+      // A present-but-unreadable store means integrity evidence was expected
+      // from it; silent fallback would hide that. Deliberately not a
+      // fall-through (the ticket's stated choice).
+      refuse(`the artifact store at ${opts.db} exists but cannot be opened: ${errorMessage(e)} — integrity evidence was expected from it, so the replay refuses rather than proceeding unverified`)
+    }
+    const recorded = verifications.find((v) => v.artifactId === handle)
+    if (recorded?.status === 'verified') {
+      console.log(`integrate ${opts.candidate}: diff verified against the artifact store (${handle}, unmutated since ingest)`)
+    } else if (recorded?.status === 'mutated') {
+      refuse(`the captured diff no longer matches the hash recorded at ingest (artifact ${handle}, status: mutated) — the file changed SINCE INGEST, so replaying it would re-verify evidence the run did not produce; prior evidence is marked historical (spec §17.3)`)
+    } else if (recorded?.status === 'missing') {
+      refuse(`the captured diff recorded in the artifact store (artifact ${handle}) is gone from disk (status: missing) — it existed at ingest and has since been deleted, so there is nothing to replay`)
+    }
+    // 'unverified' (null hash — the file was already missing at ingest) or no
+    // row for the handle: fall through — today's behavior byte-for-byte. No
+    // DB file at --db: the same fall-through (ingest is post-run
+    // best-effort, so the store can legitimately not know this run).
+  }
   if (!existsSync(candidate.diffPath)) refuse(`captured diff missing on disk: ${candidate.diffPath}`)
   if (candidate.diffBytes === 0) refuse(`zero-byte diff for ${opts.candidate} — a NO-OP is never a pass`)
 
@@ -249,7 +307,7 @@ async function replay(
   const treeChanged = git(worktreePath, ['status', '--porcelain']).trim() !== ''
   if (!treeChanged) {
     console.error(`refused: the patch applied but changed nothing — a NO-OP is never a pass (AGENTS.md #7)`)
-    writeVerdict(runDir, opts.candidate, {
+    writeVerdict(opts, report, opts.candidate, {
       runId: report.runId,
       candidateId: opts.candidate,
       appliedAt: new Date().toISOString(),
@@ -273,7 +331,7 @@ async function replay(
   }
 
   const passed = results.length > 0 && results.every((r) => r.passed)
-  writeVerdict(runDir, opts.candidate, {
+  writeVerdict(opts, report, opts.candidate, {
     runId: report.runId,
     candidateId: opts.candidate,
     appliedAt: new Date().toISOString(),
@@ -292,10 +350,43 @@ async function replay(
   return passed ? 0 : 1
 }
 
-function writeVerdict(runDir: string, candidateId: string, verdict: IntegrateVerdict): void {
-  const dir = join(runDir, 'integrate')
+function writeVerdict(opts: Options, report: RunReport, candidateId: string, verdict: IntegrateVerdict): void {
+  const dir = join(opts.runRoot, opts.run, 'integrate')
   mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, `${candidateId}.json`), JSON.stringify(verdict, null, 2))
+  const verdictPath = join(dir, `${candidateId}.json`)
+  writeFileSync(verdictPath, JSON.stringify(verdict, null, 2))
+  recordVerdict(opts, report, candidateId, verdictPath, verdict)
+}
+
+/**
+ * Record the replay verdict through the artifact store (T-028) — best-effort,
+ * the run-ingest posture (T-003): a failed store write logs loudly and never
+ * changes the replay's exit code or the on-disk verdict artifact. Every
+ * replay verdict is recorded (writeVerdict fires on the NO-OP refusal path
+ * as well as the normal path). No DB file at --db skips the record — the run
+ * was never ingested, and creating a store as a side effect would break the
+ * DB-less back-compat contract (no subcommand creates a refinery.db).
+ */
+function recordVerdict(opts: Options, report: RunReport, candidateId: string, verdictPath: string, verdict: IntegrateVerdict): void {
+  if (!existsSync(opts.db)) {
+    console.log(`integrate ${candidateId}: no artifact store at ${opts.db} — verdict not recorded (run not ingested; verdict stays on disk only)`)
+    return
+  }
+  try {
+    recordIntegrateVerdict(opts.db, report.runId, {
+      candidateId,
+      appliedAt: verdict.appliedAt,
+      targetHead: verdict.targetHead,
+      applied: verdict.applied,
+      treeChanged: verdict.treeChanged,
+      passed: verdict.passed,
+      worktreePath: verdict.worktreePath,
+      verdictPath,
+    })
+    console.log(`integrate ${candidateId}: verdict recorded to the artifact store (${opts.db})`)
+  } catch (e) {
+    console.error(`PERSISTENCE FAILED: the integrate verdict for ${candidateId} was not recorded to ${opts.db}: ${errorMessage(e)} — the verdict file at ${verdictPath} is intact and the exit code is gate-determined`)
+  }
 }
 
 try {

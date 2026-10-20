@@ -3,11 +3,11 @@
 //   node scripts/verify.mjs full   fast + Gate 2 (real e2e run, ~3-5 min, model tokens)
 // All subprocesses are list-form and shell-free: npm.cmd shims and string-joined
 // commands are exactly how Windows quoting bugs happen (AGENTS.md #4).
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const fixture = 'C:/swarm/demo-target'
@@ -266,16 +266,29 @@ const intRepo = join(intRoot, 'repo')
 const intRuns = join(intRoot, 'runs')
 rmSync(intRoot, { recursive: true, force: true })
 mkdirSync(intRuns, { recursive: true })
+// Every integrate face that runs WITHOUT its own store gets --db pointed at
+// this deliberately-absent sandbox path: it exercises exactly the no-DB-file
+// fallback branch (src/integrate.ts) while guaranteeing no fast-tier
+// invocation ever reads or writes a real store. Before the T-028 review
+// round 1 these faces passed no --db, so on a machine with an existing
+// C:\swarm\refinery.db the default path was consulted — and every
+// success-path replay recorded its fixture verdict INTO the live store
+// (observed: 5 artifacts rows + 20 INTEGRATE_REPLAYED events for 2099-* run
+// ids, pointing at verify-integrate paths the sandbox deletes). The default
+// store path is only consulted outside the sandbox.
+const absentDb = join(intRoot, 'store', 'absent.db')
 const igit = (...args) => run('git', ['-C', intRepo, ...args])
 const expectIntegrate = (expectedCode, label, args) => {
-  let code = 0
-  let out = ''
-  try {
-    run(process.execPath, [tsxCli, join(root, 'src', 'integrate.ts'), ...args], { timeout: 120_000 })
-  } catch (e) {
-    code = e.status ?? -1
-    out = `${e.stdout ?? ''}${e.stderr ?? e.message}`
-  }
+  // spawnSync (still list-form, AGENTS.md #4) so stdout AND stderr are
+  // captured on success paths too — the T-028 faces pin log lines the
+  // command prints on exit-0 runs (the verified-handle line, the loud
+  // PERSISTENCE FAILED line, the --help usage text).
+  // The absentDb injection (above) makes the sandbox isolation structural:
+  // no face can omit --db and fall through to the engine default.
+  const fullArgs = args.includes('--db') || args.includes('--help') ? args : [...args, '--db', absentDb]
+  const r = spawnSync(process.execPath, [tsxCli, join(root, 'src', 'integrate.ts'), ...fullArgs], { encoding: 'utf8', windowsHide: true, timeout: 120_000 })
+  const code = r.status === null ? -1 : r.status
+  const out = `${r.stdout ?? ''}${r.stderr ?? ''}${r.error?.message ?? ''}`
   if (code !== expectedCode) console.error(`--- integrate output (${label}, exit ${code}) ---\n${out}`)
   return { code, out }
 }
@@ -403,6 +416,132 @@ code = expectClean(0, 't27 exact-match disposal', ['--run', '20991010030001', '-
 ok(code === 0, `clean --force disposes the exact-match replay worktree (got ${code})`)
 code = expectClean(0, 't27 old-shape disposal', ['--run', '20991010030002', '--run-root', intRuns, '--force'])
 ok(code === 0, `clean --force disposes the old-shape replay worktree (got ${code})`)
+
+// T-028 — store-backed integrate: verify-when-recorded diff evidence
+// (--db, default C:\swarm\refinery.db) plus best-effort verdict recording.
+// The faces ingest their fixture runs into temp DBs through the real store
+// (src/store/index.ts under tsx, via a generated helper — the check's
+// sandbox is removed wholesale at the top of this section). Run ids sort
+// BEFORE the 2099101103xxxx block below, so the existing tidy sweeps still
+// dispose this block's replay worktrees; every passing replay disposes its
+// own dirty worktree explicitly (the T-027 pattern) so the --all sweep
+// below stays exit 0. Every refusal face pins: no integration worktree, the
+// sandbox repo's worktree list untouched, and no residual lock files (the
+// end-of-section pattern) — the refusals all come from the pre-lock
+// policy-refusal block.
+const ingestHelper = join(intRoot, 'ingest-helper.mjs')
+writeFileSync(ingestHelper, [
+  `import { readFileSync } from 'node:fs'`,
+  `import { ingest } from '${pathToFileURL(join(root, 'src', 'store', 'index.ts')).href}'`,
+  `const [reportPath, dbPath] = process.argv.slice(2)`,
+  `ingest(JSON.parse(readFileSync(reportPath, 'utf8')), dbPath)`,
+  '',
+].join('\n'))
+const runIngest = (label, reportPath, dbPath) => {
+  let code = 0
+  let out = ''
+  try {
+    run(process.execPath, [tsxCli, ingestHelper, reportPath, dbPath])
+  } catch (e) {
+    code = e.status ?? -1
+    out = `${e.stdout ?? ''}${e.stderr ?? e.message}`
+  }
+  if (code !== 0) console.error(`--- ingest helper output (${label}) ---\n${out}`)
+  return code
+}
+const t28Store = join(intRoot, 'store')
+mkdirSync(t28Store, { recursive: true })
+const diffT28 = captureDiff((maker) => writeFileSync(join(maker, 'file.txt'), 'alpha\nbeta\ngamma\ndelta-t28\n'))
+
+// Flag + help: --db parses (every face below passes it) and is documented
+// in the usage text with its default.
+const intHelp = expectIntegrate(0, 'help', ['--help'])
+ok(intHelp.code === 0, `integrate --help exits 0 (got ${intHelp.code})`)
+ok(intHelp.out.includes('--db <path>') && /refinery\.db/.test(intHelp.out), 'usage documents --db with its default C:\\swarm\\refinery.db')
+
+// Face 1 — intact-store replay proceeds: the run ingested, diff untouched →
+// exit 0 with a log line naming the verified handle.
+makeIntRun('20991010030010', { diff: diffT28, id: 's01' })
+const t28VerifiedDb = join(t28Store, 't028-verified.db')
+ok(runIngest('verified', join(intRuns, '20991010030010', 'report.json'), t28VerifiedDb) === 0, 'store-backed: intact-face run ingested into a temp DB')
+const intVerified = expectIntegrate(0, 'verified replay', ['--run', '20991010030010', '--candidate', 's01', ...CLI_GATES, '--run-root', intRuns, '--db', t28VerifiedDb])
+ok(intVerified.code === 0, `intact-store replay proceeds with exit 0 (got ${intVerified.code})`)
+ok(/diff verified against the artifact store \(j:s01\/diff\.patch-[0-9a-f]{16}, unmutated since ingest\)/.test(intVerified.out), 'the intact replay logs the verified diff handle (unmutated since ingest)')
+code = expectClean(0, 't28 verified disposal', ['--run', '20991010030010', '--run-root', intRuns, '--force'])
+ok(code === 0, `clean --force disposes the store-backed replay worktree (got ${code})`)
+
+// Face 2 — mutated diff refuses pre-lock: flip one byte of the diff after
+// ingest → exit 1 from the policy-refusal block, no integration worktree,
+// the sandbox repo untouched, no lock ever taken, no verdict artifact.
+makeIntRun('20991010030011', { diff: diffT28, id: 's02' })
+const t28MutatedDb = join(t28Store, 't028-mutated.db')
+ok(runIngest('mutated', join(intRuns, '20991010030011', 'report.json'), t28MutatedDb) === 0, 'store-backed: mutated-face run ingested')
+const mutatedDiffPath = join(intRuns, '20991010030011', 's02', 'diff.patch')
+writeFileSync(mutatedDiffPath, readFileSync(mutatedDiffPath, 'utf8').replace('delta-t28', 'delta-TAMPER'))
+const intMutated = expectIntegrate(1, 'mutated diff', ['--run', '20991010030011', '--candidate', 's02', ...CLI_GATES, '--run-root', intRuns, '--db', t28MutatedDb])
+ok(intMutated.code === 1, `a diff mutated since ingest refuses (got ${intMutated.code})`)
+ok(/mutated/.test(intMutated.out) && /since ingest/i.test(intMutated.out), 'the refusal says the since-ingest scope out loud')
+ok(!existsSync(join(intRuns, '20991010030011', 'wt')), 'mutated-diff refusal creates no integration worktree')
+ok(igit('worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).length === 1, 'mutated-diff refusal leaves the sandbox repo worktree list untouched')
+ok(lockFilesIn(intRuns).length === 0, 'mutated-diff refusal takes no checkout lock')
+ok(!existsSync(join(intRuns, '20991010030011', 'integrate')), 'mutated-diff refusal produces no verdict artifact')
+
+// Face 3 — diff deleted after ingest refuses (store status missing), again
+// with no worktree and no lock. The store check precedes the on-disk
+// existence check, so the refusal names the recorded evidence, not the path.
+makeIntRun('20991010030012', { diff: diffT28, id: 's03' })
+const t28MissingDb = join(t28Store, 't028-missing.db')
+ok(runIngest('missing', join(intRuns, '20991010030012', 'report.json'), t28MissingDb) === 0, 'store-backed: deleted-diff-face run ingested')
+rmSync(join(intRuns, '20991010030012', 's03', 'diff.patch'))
+const intDeleted = expectIntegrate(1, 'deleted diff', ['--run', '20991010030012', '--candidate', 's03', ...CLI_GATES, '--run-root', intRuns, '--db', t28MissingDb])
+ok(intDeleted.code === 1, `a diff deleted since ingest refuses (got ${intDeleted.code})`)
+ok(/status: missing/.test(intDeleted.out) && /existed at ingest/.test(intDeleted.out), 'the refusal names the store status missing (the file existed at ingest)')
+ok(!existsSync(join(intRuns, '20991010030012', 'wt')), 'deleted-diff refusal creates no integration worktree')
+ok(lockFilesIn(intRuns).length === 0, 'deleted-diff refusal takes no checkout lock')
+
+// Face 4 — a DB that exists but cannot be opened refuses with a clear
+// message rather than silently replaying unverified (the ticket's stated
+// choice; silent fallback would hide expected integrity evidence).
+makeIntRun('20991010030013', { diff: diffT28, id: 's04' })
+const t28JunkDb = join(t28Store, 't028-junk.db')
+writeFileSync(t28JunkDb, 'this is not a sqlite database\n')
+const intJunk = expectIntegrate(1, 'unopenable store', ['--run', '20991010030013', '--candidate', 's04', ...CLI_GATES, '--run-root', intRuns, '--db', t28JunkDb])
+ok(intJunk.code === 1, `a present-but-unreadable store refuses (got ${intJunk.code})`)
+ok(/cannot be opened/.test(intJunk.out) && /refuses rather than proceeding unverified/.test(intJunk.out), 'the unopenable-store refusal names the problem and the choice')
+ok(!existsSync(join(intRuns, '20991010030013', 'wt')), 'unopenable-store refusal creates no integration worktree')
+ok(lockFilesIn(intRuns).length === 0, 'unopenable-store refusal takes no checkout lock')
+
+// Face 5 — fallback, byte-for-byte today's behavior when nothing is
+// recorded: a temp DB holding a NULL-hash row (the diff was absent at
+// ingest, so the store recorded nothing to check) never blocks the replay
+// and never claims verification — the file appeared on disk afterwards.
+makeIntRun('20991010030014', { diff: diffT28, id: 's05', writeDiff: false })
+const t28NullHashDb = join(t28Store, 't028-nullhash.db')
+ok(runIngest('null-hash', join(intRuns, '20991010030014', 'report.json'), t28NullHashDb) === 0, 'store-backed: null-hash-face run ingested with the diff absent (row records NULL)')
+writeFileSync(join(intRuns, '20991010030014', 's05', 'diff.patch'), diffT28)
+const intNullHash = expectIntegrate(0, 'null-hash fallback', ['--run', '20991010030014', '--candidate', 's05', ...CLI_GATES, '--run-root', intRuns, '--db', t28NullHashDb])
+ok(intNullHash.code === 0, `a null-hash (unverified) row falls back to today's replay, exit 0 (got ${intNullHash.code})`)
+ok(!/diff verified against the artifact store/.test(intNullHash.out), 'the null-hash fallback does not claim store verification')
+code = expectClean(0, 't28 fallback disposal', ['--run', '20991010030014', '--run-root', intRuns, '--force'])
+ok(code === 0, `clean --force disposes the fallback replay worktree (got ${code})`)
+
+// Face 6 — a failed store write does not change the verdict: --db at an
+// unwritable store (the DB ingested, then made read-only) → verification
+// falls back (no recorded row), the replay proceeds, the PERSISTENCE FAILED
+// line logs loudly, the exit stays gate-determined, and the on-disk
+// verdict artifact is intact.
+makeIntRun('20991010030015', { diff: diffT28, id: 's06' })
+const t28ReadonlyDb = join(t28Store, 't028-readonly.db')
+ok(runIngest('readonly', join(intRuns, '20991010030015', 'report.json'), t28ReadonlyDb) === 0, 'store-backed: failed-write-face run ingested')
+chmodSync(t28ReadonlyDb, 0o444)
+const intReadonly = expectIntegrate(0, 'unwritable store', ['--run', '20991010030015', '--candidate', 's06', ...CLI_GATES, '--run-root', intRuns, '--db', t28ReadonlyDb])
+ok(intReadonly.code === 0, `a failed store write leaves the exit gate-determined, exit 0 (got ${intReadonly.code})`)
+ok(/PERSISTENCE FAILED/.test(intReadonly.out), 'the failed store write is logged loudly (PERSISTENCE FAILED)')
+ok(existsSync(join(intRuns, '20991010030015', 'integrate', 's06.json'))
+  && JSON.parse(readFileSync(join(intRuns, '20991010030015', 'integrate', 's06.json'), 'utf8')).passed === true, 'the on-disk verdict artifact is intact despite the failed store write')
+chmodSync(t28ReadonlyDb, 0o666)
+code = expectClean(0, 't28 failed-write disposal', ['--run', '20991010030015', '--run-root', intRuns, '--force'])
+ok(code === 0, `clean --force disposes the failed-write replay worktree (got ${code})`)
 
 // AC#1 — clean replay onto drifted HEAD: exit 0, every gate PASS at post-drift HEAD,
 // change present in the replayed worktree, canonical checkout untouched.
