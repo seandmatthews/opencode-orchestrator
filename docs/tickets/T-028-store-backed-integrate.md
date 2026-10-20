@@ -254,9 +254,13 @@ line numbers, not the ticket's.
   byte-for-byte. `writeVerdict` now records through the store best-effort
   (`recordVerdict`, `:338-379`) on BOTH call sites (NO-OP refusal + normal): no DB
   file skips the record with one stdout line (nothing creates a `refinery.db` as a
-  side effect — the T-006 refusal pattern, and the sandbox discipline the fast tier
-  keeps); a failed write logs `PERSISTENCE FAILED` loudly and changes neither the
-  exit code nor the verdict file. Replay semantics untouched: detached worktree,
+  side effect — the T-006 refusal pattern); a failed write logs `PERSISTENCE
+  FAILED` loudly and changes neither the exit code nor the verdict file. The
+  DEFAULT `--db` (`C:\swarm\refinery.db`) is the operator's store: outside the
+  fast tier, an integrate run on a machine where that file exists verifies against
+  it and records the replay verdict into it — designed post-hoc behavior for a run
+  the operator ingested. The FAST TIER never touches it (review round 1, below).
+  Replay semantics untouched: detached worktree,
   `gateContract` (T-027's compare-when-recorded verbatim), NO-OP guard, binary stub
   refusal, prepare-only §17.4, checkout-lock flow.
 - `scripts/verify.mjs` — Gate 1.5 faces for every acceptance criterion: help/flag
@@ -275,7 +279,10 @@ line numbers, not the ticket's.
   PERSISTENCE FAILED); the failure-path data every existing face reads is identical.
   Each passing replay disposes its own dirty worktree through `clean --force` (the
   T-027 pattern); run ids `20991010030010-30015` sort before the existing blocks so
-  the tidy sweeps are untouched.
+  the tidy sweeps are untouched. Store isolation (review round 1, below): every
+  face without its own store runs with `--db` at a deliberately-absent sandbox
+  path, injected by `expectIntegrate` unless the face passes its own `--db` —
+  structurally, so no face can omit it and fall through to the engine default.
 - `scripts/check-store.mjs` — Gate 1.6 extensions: `diffArtifactId` exact literals
   in BOTH scopes over the pinned fixed inputs, matched against the actually-ingested
   diff rows on the fixture (pre-T-007) and the retried variant (FINAL attempt's row)
@@ -308,3 +315,37 @@ three intermediate reds were plumbing-only — success-path output was discarded
 run: `src/runner.ts`, adapters, gates, workspace handling, and report shape are
 untouched; `src/integrate.ts` is none of those. Gate 0.5 n/a (`src/parse.ts`
 untouched); Gate 3 n/a (no adapter).
+
+**Review round 1 (2026-10-20) — the fast tier was writing into the live store.**
+The round-1 landing's DB-less faces passed no `--db`, so `opts.db` defaulted to
+`C:\swarm\refinery.db` and `recordVerdict`'s `existsSync` guard (which only
+prevents CREATING a store) let every success-path face record its fixture verdict
+INTO the developer's live store; the verify step likewise read it. The reviewer's
+evidence, re-confirmed read-only this round
+(`sqlite3 file:C:/swarm/refinery.db?mode=ro`): 5 `artifacts` rows and 20
+`INTEGRATE_REPLAYED` events for the fixture run ids
+20991010030001/20991010030002/20991011030000/20991011030005/20991011030007 —
+paths under `C:\swarm\verify-integrate`, which the sandbox deletes, so the rows
+were permanently-`missing` evidence accumulating on every fast-tier run — zero
+`gate_results`/`runs` rows. This violated the repo's stated sandbox discipline
+(the T-021 anchor, VERIFICATION.md Known-issues region: a check that would
+"write real run state into the live root during `npm run verify`" is deliberately
+not taken) and made this ticket's Landed claim "nothing creates a `refinery.db`
+as a side effect … the sandbox discipline the fast tier keeps" false in
+substance: the code did not create the DB, it wrote into the existing one.
+Replay SEMANTICS of the back-compat claim (AC #5) were verified intact — all
+pre-existing `.out` assertions in the integrate section are failure-path, and the
+spawnSync plumbing change only ADDS success-path output — but the faces'
+side-effect profile had changed. Fix, check-side + docs only (no engine change —
+the default-path behavior is the ticket's designed operator contract):
+`scripts/verify.mjs`'s `expectIntegrate` now injects `--db` at a
+deliberately-absent sandbox path (`C:\swarm\verify-integrate\store\absent.db`,
+never created) into every face that does not pass its own store — exercising
+exactly the no-DB-file fallback branch while making it structurally impossible
+for a face to consult the default path. The polluted live-store rows were
+removed by a scoped, backed-up delete (only the 5 `artifacts` rows + 20
+`INTEGRATE_REPLAYED` events with 2099-* run ids; `gate_results`/`runs`/`candidates`
+confirmed empty for those ids before and after; `PRAGMA integrity_check` ok), and
+the fix proven green by a full `node scripts/verify.mjs fast` run with
+sha256(`C:\swarm\refinery.db`) identical before and after — no fast-tier
+invocation touches a real store.

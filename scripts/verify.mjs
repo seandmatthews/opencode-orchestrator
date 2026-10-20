@@ -266,13 +266,27 @@ const intRepo = join(intRoot, 'repo')
 const intRuns = join(intRoot, 'runs')
 rmSync(intRoot, { recursive: true, force: true })
 mkdirSync(intRuns, { recursive: true })
+// Every integrate face that runs WITHOUT its own store gets --db pointed at
+// this deliberately-absent sandbox path: it exercises exactly the no-DB-file
+// fallback branch (src/integrate.ts) while guaranteeing no fast-tier
+// invocation ever reads or writes a real store. Before the T-028 review
+// round 1 these faces passed no --db, so on a machine with an existing
+// C:\swarm\refinery.db the default path was consulted — and every
+// success-path replay recorded its fixture verdict INTO the live store
+// (observed: 5 artifacts rows + 20 INTEGRATE_REPLAYED events for 2099-* run
+// ids, pointing at verify-integrate paths the sandbox deletes). The default
+// store path is only consulted outside the sandbox.
+const absentDb = join(intRoot, 'store', 'absent.db')
 const igit = (...args) => run('git', ['-C', intRepo, ...args])
 const expectIntegrate = (expectedCode, label, args) => {
   // spawnSync (still list-form, AGENTS.md #4) so stdout AND stderr are
   // captured on success paths too — the T-028 faces pin log lines the
   // command prints on exit-0 runs (the verified-handle line, the loud
   // PERSISTENCE FAILED line, the --help usage text).
-  const r = spawnSync(process.execPath, [tsxCli, join(root, 'src', 'integrate.ts'), ...args], { encoding: 'utf8', windowsHide: true, timeout: 120_000 })
+  // The absentDb injection (above) makes the sandbox isolation structural:
+  // no face can omit --db and fall through to the engine default.
+  const fullArgs = args.includes('--db') || args.includes('--help') ? args : [...args, '--db', absentDb]
+  const r = spawnSync(process.execPath, [tsxCli, join(root, 'src', 'integrate.ts'), ...fullArgs], { encoding: 'utf8', windowsHide: true, timeout: 120_000 })
   const code = r.status === null ? -1 : r.status
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}${r.error?.message ?? ''}`
   if (code !== expectedCode) console.error(`--- integrate output (${label}, exit ${code}) ---\n${out}`)

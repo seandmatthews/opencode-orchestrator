@@ -187,8 +187,22 @@ per-gate outcomes ride inside the hashed verdict file and the event payload
 only. Recording is best-effort, the run-ingest posture: a failed store
 write logs `PERSISTENCE FAILED` loudly and never changes the exit code
 (stays gate-determined) or the on-disk verdict artifact; no DB file at
-`--db` skips the record — no subcommand creates a `refinery.db` as a side
-effect. Replay never commits, never branches, never moves a ref (§17.4).
+`--db` skips the record — nothing creates a `refinery.db` as a side
+effect. The default `--db` (`C:\swarm\refinery.db`) is the operator's
+store: outside the fast tier, an `integrate` run on a machine where that
+file exists verifies against it and records the replay verdict into it —
+that is the designed post-hoc behavior for a run the operator ingested.
+The FAST TIER never touches it: every Gate 1.5 face runs `integrate`
+through one spawn helper that injects `--db` at a deliberately-absent
+sandbox path unless the face passes its own temp store, so no
+fast-tier invocation reads or writes any real store (the T-028 review
+round 1 fix — before it, the DB-less faces consulted the default path and
+each success-path replay recorded its fixture verdict into the live
+store, observed as 5 artifacts rows + 20 `INTEGRATE_REPLAYED` events for
+2099-* run ids pointing at verify-integrate paths the sandbox deletes;
+the polluted rows were removed and the fix proven by a full fast-tier run
+leaving the live store byte-identical). Replay never commits, never
+branches, never moves a ref (§17.4).
 
 The replayed worktree is left in place for inspection, dirty by construction:
 plain `clean` refuses it (dirty-protection proven intact on this worktree
@@ -242,7 +256,12 @@ back-compat pins; and `--db` at an unwritable store (the DB ingested, then
 made read-only) replays with the exit still gate-determined, the on-disk
 verdict intact, and the failure logged `PERSISTENCE FAILED`. Each passing
 replay disposes its own dirty worktree through `clean --force` (the T-027
-pattern) so the section's tidy sweeps stay green.
+pattern) so the section's tidy sweeps stay green. Store isolation (the
+review round 1 fix): every face without its own store — the T-027 faces,
+AC#1-#6, and the T-026 binary faces — runs with `--db` at a
+deliberately-absent sandbox path injected by the section's spawn helper,
+so the no-DB-file fallback branch is what the back-compat claim pins and
+no fast-tier invocation ever consults the default `C:\swarm\refinery.db`.
 
 ## Gate 1.6 — store ingest (seconds, fast tier)
 
