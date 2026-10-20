@@ -284,8 +284,9 @@ node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs
 
 Pins the durable run records (T-003), the derived job DAG (T-006), the
 attempt records (T-007), the recorded schedule (T-009), the filesystem
-artifact store (T-016), the store-backed integrate pieces (T-028), and the
-promptVersion end-to-end copy (T-029):
+artifact store (T-016), the store-backed integrate pieces (T-028), the
+promptVersion end-to-end copy (T-029), and the verdict-neutral additive
+rounds block (T-030):
 `src/store/index.ts` ingests a finished `RunReport`
 into SQLite (`node:sqlite`, schema v5: `runs`, `candidates`, `gate_results`,
 `events`, T-006's `phases`/`jobs`/`job_dependencies`, T-007's `attempts`,
@@ -343,6 +344,15 @@ a verbatim copy of run 20261011022419) into a fresh temp DB and asserts:
   the upsert copy, until now exercised only as null; the retried/probes
   fixtures above keep their producer-less nulls pinned
   (`process_identity_json`/`worker_session_id` still producer-less),
+- the additive `rounds` block (T-030), on a hand-built 2-round variant of
+  the fixture (the elim-variant pattern): ingest accepts the
+  rounds-carrying report and keeps persisting VERDICTS only — candidates
+  rows from both rounds (the round-2 ids `<survivorId>-r2` never collide
+  with round-1 rows), gate_results from both rounds, and the SAME report
+  minus the block ingesting to identical runs/candidates/gate_results rows
+  (the block is invisible to the store — never read, never a verdict); no
+  new table materializes for it (the census stays the 11 schema-v5
+  tables), and re-ingest stays idempotent over state rows,
 - re-ingest of the same report leaves `runs`/`candidates`/`gate_results` —
   the DAG tables (`phases`/`jobs` upsert by natural key, `job_dependencies`
   re-derived delete+insert) — and the `attempts` rows (upsert by natural
@@ -1023,11 +1033,16 @@ item). It asserts:
 - **The inspector never writes**: plan and packet files are byte-identical
   (sha256 before/after) across successful and refused inspects.
 
-Not pinned here and carved by the ticket: packet→prompt composition
-(anything consuming a packet in the pipeline owns its own Gate 2 run and
-must reconcile the fingerprint with T-007's `input_context_hash`), the
+Not pinned here and carved by the ticket: packet→prompt composition —
+**consumed by T-030**: `src/rounds.ts` (the bounded R&D loop's composer) is
+the packet's first pipeline consumer, owing and delivering exactly what this
+carve named (its change-set's Gate 2 run is mandated — see Gate 2's section —
+and the fingerprint reconciliation with T-007's `input_context_hash` is
+documented in src/rounds.ts's header and pinned by Gate 1.22); the
 `context_plans`/`context_packets` store tables (§27:1826-1827 — needs
-T-006's landed store plus a pipeline producer), the §7.3-7.5 pipeline
+T-006's landed store plus a pipeline producer; T-030's composer is in-run
+evidence, not a store producer — the tables stay reserved, T-016:78-80), the
+§7.3-7.5 pipeline
 distiller stage (the record/contract level — `DistillationPlan`
 semantics, distilled-claim records, the §7.5 rule-1 validator, and since
 T-014 the packet-level lineage enforcement and multi-hop chain resolution
@@ -2220,24 +2235,215 @@ on the trigger list), recorded in T-025's Landed section — not a permanent
 extension. Gate 3 n/a (no adapter file is added or changed; the PWD/OLDPWD
 pinning is untouched — the T-009 precedent for runner/cli-only changes).
 
+## Gate 1.22 — bounded R&D loop (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-rounds.mjs
+```
+
+Pins T-030 — the bounded R&D loop (ROADMAP stage 6's loop demonstrably
+running end to end; spec §34 M6's composition of landed parts with M8's
+feedback edge worn early, bounded n=2) and the T-012-reserved packet→prompt
+composer at its smallest (the reservation `src/context.ts:101-104`,
+discharged):
+
+- **the `--rounds <n>` CLI flag** (src/cli.ts): default 1 = today's
+  single-pass behavior byte-for-byte; integer 1..2 (capped at 2 this
+  slice); values `< 1`, non-integers, `> 2`, and `--rounds 2` combined
+  with `--jobs` (no planner exists in DAG mode) or `--no-planner` refuse
+  at parse time — before repo validation, the checkout lock, or any
+  artifacts dir exists (the T-007 zero-side-effects refusal pattern; the
+  whole argv is read first, so flag order never matters);
+- **the round composer** (`src/rounds.ts`): pure, deterministic, zero model
+  knowledge, zero I/O. For each gate survivor of the finished round it
+  builds ONE `'survivor-evidence'` ArtifactRecord whose content is a
+  deterministic rendering of the brief, `diffBytes`, the per-gate results
+  including the recorded `GateResult.command` (evidence only, never a
+  verdict), the advisory review observations, and the probe summaries —
+  fed through the existing `buildContextPacket` under a plan whose
+  `distillation` block declares EVERY record the builder sees (the T-014
+  contract armed). The records carry NO `sourceRefs` — primary evidence,
+  not distilled claims: the composer produces NO DistillationReport
+  (there is no distiller role; `parseDistillationReport` stays the
+  reserved enforcement point for that successor, T-013:44-46), and every
+  record rides Layer 1 (a mandatory type query — survivor evidence is
+  never budget-trimmed out of the packet). The packet renders into a
+  fixed-framing text block (header naming the finished round and the
+  packet fingerprint, entries in packet order, footer);
+- **the round loop** (`runSkeleton`, src/runner.ts): round 1 is today's
+  mechanics verbatim. When n=2 and round 1 produced ≥ 1 survivor, the
+  block is written under the run artifacts dir
+  (`round-2-context-block.txt`) and round 2 re-enters `runPlannerPhase`
+  UNCHANGED — same artifact-only scratch-dir posture; the block rides the
+  prompt as an optional section (`plannerPrompt`'s output without it is
+  byte-identical to the pre-T-030 text) — prompt text, never capability;
+  `parseBriefs` parses round-2 briefs exactly as round-1's, and the
+  candidate wave repeats through the same scheduler loop on fresh state.
+  Round-2 candidates lease fresh worktrees pinned to the SAME `baseSha`
+  (survivor diffs are planning evidence, never stacked patches —
+  candidate lineage is M8) with deterministic distinct ids `<survivorId>-r2`
+  (SPEC_ID_PATTERN-safe), so branches, store rows, and report entries
+  never collide across rounds. One runId, one checkout lock held across
+  both rounds; `dispatch.jsonl` keeps its line shapes — round 2 is just
+  more dispatch lines after the one run header. Round-2 planner evidence
+  writes `planner-r2.log`/`planner-r2-raw.txt` (round 1's stays at
+  today's paths); the report's `planner` block is the last executed
+  planner phase's (round 2's when the loop ran — the briefs the final
+  wave rode). Round 2 is recorded not-executed — never fabricated — when
+  there is no round-1 survivor or no planner phase to feed (--jobs,
+  --no-planner; the CLI refuses both combinations, direct callers get the
+  record);
+- **the report shape** — additive `rounds` block (the
+  `CandidateReport.probes` pattern), present only when `--rounds 2`;
+  absent otherwise, so default-mode report.json is unchanged. Per round:
+  `round`, `executed`, `survivorIds`; a composed round (round ≥ 2 that
+  executed) additionally carries `packetFingerprint` and
+  `renderedBlockPath` (round evidence lives under `C:\swarm\<runId>\`
+  per decisions.md 2026-10-10 run-root);
+- **the fingerprint reconciliation** (the `src/context.ts:101-104` duty,
+  discharged and documented in src/rounds.ts's header): the packet
+  fingerprint (§7.7 narrowed — sha256 over canonical JSON of
+  `{ model, planHash, selected }`) and T-007's `input_context_hash`
+  (sha256 over brief + model + the composed builder prompt with the
+  workspace-path line excluded) are two DISJOINT provenance hashes that
+  answer different questions and never derive from each other — the
+  packet fingerprint hashes the context a planner sees (workspace-free);
+  `input_context_hash` hashes one worker attempt's composed input modulo
+  its lease path (packet-free). On a rounds-carrying run both are
+  recorded side by side — `RoundRecord.packetFingerprint` beside every
+  attempt's `inputContextHash` — neither subsuming the other, neither
+  ever a verdict input (decisions.md 2026-10-10: machine gates decide
+  survival).
+
+No existing gate exercises two rounds, so this fast-tier loop check is not
+optional. Four legs, all token-free:
+
+- **A — composer fixtures** (the Gate 0.5/1.13 hand-built-input pattern):
+  determinism — two compositions from identical inputs give byte-identical
+  rendered blocks and packets (stable key order, no wall clock), and the
+  permuted candidates array composes identically (the id-ascending canon);
+  exactly one record per gate survivor (the eliminated never becomes
+  evidence) carrying brief/diffBytes/per-gate results with the recorded
+  command/review observations/probe summaries; the plan mandatory-typed,
+  artifact-ref, its `expectedArtifactIds` declaring every record; no
+  record carries `sourceRefs`; the packet's fingerprint the §7.7-narrowed
+  shape (64-hex, the four producerless components null); the rendered
+  block fixed-framing; the `<id>-r2` scheme charset-safe per
+  `SPEC_ID_PATTERN`; source pins (the Gate 1.12 S2 precedent) — the
+  composer never imports `parseDistillationReport`, documents the
+  `input_context_hash` relationship at source level, and the context
+  module header records the discharge.
+- **B — fake-adapter capture** (the Gate 1.21 S1 pattern: `runSkeleton`
+  with fake adapters + fake gates against a throwaway fixture repo):
+  the planner fake served exactly two dispatches — round 1's prompt
+  without the block, round 2's prompt carrying the EXACT recomputed
+  rendered block as a verbatim substring, naming survivor ids, briefs,
+  gate results with commands, and review observations (round 1's prompt
+  carries none); the report on disk has exactly today's top-level keys
+  plus `rounds`, the entries exactly the ticketed fields, the recorded
+  fingerprint equal to the independently recomputed composition's, and
+  the block file byte-identical to the recomputation; candidates are
+  both waves in order; round-2 worktrees exist at the same baseSha;
+  `dispatch.jsonl` carries ONE run header with round 2 as more dispatch
+  lines on `swarm/wt-<id>-r2` branches; **gates decide every round** —
+  a round-2 zero-byte diff is a NO-OP elimination regardless of what the
+  planner saw (its vacuous gate PASSED and the diffBytes leg still
+  eliminated it, never reviewed — AGENTS.md #7; no review observation or
+  probe value participates in any verdict); round-2 attempts keep their
+  T-007 `inputContextHash` values beside the packet fingerprint; and an
+  n=1 flag-absent drive carries NO rounds block and today's exact key
+  sets.
+- **C — token-free REAL-CLI 2-round loop** (the Gate 1.17 S5 / Gate 1.21
+  S3 machine-worker pattern): a real CLI run with `--rounds 2` and
+  `--planner-worker machine --planner-command <json>` +
+  `--reviewer-worker machine --reviewer-command <json>`; the opencode
+  worker tier exercised token-free through the existing `--opencode-bin`
+  override pointed at node with the stub committed AS the repo-root file
+  `run` — the adapter spawns `<bin> run -m <model> <prompt>` in the
+  leased worktree and node resolves the entry `run` against its cwd, so
+  the fixture repo's own stub executes in every candidate worktree (no
+  adapter file touched; the engine stays harness-agnostic). Asserts: exit
+  0 with the NO-OP elimination as a verdict (mechanical completion); the
+  rounds block exactly ticketed; the recorded fingerprint equal to the
+  full re-derivation from the run's own round-1 candidates and the block
+  on disk byte-identical to the recomposition; the captured round-2
+  `planner-r2.log` (the machine adapter logs `req.prompt` verbatim as a
+  provenance header) carrying round-1 survivor ids, gate results with
+  commands, review observations, and the packet fingerprint — while
+  round 1's `planner.log` carries no block; the store accepted the
+  rounds-carrying report (no `PERSISTENCE FAILED`); an n=1 real-CLI
+  `--rounds 1` run (a separate sandbox repo, so the two runs' `swarm/*`
+  branch namespaces cannot collide) with NO rounds block and today's
+  exact keys; and the n=2 disposal face — before disposal both rounds'
+  branches exist side by side (`swarm/wt-c01`…`swarm/wt-c02-r2`), then
+  `clean --run <id> --force` exits 0 disposing EVERY round's worktrees
+  and `swarm/*` branches (only `main` remains in `worktree list`), with
+  the evidence kept (report.json, dispatch.jsonl, every round's
+  diff.patch — the no-op's empty diff.patch included — and the block).
+- **D — CLI refusals** (exit 1, zero side effects, each through the real
+  CLI with a non-git `--repo` so the refusal provably precedes repo
+  validation, no artifacts dir and no `locks/` after each):
+  `--rounds 0`, `--rounds 3`, `--rounds 1.5`, `--rounds abc`,
+  `--rounds 2` with `--jobs`, `--rounds 2` with `--no-planner`; and
+  `--help` documents `--rounds` with its default and bounds.
+
+Not pinned here and carved by the ticket: no Sol verifier per surviving
+candidate (spec §34:2111 — the Codex adapter, stage 5); no
+researcher/distiller/synthesizer roles (the job model has builder jobs
+only; read-only researchers are decisions.md 2026-10-18 clone re-entry
+condition (a) — this slice avoids the clone question entirely: the only
+model round added is the planner's, riding the existing artifact-only
+posture); no early stop, no in-run approval pause (M8 vocabulary with no
+producer); no candidate lineage/generation records and no
+`context_plans`/`context_packets`/`artifact_lineage` store tables (the
+store keeps persisting verdicts only — the Gate 1.6 extension above); no
+new WorkerAdapter or harness code and no execution-policy change
+(decisions.md 2026-10-10 — both honored by construction); n ≤ 2; no
+adversarial probes; no memoization; and no claim that a feedback round
+IMPROVES outcomes — that is the empirical question the first real run
+exists to answer, recorded in T-030's Landed section. Gate 2 is mandated
+for this change-set (`src/runner.ts` and report shape are on its trigger
+list): `verify:full` runs a real 2-round loop — see Gate 2's section; the
+run itself is the driving run, recorded in T-030's Landed section. Gate 3
+n/a (no adapter change, no new harness to probe).
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
 npm run verify:full
 ```
 
-Runs a real two-tier skeleton run (GLM-5.3 planner + flash workers, 2 candidates) on a
-fresh fixture, then asserts on the artifacts:
+Runs a real two-tier skeleton run (GLM-5.3 planner + flash workers, 2
+candidates per round) on a fresh fixture — **a real 2-round run since T-030**
+(the ticket's mandate: this change-set touches `src/runner.ts` and report
+shape, and the loop must demonstrably run on real model tokens; the
+single-pass default stays pinned token-free by Gates 1.10/1.21/1.22) — then
+asserts on the artifacts:
 
-- every candidate's worker exited 0,
+- every candidate's worker exited 0 (both rounds' candidates),
 - every diff is non-empty (`diffBytes > 0` — the NO-OP rule, AGENTS.md #7),
 - every gate passed,
 - the planner produced briefs (`planner.ok`, no fallback),
+- the T-030 loop assertions: the `rounds` block records two EXECUTED
+  rounds; round 1 produced survivors (a real 2-round run — otherwise there
+  is nothing to pin); the composed round-2 packet fingerprint is recorded
+  (64-hex); the rendered context block exists under the run artifacts dir
+  and carries every round-1 survivor id; round 2 dispatched one
+  `<survivorId>-r2` candidate per survivor; the report's planner block
+  (the final wave's) has one brief per round-2 candidate; and the round-2
+  planner INPUT demonstrably grew by the composed block — the adapter's
+  argv log lines carry `<prompt: N chars>`, and round 2's N exceeds
+  round 1's. (That the grown input carries the survivor evidence verbatim
+  is pinned token-free by Gate 1.22(b)/(c), where the machine planner
+  logs `req.prompt` itself; the real run pins the artifacts and the
+  growth.) Gates decided both rounds via the unchanged per-candidate
+  assertions below — every verdict from gates + diffBytes alone,
 - every passing candidate was reviewed: `review.json` on disk, `review.ok`, observations
   well-formed with severity in {info, concern, blocker-advisory} (T-001),
 - failing candidates were NOT reviewed — gates decide, review is advisory,
 - the canonical repo is clean afterward (`git status --short` empty, only `main` in
-  `worktree list`, no `swarm/*` branches left),
+  `worktree list`, no `swarm/*` branches left — both rounds' branches
+  disposed through the clean command),
 - no stray fixture files in this repo directory (the contamination check from the
   PWD-bug incident),
 - the run's worktrees and branches are disposed through the clean command
@@ -2245,17 +2451,25 @@ fresh fixture, then asserts on the artifacts:
   is correct here — the run captured the evidence before disposal) (T-002).
 
 The skeleton run's outer ceiling (scripts/verify.mjs, `execFileSync` timeout
-**20 min**, T-023 review round 1) bounds CI; it deliberately exceeds the
-runner's OWN per-worker budget — `--timeout-min` default 15 (src/cli.ts), at
-which the T-011 verified tree kill resolves a stalled worker into a FAILED
-candidate verdict, plus the planner/gates/reviewer legs — so the runner, not
+**35 min**, T-030) bounds CI; it deliberately exceeds the runner's OWN
+per-worker budget — `--timeout-min` default 15 (src/cli.ts), at which the
+T-011 verified tree kill resolves a stalled worker into a FAILED candidate
+verdict, plus the planner/gates/reviewer legs — so the runner, not
 the verify harness, produces the verdict when a worker stalls, and Gate 2
-fails on its `workerOk` assertion with a truthful line. At the previous
-8-minute ceiling one silent worker SIGTERM'd the whole run before the runner
+fails on its `workerOk` assertion with a truthful line. Since T-030 the run
+is a 2-round loop, so the runner's worst legitimate path is TWO such legs
+(planner + 15-min worker + gates/review, twice — a stall in each round) ⇒
+~34 min; 35 gives margin while still reaping a genuinely stuck run. At the
+previous 8-minute ceiling one silent worker SIGTERM'd the whole run before the runner
 could finish — an uninformative red that also skips report writing and
 disposal, leaving stale worktree metadata, `swarm/*` branches, and a stale
 checkout lock behind (observed once, 2026-10-19 — Known issue #12). The
-historical happy path is 3–5 minutes and is unchanged.
+historical single-pass happy path is 3–5 minutes; the loop adds a second
+planner+worker+review pass over the same fixture. Wrapper-budget note for
+whoever drives this gate: the ceiling raise is the same discipline as the
+T-027 wrapper raise — a driving wrapper must sit ABOVE this inner ceiling
+plus the fast tier, or it preempting the runner's stall path is its own
+misconfiguration (Known issue #12's remedy paragraph applies verbatim).
 
 Required when touching `src/runner.ts`, any adapter, gates, workspace handling, or
 anything that changes report shape. Fast tier alone does not clear you here.

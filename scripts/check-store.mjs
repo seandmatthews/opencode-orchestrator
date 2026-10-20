@@ -27,7 +27,10 @@
 // re-record idempotent with append-only events. T-029 extends it with a
 // promptVersion-carrying variant: `attempts.prompt_version` equals the
 // report value end-to-end per attempt (the upsert copy, previously exercised
-// only as null).
+// only as null). T-030 extends it with a rounds-carrying variant: the
+// additive `rounds` block is verdict-neutral — ingest accepts it, persists
+// verdicts only (rows identical to the same report without the block),
+// materializes no new table, and re-ingests idempotently.
 import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -388,6 +391,66 @@ try {
     })())
   t('promptVersion variant: integrity_check ok', versionedDb.prepare('PRAGMA integrity_check').get()['integrity_check'] === 'ok')
   versionedDb.close()
+
+  // ---------- T-030: the additive rounds block is verdict-neutral ----------
+  // A hand-built 2-round variant of the fixture (the elim-variant pattern):
+  // c01 gains a round-2 candidate `c01-r2` (same verdict shape), the report
+  // gains the `rounds` block. The store keeps persisting VERDICTS only —
+  // ingest never reads the block — pinned three ways: the rounds DB's
+  // verdict rows equal the same report ingested WITHOUT the block, no new
+  // table materializes (the census stays 11), and re-ingest stays
+  // idempotent over state rows with append-only events.
+  const rounded = structuredClone(report)
+  const r2Candidate = structuredClone(report.candidates[0])
+  r2Candidate.id = 'c01-r2'
+  r2Candidate.brief = 'round-2 refined brief seeded by the round-1 composer'
+  rounded.candidates.push(r2Candidate)
+  rounded.rounds = [
+    { round: 1, executed: true, survivorIds: ['c01', 'c02'] },
+    { round: 2, executed: true, survivorIds: ['c01-r2'], packetFingerprint: 'd'.repeat(64), renderedBlockPath: 'C:\\swarm\\verify\\20261011022419\\round-2-context-block.txt' },
+  ]
+  const roundedDbPath = join(sandbox, 'rounded.db')
+  ingest(rounded, roundedDbPath)
+  const roundedDb = new DatabaseSync(roundedDbPath)
+  t('rounds variant: ingest accepts the rounds-carrying report — one row per candidate across BOTH rounds (c01, c02, c01-r2)',
+    roundedDb.prepare('SELECT COUNT(*) AS n FROM candidates').get().n === 3
+    && roundedDb.prepare('SELECT COUNT(*) AS n FROM candidates WHERE candidate_id = ?').get('c01-r2').n === 1)
+  t('rounds variant: gate_results persist from both rounds\' candidates (verdicts only — the block adds no verdict and no row)',
+    roundedDb.prepare('SELECT COUNT(*) AS n FROM gate_results').get().n
+      === rounded.candidates.reduce((n, c) => n + c.gates.length, 0))
+  t('rounds variant: no new table materialized for the block (the census stays the 11 schema-v5 tables)',
+    (() => {
+      const names = roundedDb.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all().map((r) => r.name)
+      return names.length === 11 && !names.some((n) => n.toLowerCase().includes('round'))
+    })())
+  t('rounds variant: the r2 candidate\'s rows carry its own verdict values verbatim (round-2 ids never collide with round-1 rows)',
+    (() => {
+      const row = roundedDb.prepare('SELECT * FROM candidates WHERE run_id = ? AND candidate_id = ?').get(rounded.runId, 'c01-r2')
+      return row?.brief === 'round-2 refined brief seeded by the round-1 composer' && row?.passed_all_gates === 1
+    })())
+  const roundedCandidates = roundedDb.prepare('SELECT * FROM candidates ORDER BY candidate_id').all()
+  const roundedGates = roundedDb.prepare('SELECT * FROM gate_results ORDER BY candidate_id, gate_name').all()
+  const roundedRun = roundedDb.prepare('SELECT * FROM runs').get()
+  roundedDb.close()
+  // The verdict-neutrality counterfactual: the SAME report minus the block
+  // ingests to byte-identical verdict rows — the block is invisible to the
+  // store.
+  const bare = structuredClone(rounded)
+  delete bare.rounds
+  const bareDbPath = join(sandbox, 'bare.db')
+  ingest(bare, bareDbPath)
+  const bareDb = new DatabaseSync(bareDbPath)
+  t('rounds variant: verdict-neutrality — the same report WITHOUT the block ingests to identical runs/candidates/gate_results rows',
+    eq(bareDb.prepare('SELECT * FROM candidates ORDER BY candidate_id').all(), roundedCandidates)
+    && eq(bareDb.prepare('SELECT * FROM gate_results ORDER BY candidate_id, gate_name').all(), roundedGates)
+    && eq(bareDb.prepare('SELECT * FROM runs').get(), roundedRun))
+  bareDb.close()
+  ingest(rounded, roundedDbPath)
+  const roundedDb2 = new DatabaseSync(roundedDbPath)
+  t('rounds re-ingest: state rows idempotent (the block stays unread), integrity ok',
+    eq(roundedDb2.prepare('SELECT * FROM candidates ORDER BY candidate_id').all(), roundedCandidates)
+    && roundedDb2.prepare('PRAGMA integrity_check').get()['integrity_check'] === 'ok')
+  roundedDb2.close()
 
   // ---------- T-009: a schedule-carrying report — the real multi-phase DAG ----------
   // Hand-built DAG variant of the fixture (the elim-variant pattern): two
