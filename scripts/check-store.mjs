@@ -24,7 +24,10 @@
 // handle drift), and `recordIntegrateVerdict` — the verdict artifacts row
 // (hash-at-ingest of the verdict file) plus the INTEGRATE_REPLAYED event at
 // the verdict's own appliedAt, gate_results value-identical throughout and
-// re-record idempotent with append-only events.
+// re-record idempotent with append-only events. T-029 extends it with a
+// promptVersion-carrying variant: `attempts.prompt_version` equals the
+// report value end-to-end per attempt (the upsert copy, previously exercised
+// only as null).
 import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -339,6 +342,52 @@ try {
     && eq(retriedEventsAfter.slice(retriedEventsBefore.length).map((e) => e.type), retriedEventsBefore.map((e) => e.type)))
   t('retried re-ingest: integrity_check ok', retriedDb2.prepare('PRAGMA integrity_check').get()['integrity_check'] === 'ok')
   retriedDb2.close()
+
+  // ---------- T-029: prompt_version lights up end-to-end ----------
+  // The upsert already copies a.promptVersion ?? null (src/store/index.ts),
+  // but until now nothing exercised non-null. A hand-built variant (the
+  // elim-variant pattern) whose attempts carry DISTINCT 64-hex promptVersion
+  // values pins the column end-to-end per attempt number. The retried/probes
+  // fixtures above KEEP their promptVersion: null fixtures and the
+  // producer-less null pins (process_identity/worker_session still have no
+  // producer) — untouched by this change-set.
+  const versioned = structuredClone(report)
+  const vc = versioned.candidates[0]
+  const pv1 = 'b'.repeat(64)
+  const pv2 = 'c'.repeat(64)
+  vc.attempts = [
+    {
+      id: `${vc.id}-a1`, jobId: vc.id, number: 1, state: 'failed',
+      startedAt: '2026-10-11T02:24:20.100Z', endedAt: '2026-10-11T02:24:53.600Z',
+      inputContextHash: hashA, promptVersion: pv1,
+      outputArtifacts: ['C:\\swarm\\verify\\20261011022419\\c01\\worker.log'],
+      failure: { reason: 'worker-failed', message: 'worker exited with code 1', timedOut: false, exitCode: 1 },
+    },
+    {
+      id: `${vc.id}-a2`, jobId: vc.id, number: 2, state: 'succeeded',
+      startedAt: '2026-10-11T02:24:54.000Z', endedAt: '2026-10-11T02:25:27.400Z',
+      inputContextHash: hashA, promptVersion: pv2,
+      outputArtifacts: ['C:\\swarm\\verify\\20261011022419\\c01\\attempt-2\\worker.log'],
+    },
+  ]
+  const versionedDbPath = join(sandbox, 'versioned.db')
+  ingest(versioned, versionedDbPath)
+  const versionedDb = new DatabaseSync(versionedDbPath)
+  t('promptVersion variant: one attempts row per recorded attempt',
+    versionedDb.prepare('SELECT COUNT(*) AS n FROM attempts').get().n === 2)
+  for (const a of vc.attempts) {
+    const row = versionedDb.prepare('SELECT * FROM attempts WHERE run_id = ? AND job_id = ? AND attempt_number = ?')
+      .get(versioned.runId, vc.id, a.number)
+    t(`promptVersion variant: attempt ${a.number} prompt_version equals the report value end-to-end (the upsert copy, now non-null)`,
+      row?.prompt_version === a.promptVersion)
+  }
+  t('promptVersion variant: distinct attempts keep their DISTINCT prompt_version values (no cross-copy)',
+    (() => {
+      const rows = versionedDb.prepare('SELECT attempt_number, prompt_version FROM attempts WHERE run_id = ? ORDER BY attempt_number').all(versioned.runId)
+      return rows.length === 2 && rows[0]?.prompt_version === pv1 && rows[1]?.prompt_version === pv2 && pv1 !== pv2
+    })())
+  t('promptVersion variant: integrity_check ok', versionedDb.prepare('PRAGMA integrity_check').get()['integrity_check'] === 'ok')
+  versionedDb.close()
 
   // ---------- T-009: a schedule-carrying report — the real multi-phase DAG ----------
   // Hand-built DAG variant of the fixture (the elim-variant pattern): two

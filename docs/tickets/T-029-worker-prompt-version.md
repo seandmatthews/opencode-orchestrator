@@ -1,6 +1,6 @@
 # T-029 — Worker prompt version: `Attempt.promptVersion` producer — hash-at-composition of the builder prompt (closes T-007's reserved null producer; spec §6.7:446, §18:1207)
 
-**Status:** proposed
+**Status:** done 2026-10-20
 **Category:** engine
 **Value (1-5):** 3 · **Risk (1-5):** 2
 **Depends on:** T-007 (whose reserved null this closes; T-003's store already carries the column)
@@ -179,3 +179,154 @@ reservation this closes); docs/tickets/T-012-context-system-core.md:82-95 (§7.7
 producerless components + packet→prompt-composer reconciliation duty — stands).
 decisions.md 2026-10-10 (machine gates decide survival; the engine is
 model/harness-agnostic — both honored by construction).
+
+## Landed
+
+2026-10-20, one change-set on `ticket/T-029-worker-prompt-version` (lane worktree,
+base 53f3682): `src/runner.ts`, `src/types.ts`, `scripts/check-retry.mjs`,
+`scripts/check-store.mjs`, VERIFICATION.md, this ticket, and the index row. No
+store edit, no adapter edit, no verify.mjs edit (Gates 1.6/1.8 were already wired
+into the fast tier). Line-number note: this ticket cites main's line numbers
+pre-landing; the landed citations below are the change-set's own.
+
+- `src/runner.ts` — in `runJob`'s attempt loop, the builder prompt is composed
+  ONCE per attempt, hoisted above the Attempt construction (`:475-490`):
+  `const prompt = builderPrompt(job.brief, lease.path)` then
+  `const promptVersion = createHash('sha256').update(prompt).digest('hex')` at
+  that same composition point; `attempt.promptVersion = promptVersion` (`:495` —
+  the hardcoded `null` is gone) and the SAME variable feeds the
+  `worker.execute` call (`:517`), so the hashed text and the sent text cannot
+  drift — the ticket's mechanical form of "derived at composition time". The
+  composition-site comment documents the exact-text choice (unique per attempt
+  by construction: the prompt embeds the lease path, runDir carries the
+  timestamped runId, retries lease `wt/<id>-a<n>`) and the division of labor
+  with `inputContextHash` (same-input comparability, workspace-path line
+  excluded) — both audit provenance, neither ever a verdict input
+  (decisions.md 2026-10-10). No other runner change: the verdict ladder,
+  dispatch evidence, retry rule, and report shape are byte-identical.
+- `src/types.ts` — the Attempt doc comment (`:221-225`) now states the
+  producer: "promptVersion is the sha256 hex of the exact builder prompt text
+  sent to the adapter, derived at composition time (T-029, §6.7:446/§18:1207)
+  — a content hash, never a looked-up registry version (the §27
+  prompts/prompt_versions tables are deliberately not built)". The type itself
+  (`string | null`) is untouched.
+- `scripts/check-retry.mjs` — the Gate 1.8 S1 flip (this change-set's only
+  intentional invalidation of an existing assertion; net strictness increases,
+  the T-013 precedent): the fake `WorkerAdapter` records the EXACT `req.prompt`
+  per call (`prompts`, `:55-62`), and the null pin (old `:165-166`) is replaced
+  by two positive producer pins (`:181-186`): every attempt's `promptVersion`
+  is a 64-hex sha256 equal to an INDEPENDENTLY RECOMPUTED hash of the
+  adapter's recording (`createHash('sha256')` over `worker.prompts[n]`;
+  `builderPrompt` is never called to build an expected value), and attempts 1
+  and 2 carry DISTINCT `promptVersion` values while their `inputContextHash`
+  stays identical (the existing `:173-174` pin, unchanged) — the normalization
+  boundary between the two fields, pinned.
+- `scripts/check-store.mjs` — the Gate 1.6 extension: a new promptVersion-carrying
+  variant (the elim-variant pattern, `:346-390`) ingests into a fresh DB and
+  pins `attempts.prompt_version` equal to the report value per attempt number
+  end-to-end (the upsert copy at src/store/index.ts was already
+  `a.promptVersion ?? null` — until now nothing exercised non-null), with two
+  DISTINCT values proven not cross-copied. The existing retried/probes
+  fixtures keep their `promptVersion: null` fixtures and the producer-less
+  null pins (`prompt_version`/`process_identity_json`/`worker_session_id`)
+  unchanged.
+- VERIFICATION.md — the Gate 1.8 input-context-hash bullet (`:523-532`; the
+  ticket's `:350-353` citation had drifted) no longer says "promptVersion is
+  null on every attempt": it pins the positive producer and the
+  distinct-promptVersion/identical-inputContextHash boundary; the Gate 1.6
+  section header names the promptVersion end-to-end copy (T-029) and gained
+  the variant bullet (`:326-333`).
+- This ticket + `docs/tickets/README.md` — status flipped, index row updated,
+  this Landed section, all in the same change-set.
+
+Gates measured in the lane (all run this session, exact commands):
+
+- Gate 0: `npm run typecheck` — exit 0.
+- Gate 1.8 standalone: `node node_modules/tsx/dist/cli.mjs scripts/check-retry.mjs`
+  — ALL GREEN, the two new S1 producer pins printed ok.
+- Gate 1.6 standalone: `node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs`
+  — ALL GREEN, the four new promptVersion-variant pins printed ok.
+- Gate 1.13 standalone: `node node_modules/tsx/dist/cli.mjs scripts/check-context.mjs`
+  — ALL GREEN unmodified (the §7.7 producerless-component pins at
+  scripts/check-context.mjs:270/:304 stay green; this ticket does not claim
+  that component).
+- Gate 1.11 standalone (`scripts/check-recovery.mjs`) — ALL GREEN; abandoned-attempt
+  rows keep their hardcoded NULL (`src/store/index.ts` recovery INSERT untouched;
+  the check pins no `prompt_version`, located by reading).
+- Full fast tier: `node scripts/verify.mjs fast` — ALL GREEN end to end (Gate 0,
+  Gate 1, Gate 0.5, Gates 1.5–1.21), including Gate 1.20 S1's exact-key-set pins
+  unmodified (filling the already-typed field adds no key anywhere) and the
+  untouched Gates 1.10/1.11/1.12/1.15.
+- Gate 2: OWED at landing and NOT run by this lane (`src/runner.ts` is on the
+  trigger list; the lane does not spend model tokens). It runs as part of this
+  ticket's landing pipeline.
+- Gate 3 n/a — no adapter file touched.
+
+Manual spot-check (AC#7) — SATISFIED by the driving pipeline's own Gate 2 run
+(2026-10-20, run `20261020053845`, the round-1 red — see below): its
+`report.json` shows non-null 64-hex `promptVersion` on every dispatched
+attempt — c01-a1 `de4a6bbed6a71422…` (`de4a6bbed6a7142277fb2906c9bafd6f8d875f13a878f894d2f1da40cf1b42fe`)
+and c02-a1 `cadb5d40d632059c…` (`cadb5d40d632059ca2425ed96f48c58c96b30da29820d99c3c8ed82287c573f5`) —
+distinct per candidate (distinct briefs → distinct composed prompts), real
+workers (opencode), real model tokens. No retries occurred in that run, so
+retry distinctness stays pinned by Gate 1.8 S1's fake-adapter drive (the
+token-free place retries exist). The same run also proves the
+persistence-only posture: the planner's parse failure changed no candidate
+verdict (both candidates ran and passed — decisions.md 2026-10-10).
+
+## Review round 1 — the Gate 2 red, diagnosed and fixed
+
+The driving pipeline's Gate 2 (`npm run verify:full`) went red AFTER the first
+lane commit: exit 1 with `FAIL: planner produced briefs (attempts=2)` and
+`FAIL: one brief per candidate` (scripts/verify.mjs Gate 2 assertions — the
+designed bar, not weakened). Everything else in the reported output is
+known-benign noise (the fast-tier refusal messages' stderr leak — Known issue
+#11; CRLF warnings #5; the SQLite warning #7). Byte-level diagnosis from the
+failed run's own evidence (`C:\swarm\verify\20261020053845\`), reproduced in
+this lane:
+
+- Attempt 1 produced NO array: the plan agent, dropped into the EMPTY planner
+  scratch dir, spent its turn exploring — `Glob "**/*" 0 matches`, then
+  `Get-ChildItem` reaching outside → `permission requested: external_directory
+  (…); auto-rejecting` twice → tool errors (planner.log verbatim). This is
+  also the FIRST-HAND confirmation of Known issue #6's "unverified" headless
+  auto-deny question — updated there.
+- Attempt 2 produced the COMPLETE two-brief array with ONE defect: a
+  duplicated closing quote at the element separator —
+  `…including tests."," "BRIEF B…` where `…including tests.", "BRIEF B…` was
+  meant (raw offset 2168: `Expected ',' or ']' after array element`).
+  `parseBriefs` returned null on the exact recorded bytes (reproduced in this
+  lane before the fix) → fallback → the two Gate 2 planner FAILs.
+- Not attributable to this change-set's diff: the planner path
+  (`runPlannerPhase`/`plannerPrompt`/`src/parse.ts`/the adapter) is untouched
+  by T-029 — the red is model-output flakiness (attempt 1) plus a one-char
+  model JSON slip (attempt 2) hitting a parser that had no tolerance for it.
+
+The fix (this round's change-set, red-before/green-after per AGENTS.md #8):
+
+- `src/parse.ts` — `parseBriefs` gains a LAST-RESORT separator repair: when no
+  `[..]` slice parses, the scan retries once over text with the observed slip
+  repaired (`/","\s+"/g` → `","`). It runs only on input the plain scan
+  already failed, so every input that parsed before parses byte-identically;
+  `parseReview` is untouched (no observed failure); the original bytes are
+  never rewritten — `planner-raw.txt` keeps them verbatim.
+- `scripts/check-parse.mjs` (Gate 0.5) — three new pins, zero existing
+  fixtures changed: the recorded defect shape (inner brackets + the captured
+  OpenCode final frame `> plan · glm-5.3` included) now yields both briefs;
+  the repair is inert on valid input whose string content contains the slip's
+  byte pattern (plain path parses it untouched); hopeless input still returns
+  null (the repair fabricates nothing).
+- Green bar ON THE RECORDED BYTES, run in this lane:
+  `parseBriefs(readFileSync('C:/swarm/verify/20261020053845/planner-raw.txt'), 2)`
+  returned both briefs after the fix (returned null before it — the recorded
+  red).
+
+Round-2 gates run in the lane: Gate 0 (`npm run typecheck`, exit 0), Gate 0.5
+standalone (`node node_modules/tsx/dist/cli.mjs scripts/check-parse.mjs` — ALL
+GREEN), and the full fast tier (`node scripts/verify.mjs fast` — ALL GREEN;
+see the round-1 section's gate list for the per-gate record, re-measured
+round 2). Gate 2 itself is NOT run by the lane (real model tokens; the
+driving pipeline re-runs it after this commit — with the parser hardened, the
+recorded attempt-2 output shape now parses, so the planner leg's failure mode
+is closed; a fresh model-output defect class would land its own red bar per
+the house discipline).

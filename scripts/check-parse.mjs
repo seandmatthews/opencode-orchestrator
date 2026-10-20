@@ -19,6 +19,26 @@ t('non-string elements filtered', parseBriefs('[1,{"x":2},"a"]', 1)?.[0] === 'a'
 t('no json at all returns null', parseBriefs('no json here', 1) === null)
 t('empty strings rejected', parseBriefs('["", "  "]', 1) === null)
 
+// T-029 review round 1 — the last-resort separator repair. Red bar recorded
+// from real run 20261020053845 (the driving Gate 2, 2026-10-20): the
+// planner's attempt-2 array was complete but ONE element boundary carried a
+// duplicated closing quote — `...ends."," "next...` where
+// `...ends.", "next...` was meant — so JSON.parse failed mid-array
+// ("Expected ',' or ']' after array element"), parseBriefs returned null,
+// and BOTH planner attempts fell back to the raw goal. (Attempt 1 had
+// produced no array at all: the plan agent's exploration was derailed by
+// auto-rejected external_directory permissions — VERIFICATION.md Known
+// issue #6.) The capture also carried OpenCode's final frame after the
+// array (`\r\n\r\n> plan · glm-5.3\r\n\r\n`) — chatter the scan already
+// tolerates, kept in the fixture for faithfulness to the recorded bytes.
+const separated = '["first brief ends here."," "second brief has [brackets] inside"]\r\n\r\n> plan · glm-5.3\r\n\r\n'
+t('separator repair: the recorded duplicated-quote boundary now yields both briefs (run 20261020053845 red bar, green bar)',
+  JSON.stringify(parseBriefs(separated, 2))
+    === JSON.stringify(['first brief ends here.', 'second brief has [brackets] inside']))
+t('separator repair is inert whenever the plain scan parses: valid input whose string CONTENT contains the slip pattern parses untouched',
+  parseBriefs('["a content \\",\\" b"]', 1)?.[0] === 'a content "," b')
+t('separator repair does not fabricate briefs from hopeless input', parseBriefs('"," "no array here', 1) === null)
+
 // parseReview
 const good = '{"observations":[{"finding":"f","severity":"concern"},{"finding":"g","severity":"info","evidence":"diff"}]}'
 t('valid review object parses', parseReview(good)?.observations.length === 2)
