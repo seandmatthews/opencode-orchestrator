@@ -1,6 +1,6 @@
 # T-034 — Run dashboard first slice: local read-only HTTP view over the recorded store — runs, gates, evidence pointers, DAG, approval queue + decide (spec §26.1, §26.2, §26.6, §34 M7; ROADMAP stage 7)
 
-**Status:** proposed
+**Status:** done 2026-10-21
 **Category:** ops
 **Value (1-5):** 3 · **Risk (1-5):** 2
 **Depends on:** T-003, T-006, T-008, T-016
@@ -117,16 +117,16 @@ already expose every datum — so it is operator ergonomics, which is why this i
 
 ## Acceptance criteria
 
-- [ ] `npm run dashboard -- [--port <p>] [--db <path>]` serves the pages on
+- [x] `npm run dashboard -- [--port <p>] [--db <path>]` serves the pages on
       127.0.0.1; `--db` defaults to `C:\swarm\refinery.db`; a missing DB file
       refuses startup with a clear message and never creates a refinery.db as a
       side effect — pinned by the new Gate 1.23.
-- [ ] `GET /` renders the ingested fixture run (scripts/fixtures/report-real.json
+- [x] `GET /` renders the ingested fixture run (scripts/fixtures/report-real.json
       → run 20261011022419, candidates c01/c02) with goal/repo/dates and derived
       survivor/eliminated counts equal to the `candidates.passed_all_gates`
       rows, labeled as ingested post-hoc state — pinned by Gate 1.23 (fixture
       ingested into a temp DB: the Gate 1.6/1.9 pattern).
-- [ ] `GET /run/<id>` renders every candidate id, per-candidate gate
+- [x] `GET /run/<id>` renders every candidate id, per-candidate gate
       name/pass/exit/duration, and artifact evidence pointers (path,
       size_bytes, content_hash) equal to the temp DB's rows, and its DAG
       section equals `readDag`'s output over the same DB (cross-check against
@@ -134,35 +134,108 @@ already expose every datum — so it is operator ergonomics, which is why this i
       hand-built schedule+approval variant (the Gate 1.9 elim-variant pattern:
       seed a pending row via `requestApproval` on the temp DB) exercising
       phases/jobs/edges and the queue.
-- [ ] `GET /approvals` renders exactly `listPendingApprovals`'s rows — pinned
+- [x] `GET /approvals` renders exactly `listPendingApprovals`'s rows — pinned
       by Gate 1.23 (page content checked against a direct store call on the
       same temp DB).
-- [ ] `POST /approvals/decide` flips one pending row through the real
+- [x] `POST /approvals/decide` flips one pending row through the real
       `decideApproval` (state → approved/rejected, one APPROVAL_GRANTED/
       APPROVAL_REJECTED event), the queue drops the row, and every store
       refusal (unknown run, unknown job, non-survivor, double-decide, unknown
       decision) surfaces as an HTTP 4xx carrying the refusal message with
       nothing written — pinned by Gate 1.23 (the T-008 refusal contract over
       HTTP, no store behavior changed).
-- [ ] Read-only proof, not assertion (AGENTS.md #9): the DB file's sha256 is
+- [x] Read-only proof, not assertion (AGENTS.md #9): the DB file's sha256 is
       byte-identical across ALL GET routes — pinned by Gate 1.23 (the Gate
       1.7/1.9 byte-identity pin pattern; the decide POST is expected to mutate
       and is not in the byte-identity set).
-- [ ] Zero new npm dependencies: `package.json` gains exactly the one
+- [x] Zero new npm dependencies: `package.json` gains exactly the one
       `dashboard` script and no dependency change — pinned by Gate 1.23
       asserting the dependency blocks are unchanged, plus Gate 0 green.
-- [ ] Engine untouched: no pipeline file changes behavior (src/runner.ts,
+- [x] Engine untouched: no pipeline file changes behavior (src/runner.ts,
       adapters, gates, workspace, report shape, the store's ingest — all
       untouched; src/dashboard.ts imports only the store's existing
       readers/writers and node builtins) — Gate 0 green; Gate 2 not triggered
       (trigger list, VERIFICATION.md:2474-2475; the T-006/T-008/T-012
       standalone-consumer precedent); Gate 3 n/a (no adapter file added or
       changed, no harness spawn at all).
-- [ ] VERIFICATION.md gains the Gate 1.23 section in the same change-set
+- [x] VERIFICATION.md gains the Gate 1.23 section in the same change-set
       (AGENTS.md #6), including the node:sqlite-is-experimental caveat
       (Known issue #7) — the dashboard rides the same engine as the store; the
       named fallback (better-sqlite3) would be a new dependency and its own
       decisions entry, deliberately not this slice.
+
+## Landed
+
+2026-10-21, one change-set on `ticket/T-034-run-dashboard`:
+
+- **`src/dashboard.ts`** (new) — the standalone `npm run dashboard --
+  [--port <port>] [--db <path>]`: `node:http` server bound to 127.0.0.1 only,
+  four routes exactly as ticketed (`GET /`, `GET /run/<id>`, `GET /approvals`,
+  `POST /approvals/decide`), HTML by stdlib string templates with an `esc()`
+  helper over every store-sourced string (no framework, no client-side JS). All
+  read faces open `{ readOnly: true }`; the run list counts survivors/
+  eliminated from `candidates.passed_all_gates` and renders the ingested-post-
+  hoc/never-live label on the page; artifact/probe pointer NULLs render as
+  "missing"; the approvals page calls `listPendingApprovals` verbatim (no
+  duplicated SQL); the decide POST calls `decideApproval` verbatim — the only
+  write — mapping store refusals to HTTP 4xx (404 unknown run/job, 409
+  non-survivor/double-decide/no-request, 400 unknown decision/missing field)
+  carrying the refusal message, nothing written. Missing DB file refuses
+  startup (exit non-zero, names the path, creates nothing); `--db` defaults to
+  the `C:\swarm\refinery.db` literal; imports only `node:fs`/`node:http`/
+  `node:url`/`node:path`/`node:sqlite` plus the store's
+  `listPendingApprovals`/`decideApproval` — zero new npm dependencies, engine
+  untouched. One design point recorded in the source: the CLI entry runs only
+  through an entry-module guard (`invokedDirectly()`), so IMPORTING the module
+  starts no server.
+- **`package.json`** — gains exactly the one `"dashboard": "tsx src/dashboard.ts"`
+  script; dependency blocks untouched.
+- **`scripts/check-dashboard.mjs`** (new) — Gate 1.23, wired into
+  scripts/verify.mjs's fast tier after Gate 1.22 and before `finish()` (the
+  next free number, as ticketed). Token-free: ingests the vendored fixture into
+  fresh temp DBs (the Gate 1.6/1.9 pattern) and drives `startDashboard` on
+  ephemeral 127.0.0.1 ports over stdlib `fetch` (the T-024 client precedent);
+  CLI faces (`--help`, missing-DB refusal, `--port` refusals, explicit-port
+  honored) run as subprocesses. Pins every acceptance criterion above —
+  including the schedule+approval variant (two phases foundation → app, edge
+  c02 -> c01, two pending rows via the real `requestApproval`), the DAG
+  cross-check against `npm run dag -- --json` over the same DB on both the flat
+  fixture and the schedule variant, a probes variant for the `probe_runs`
+  render, the decide happy paths with their APPROVAL_GRANTED/APPROVAL_REJECTED
+  events and queue updates, all six refusal faces (nothing written, snapshot
+  compared), DB sha256 byte-identity across ALL GET routes on all three
+  fixtures, the readOnly-API churn guard, and the package.json dependency pin.
+- **`VERIFICATION.md`** — Gate 1.23 section added in the same change-set
+  (AGENTS.md #6), with the node:sqlite-is-experimental caveat (Known issue #7)
+  and the full carve list.
+- **docs/tickets** — this file flipped to done with this Landed section; index
+  row updated in the same change.
+
+Red-before/green-after recorded (AGENTS.md #8): the first standalone Gate 1.23
+run was red — one check-side assertion bug (`content-type` is a response
+HEADER; the check tested the body) plus a real module bug it exposed: the
+module-level `main()` ran on import, and the check process briefly BOUND A
+SERVER ON THE DEFAULT STORE `C:\swarm\refinery.db` (its startup banner in the
+red run's output is the telltale; no request was ever served it, every open
+was read-only, nothing mutated, and the process died with the check). Fixed in
+the same change-set: the entry-module guard, an async-rejection exit path for
+CLI refusals, and a standing check assertion (dynamic import under a wrapped
+`console.log`; any startup banner fails the gate) so a regression to
+module-level serving is red forever. Second standalone run and the full fast
+tier: green.
+
+Measured gates (this change-set, this lane): Gate 0 `npm run typecheck` exit 0
+(multiple runs); Gate 1.23 standalone
+`node node_modules/tsx/dist/cli.mjs scripts/check-dashboard.mjs` →
+`check-dashboard: ALL GREEN`; full fast tier `node scripts/verify.mjs fast`
+→ `=== verify (fast) complete: ALL GREEN ===` in 1m33 wall clock (all
+fast-tier gates 0.5–1.23 green). Gate 1 ran inside that fast tier. Gate 2 not
+triggered (nothing on the list touched — src/runner.ts, adapters, gates,
+workspace handling, report shape, store ingest all byte-unchanged; verified by
+`git status` over the change-set). Gate 3 n/a (no adapter file added or
+changed; the dashboard spawns no harness). Not run by this lane: `npm run
+verify:full` (model tokens — the driving pipeline re-runs the fast tier and
+owns the full-tier decision).
 
 ## Verification
 
