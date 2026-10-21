@@ -73,4 +73,4 @@ Rules:
 | T-034 | Run dashboard first slice: local read-only HTTP view over the recorded store — runs, gates, evidence pointers, DAG, approval queue + decide (spec §26.1/§26.2/§26.6, §34 M7; ROADMAP stage 7) | medium | done 2026-10-21 |
 | T-035 | Job drill-down: per-job pages over the recorded store — job row, verdict, gate results, attempt history, probe runs (extends T-034's dashboard; spec §26.2, §34 M7; ROADMAP stage 7) | medium | done 2026-10-21 |
 | T-036 | Commit identity: history rewritten to matthews.sean.d@gmail.com — filter-branch over main, repo-local config, saved workflows de-hardcoded (repo meta; no engine change) | low | done 2026-10-21 |
-| T-037 | Run context page: per-run context evidence — attempts' `input_context_hash` + the report.json rounds block, producer-less §26.4 fields marked (extends T-034/T-035; spec §26.4; ROADMAP stage 7) | medium | proposed |
+| T-037 | Run context page: per-run context evidence — attempts' `input_context_hash` + the report.json rounds block, producer-less §26.4 fields marked (extends T-034/T-035; spec §26.4; ROADMAP stage 7) | medium | done 2026-10-21 |
