@@ -2858,6 +2858,156 @@ rendering, that is the producer ticket and it owns its own Gate 2 run).
 Gate 3 n/a (no adapter; the dashboard
 spawns no harness, so there is nothing to PWD-probe).
 
+## Gate 1.25 — verifier role: active pre-disposition verification (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-verifier.mjs
+```
+
+Pins T-039 (spec §10.1, §6.6:426, §9.2): a fourth model role beside
+planner/worker/reviewer. Where the reviewer (T-001) *reads* the diff
+post-gate on survivors, the verifier **actively tests** — it runs new checks
+against the candidate's work itself and returns findings citing the commands
+it ran and the output it saw. Run-level flag `--verifier-model <model>`
+(off unless given — no default model); optional `--verifier-worker`
+mirroring T-025's per-role harness selection (its machine pairing flag
+`--verifier-command` riding the same per-role table), absent resolving to
+the run-level worker exactly as the planner/reviewer flags do. The role
+rides BOTH modes like the reviewer (the placement is in `runJob`, after the
+gate loop and probes, before review, on the final completed attempt
+REGARDLESS of gate outcome — the T-015 posture: evidence about failures is
+evidence). The diff is captured before the gates run, so the verifier's
+executions cannot dirty diff evidence (pinned below with a junk-writing fake
+verifier). **Never a verdict input**: `passedAllGates` stays
+`gates.every(...) && diffBytes > 0`; a `blocker-advisory` finding eliminates
+nothing, promotes nothing, reorders nothing — in this ticket its consumers
+are the human (report.json) and, later, the retry seam (T-040) and the
+cross-run ratchet (T-041). The whole boundary is the decisions.md entry
+landed in this change-set (**2026-10-21 — the ratchet boundary**: findings
+are advisory; a model-authored check never decides survival in the run that
+produced it; promotion into a gate set or fixture suite is human-owned and
+crosses runs, spec §32:1939-1956) — that entry also owns the §10.1
+read-only tension and its resolution, and records that T-022 stands (the
+verifier works inside the existing `WorktreeProvider` lease; no
+disposable-clone provider).
+
+**The step-one posture probe, run and recorded (ground rule 5 hygiene):**
+`node scripts/diag-execute.mjs <dir>` (new, the `diag-pwd.mjs` precedent)
+spawns the vendored harness exactly as the adapter does — list-form
+`run --agent plan -m <model> <prompt>`, PWD/OLDPWD pinned — and asks it to
+run one deterministic command and report its stdout. Answer against
+opencode-ai 1.19.3 at C:\swarm\verify-verifier-probe\repo: **EXECUTE-CAPABLE**
+— the plan agent ran `node -e "console.log('EXEC-PROBE-OK-7391', 6 * 7)"` and
+replied `EXEC-PROBE-OK-7391 42`, and the target tree stayed clean (no
+writes). Therefore the verifier rides **'worktree-read' unchanged**: no
+fourth `ExecutionPolicy` value, no adapter change, refuse-not-downgrade
+already pinned at the adapter by Gate 1.20 S2. The standing PWD probe was
+re-run in the same session (`node scripts/diag-pwd.mjs
+C:/swarm/verify-verifier-probe/repo` with the shell's inherited PWD): the
+quirk REPRODUCED — opencode resolved its project as the inherited `PWD`
+value, not the spawn cwd — so the adapter's PWD/OLDPWD pinning
+(src/worker/opencode.ts) is load-bearing for the verifier dispatch too, and
+the execute probe (which pins the same way) resolved and executed in the
+contracted directory.
+
+The check drives `runSkeleton` directly with **fake `WorkerAdapter` +
+fake `Gate` objects** against throwaway fixture repos (one per scenario,
+list-form git calls only), zero model tokens — the Gate 1.8/1.10/1.21
+script pattern — plus real-CLI faces. It asserts:
+
+- **S1 — flags absent ⇒ the producer-only pattern**: no verification-tier
+  dispatch reaches any fake; no candidate carries a `verifier` block (in
+  memory or on disk); report.json top-level and candidate keys are
+  byte-shape-identical (the exact 14-key candidate shape, review present);
+  no `verifier-raw.txt`/`verifier.log` exists anywhere in the evidence dir;
+  candidates pass exactly as before.
+- **S2a — block present and populated** (a fake verifier adapter serving a
+  valid observations payload): exactly one verifier dispatch per candidate,
+  through the verifier's OWN adapter and no other's (no cross-contamination,
+  the Gate 1.21 S1 shape); every dispatch carries **'worktree-read' passed
+  explicitly** (the probe's chosen posture) at **cwd = the candidate
+  worktree lease** (which existed at dispatch time), **never the canonical
+  checkout nor anything inside it** (the engine side of the posture pin);
+  the prompt carries the brief (each candidate its own, matched by
+  workspace cwd), the captured diff, the gates that already ran with
+  names/verdicts/**recorded commands** (`GateResult.command`, T-027), the
+  novelty directive (do not merely re-run the suite; run NEW checks; cite
+  every command and its output), and the JSON observations contract; the
+  report block is exactly `{model, ok, attempts, observations, rawOutputPath}`
+  (the `ReviewReport` field pattern under a DISTINCT block, reusing the
+  `ReviewObservation` shape), the on-disk candidate keys gain exactly
+  `verifier`, and the raw output is persisted at `verifier-raw.txt` in the
+  candidate evidence dir with `verifier.log` beside it; review is unchanged
+  (survivor-only, same shape).
+- **S2b — placement order** (one candidate, one shared recorder, the fake
+  gate recording its own invocation): planner → worker → gate → verifier →
+  reviewer — the verifier sits after the gate loop and before review.
+- **S3 — placement faces, both outcomes, + diff immunity** (one mixed
+  drive: c01's gate passes, c02's fails; the fake verifier writes a junk
+  file into the workspace it is handed): the verifier runs on the
+  gate-FAILED candidate too and its block sits on the eliminated candidate;
+  the junk file appears in NO diff evidence and `diffBytes` equals the
+  on-disk `diff.patch` captured before the verifier ran; review still fires
+  on the survivor only (reviewer ordering unchanged; the verifier is not a
+  reviewer replacement).
+- **S4 — verdict immunity, adversarial form** (same drive, BOTH candidates
+  carrying `blocker-advisory` findings): the gate-passing candidate still
+  passes, the gate-failing candidate still fails with no error and
+  `workerOk` intact, and `passedAllGates === (gates.length > 0 &&
+  gates.every(passed) && diffBytes > 0)` holds per candidate — the ladder
+  computes from `passed`/`diffBytes` alone.
+- **S5 — repair + degradation** (the reviewer-repair leg pattern): invalid
+  JSON triggers EXACTLY one repair attempt (the second dispatch embedding
+  the first response; both sharing the restricted request and the same
+  worktree cwd), which parses; a twice-invalid output records `ok: false`
+  with observations empty, persists the second invalid response verbatim at
+  `verifier-raw.txt`, and changes nothing downstream — the verdict is still
+  the gates' and review still ran and parsed on the survivor.
+- **S6 — CLI wiring, token-free**: `--help` documents `--verifier-model`,
+  `--verifier-worker`, `--verifier-command`; the real-CLI refusals (unknown
+  `--verifier-worker` id with the registry message verbatim;
+  `--verifier-worker machine` without `--verifier-command`; a
+  `--verifier-command` on an opencode-resolved verifier) exit 1 with zero
+  side effects — no artifacts dir, no `locks/` (the Gate 1.21 S2 shape,
+  each through the real CLI with a non-git `--repo`); and a real-CLI
+  `--jobs` run whose worker AND verifier are machine adapters (the Gate
+  1.21 S3 shape — the first token-free real run with a populated verifier
+  block) end-to-ends the role: the candidate passes its gate with
+  `passedAllGates` gate-decided, the block is parsed from the machine
+  adapter's stdout with the model recorded verbatim, `verifier-raw.txt` and
+  `verifier.log` carry the machine argv header (never an opencode argv),
+  `--no-review` is respected, and the diff captured only the worker's
+  change.
+
+Store-invisible by the rounds precedent: ingest is untouched, the
+`verifier` block rides report.json only (the store's per-candidate insert
+selects its columns; no `verifier_json` column exists this slice), so Gate
+1.6's row-count pins are unaffected. Not pinned here and carved by the
+ticket: findings feeding anything in-run (T-040's seam); automatic
+finding→gate promotion (T-041 — human-owned, cross-run, the decisions entry
+above); reviewer consolidation/replacement; session resumption; image
+inputs (spec §10.4's visual verifier — text/terminal evidence only this
+slice); §10.5's consensus challenger; per-job verifier config in `--jobs`
+specs; any new npm dependency. **Gate 2 — RUN, recorded** (runner + report
+shape + a real model role): one real `--goal --verifier-model` run
+(`--repo C:/swarm/demo-target --candidates 1 --no-planner --no-review
+--verifier-model zai-coding-plan/glm-5.3-flash`, gates `build`/`test`),
+2026-10-21 — artifacts at `C:\swarm\20261021225243\report.json` (worktree
+disposed through `npm run clean --force` afterward; evidence kept): c01
+worker ok 19s, diff 725 bytes, build PASS + test PASS ⇒ `passedAllGates`
+true with the verifier block present (verdict immunity on a real run); the
+verifier produced 6 findings (attempts 2 — one bounded repair on the real
+model, recovered) each citing its command and output, including a concern
+the gate string never covered (inverted bounds silently accepted:
+`clamp(5,10,0)` returns 0, no `lo<=hi` guard), a 20,000-case fuzz
+(`mismatches: 0`), boundary/NaN/type-coercion probes, and a
+diff-vs-worktree consistency check. Findings quality stays the staged open
+question (the T-033 posture): one run, one candidate, small fixture — the
+findings are genuine and evidence-cited, and whether that holds across runs
+is exactly what T-040/T-041 consume and stage. **Gate 3 n/a** (no adapter
+change: the verifier rides 'worktree-read' unchanged; both probes re-run
+and recorded above, per ground rule 5).
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash

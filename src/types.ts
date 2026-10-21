@@ -54,13 +54,16 @@ export interface WorkerExecutionRequest {
    * Execution capability policy for this dispatch (T-023, spec §14). Absent
    * ≡ 'worktree-write' — the builder posture every pre-T-023 dispatch had —
    * so existing adapters compile unchanged. The runner passes it explicitly
-   * on every dispatch site (planner 'artifact-only', reviewer
-   * 'worktree-read', worker 'worktree-write'); the OpenCode adapter
-   * translates the restricted postures to its plan agent (the only
-   * OpenCode-aware file). A non-'worktree-write' policy is a mechanism-level
-   * restriction (decisions.md 2026-10-10: mechanism over prompts), never a
-   * gate result — a restricted role's failure degrades through the existing
-   * planner-fallback/reviewer-parse paths, never into a candidate verdict.
+   * on every dispatch site (planner 'artifact-only', reviewer 'worktree-read',
+   * verifier 'worktree-read' (T-039 — the step-one probe,
+   * scripts/diag-execute.mjs, found this posture execute-capable), worker
+   * 'worktree-write'); the OpenCode adapter translates the restricted
+   * postures to its plan agent (the only OpenCode-aware file). A
+   * non-'worktree-write' policy is a mechanism-level restriction
+   * (decisions.md 2026-10-10: mechanism over prompts), never a gate result —
+   * a restricted role's failure degrades through the existing
+   * planner-fallback/reviewer-parse/verifier-parse paths, never into a
+   * candidate verdict.
    */
   executionPolicy?: ExecutionPolicy
 }
@@ -271,6 +274,27 @@ export interface ReviewReport {
   rawOutputPath: string
 }
 
+/**
+ * Active pre-disposition verification (T-039, spec §10.1/§9.2): a fourth
+ * model role beside planner/worker/reviewer. Where the reviewer READS the
+ * diff post-gate on survivors, the verifier ACTIVELY TESTS — it runs new
+ * checks against the candidate's work itself and returns findings citing
+ * the commands it ran and the output it saw (spec §3.3: evidence before
+ * interpretation). Same field pattern as `ReviewReport` and the same
+ * `ReviewObservation` shape, under this DISTINCT report block. Findings,
+ * never verdicts: recorded evidence for the human (and, later, the retry
+ * seam T-040 and the cross-run ratchet T-041) — a model-authored check
+ * never decides survival in the run that produced it (decisions.md
+ * 2026-10-21); promotion into a gate set is human-owned and crosses runs.
+ */
+export interface VerifierReport {
+  model: string
+  ok: boolean
+  attempts: number
+  observations: ReviewObservation[]
+  rawOutputPath: string
+}
+
 export interface CandidateReport {
   id: string
   workerId: string
@@ -311,6 +335,18 @@ export interface CandidateReport {
   probes?: ProbeRunSummary[]
   /** Present only for candidates that passed all gates (when review is enabled). */
   review?: ReviewReport
+  /**
+   * Active pre-disposition verification on the final completed attempt
+   * (T-039, spec §10.1/§9.2) — present only when the run carried
+   * `--verifier-model` (the `probes`/`rounds` producer-only pattern; absent
+   * otherwise, so flag-less reports are unchanged). Runs regardless of gate
+   * outcome (the T-015 posture: evidence about failures is evidence).
+   * Findings, never verdicts: nothing in the elimination ladder reads this
+   * block, and a blocker-advisory observation eliminates nothing, promotes
+   * nothing, reorders nothing (decisions.md 2026-10-21: a model-authored
+   * check never decides survival in the run that produced it).
+   */
+  verifier?: VerifierReport
   error?: string
 }
 
