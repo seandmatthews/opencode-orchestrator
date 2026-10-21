@@ -250,14 +250,17 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
       probes = j.probes.map((p, i) => {
         const where = `job '${id}' probes[${i}]`
         if (!isPlainObject(p)) refuse(`${where} must be an object`)
-        unknownField(where, p, ['id', 'type', 'command', 'timeoutMs', 'repeats', 'capture', 'url'])
+        unknownField(where, p, ['id', 'type', 'command', 'timeoutMs', 'repeats', 'capture', 'url', 'seed'])
         if (typeof p.id !== 'string' || !SPEC_ID_PATTERN.test(p.id)) {
           refuse(`${where} id ${JSON.stringify(p.id)} does not match [a-z0-9][a-z0-9-]* — it names the probe's evidence files`)
         }
         if (seenProbes.has(p.id)) refuse(`job '${id}' has duplicate probe id '${p.id}' — probe ids must be unique per job`)
         seenProbes.add(p.id)
-        if (p.type !== 'command' && p.type !== 'test' && p.type !== 'benchmark' && p.type !== 'screenshot' && p.type !== 'web') {
-          refuse(`${where} type must be "command", "test", "benchmark", "screenshot", or "web" (got ${JSON.stringify(p.type)}) — unknown probe types are refused, not ignored`)
+        // T-032: 'adversarial' joined the landed types; a genuinely-unknown
+        // type is still refused with the updated message ('godot' stays
+        // genuinely unknown — the T-018/T-019/T-024 coordination chain).
+        if (p.type !== 'command' && p.type !== 'test' && p.type !== 'benchmark' && p.type !== 'screenshot' && p.type !== 'web' && p.type !== 'adversarial') {
+          refuse(`${where} type must be "command", "test", "benchmark", "screenshot", "web", or "adversarial" (got ${JSON.stringify(p.type)}) — unknown probe types are refused, not ignored`)
         }
         if (!isPlainObject(p.command)) refuse(`${where} command must be an object with "exe" and "args"`)
         unknownField(`${where} command`, p.command, ['exe', 'args'])
@@ -325,6 +328,18 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
         } else if (p.url !== undefined) {
           refuse(`${where} url is only valid on a web probe (got type ${JSON.stringify(p.type)})`)
         }
+        // T-032: seed is REQUIRED (positive integer >= 1) on an adversarial
+        // probe — the replayability contract: a fuzz run with no seed is
+        // not replayable, so it is not an adversarial probe. REFUSED on
+        // every other probe type: the field exists only where it means
+        // something (the repeats/capture/url precedent).
+        if (p.type === 'adversarial') {
+          if (typeof p.seed !== 'number' || !Number.isInteger(p.seed) || p.seed < 1) {
+            refuse(`${where} seed must be a positive integer >= 1 on an adversarial probe (got ${JSON.stringify(p.seed)})`)
+          }
+        } else if (p.seed !== undefined) {
+          refuse(`${where} seed is only valid on an adversarial probe (got type ${JSON.stringify(p.type)})`)
+        }
         return {
           id: p.id,
           type: p.type,
@@ -333,6 +348,7 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
           ...(p.type === 'benchmark' ? { repeats: p.repeats as number } : {}),
           ...(p.type === 'screenshot' ? { capture: p.capture as string } : {}),
           ...(p.type === 'web' ? { url: p.url as string } : {}),
+          ...(p.type === 'adversarial' ? { seed: p.seed as number } : {}),
         }
       })
     }
