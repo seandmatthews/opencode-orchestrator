@@ -9,6 +9,15 @@ args:
 const repo = "C:/Users/matth/Documents/opencode-orchestrator";
 const laneRoot = "C:/Users/matth/Documents/orchestrator-lanes";
 const IDENTITY = ["-c", "user.name=matth", "-c", "user.email=matth@local"];
+// Every gate run's output is teed to a file here (2026-10-21 lesson: the first
+// auto-revert, T-032, lost its red output entirely — the journal keeps only
+// sliced tails, and the tree reproduced green afterward, so the bar is gone).
+// The wrapper is node(1) itself via world.run: no fs in the script sandbox.
+const REDLOG = "C:/swarm/verify-red";
+const TEE = [
+  "-e",
+  "const cp=require('child_process'),fs=require('fs'),path=require('path');const out=process.argv[1],args=process.argv.slice(2);fs.mkdirSync(path.dirname(out),{recursive:true});const fd=fs.openSync(out,'w');const r=cp.spawnSync(process.execPath,args,{stdio:['ignore',fd,fd]});fs.closeSync(fd);const t=fs.readFileSync(out,'utf8');process.stdout.write('[full output: '+out+']\n'+t.slice(-4000));process.exit(r.status===null?-1:r.status);",
+];
 
 interface TicketSpec {
   /** Ticket id, e.g. T-013. */
@@ -95,7 +104,7 @@ if (lockDirty.exitCode !== 0) {
   await world.run("git", ["-C", repo, "checkout", "main"]);
   const m = await world.run("git", [...IDENTITY, "merge", "--no-ff", b, "-m", "merge: deps — pending package-lock.json change"]);
   if (m.exitCode !== 0) throw new Error("chore merge failed: " + (m.stdout + m.stderr).slice(-500));
-  const post = await world.run("node", [repo + "/scripts/verify.mjs", "fast"], { timeoutMs: 300000 });
+  const post = await world.run("node", [...TEE, REDLOG + "/chore-post-merge-fast.log", repo + "/scripts/verify.mjs", "fast"], { timeoutMs: 300000 });
   if (post.exitCode !== 0) throw new Error("fast tier red on main after the chore merge — aborting before any ticket lane: " + (post.stdout + post.stderr).slice(-800));
   await world.run("git", ["-C", repo, "branch", "-d", b]);
   choreNote = "pending package-lock.json change merged to main, fast tier green";
@@ -161,7 +170,7 @@ for (const t of queue) {
 
     let fast;
     try {
-      fast = await world.run("node", [laneDir + "/scripts/verify.mjs", "fast"], { timeoutMs: 300000 });
+      fast = await world.run("node", [...TEE, REDLOG + "/" + t.id + "-lane-fast.log", laneDir + "/scripts/verify.mjs", "fast"], { timeoutMs: 300000 });
     } catch (e) {
       fast = { exitCode: -1, stdout: "", stderr: "gate spawn/timeout: " + String(e) };
     }
@@ -193,7 +202,7 @@ for (const t of queue) {
       phase("Prove the lane with the full e2e gate");
       let full;
       try {
-        full = await world.run("node", [laneDir + "/scripts/verify.mjs", "full"], { timeoutMs: 1500000 });
+        full = await world.run("node", [...TEE, REDLOG + "/" + t.id + "-gate2-full.log", laneDir + "/scripts/verify.mjs", "full"], { timeoutMs: 1500000 });
       } catch (e) {
         full = { exitCode: -1, stdout: "", stderr: "gate spawn/timeout: " + String(e) };
       }
@@ -236,7 +245,7 @@ for (const t of queue) {
     continue;
   }
   const mergeSha = await world.run("git", ["-C", repo, "rev-parse", "--short", "HEAD"]);
-  const post = await world.run("node", [repo + "/scripts/verify.mjs", "fast"], { timeoutMs: 300000 });
+  const post = await world.run("node", [...TEE, REDLOG + "/" + t.id + "-post-merge-fast.log", repo + "/scripts/verify.mjs", "fast"], { timeoutMs: 300000 });
   if (post.exitCode !== 0) {
     const rv = await world.run("git", [...IDENTITY, "revert", "-m", "1", "--no-edit", mergeSha.stdout.trim()]);
     if (rv.exitCode !== 0) {
