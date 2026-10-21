@@ -68,3 +68,4 @@ Rules:
 | T-029 | Worker prompt version: `Attempt.promptVersion` producer — hash-at-composition of the builder prompt (closes T-007's reserved null producer; spec §6.7:446, §18:1207) | medium | done 2026-10-20 |
 | T-030 | Bounded R&D loop: survivor-evidence feedback rounds (`--rounds`) + the T-012-reserved packet→prompt composer (ROADMAP stage 6; spec §34 M6 composition, M8 feedback edge) | high | done 2026-10-20 |
 | T-031 | Phase-level early stop: `EarlyStopPolicy.minSurvivors` on the `--jobs` spec — stop dispatching, never kill, record the stop (spec §20, §34 M8) | medium | proposed |
+| T-032 | Adversarial probe: seeded fuzz cases fed over argv → crash/survival EvidenceBundle (spec §34:2139 M8, §24 Phase 9; fills T-030:95's carve) | high | proposed |
