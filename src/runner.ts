@@ -21,6 +21,9 @@ import type { Attempt, CandidateReport, FailureRecord, Gate, GateResult, Planner
  * and `recover` reads it after a crash. Line shapes (one JSON object per
  * line, appended in this order per attempt):
  *   {type:'run', runId, repo, baseSha, goal, model, maxAttempts, startedAt}
+ *     (gains an optional `gateRetry: true` field when the T-038 flag is set —
+ *      recovery derives the one-attempt-taller bound from it; absent otherwise,
+ *      so a flag-less header is byte-identical)
  *   {type:'dispatch', jobId, attempt, leaseId, branch, worktreePath, startedAt}
  *   {type:'pid', jobId, attempt, pid, at}
  *   {type:'completion', jobId, attempt, ok, timedOut, exitCode, diffBytes, endedAt}
@@ -89,6 +92,19 @@ export interface SkeletonOptions {
   gates: Gate[]
   worker: WorkerAdapter
   /**
+   * T-038 bounded gate-failure retry: grant each candidate EXACTLY ONE extra
+   * attempt when its worker succeeded but the machine gates rejected the
+   * change, with the retry brief composed mechanically from the gates' own
+   * recorded output (name, command, outputTail) plus the captured diff. The
+   * bound is fixed at one — no numeric knob. Blind re-rolls stay banned:
+   * zero-byte diffs, no-gates candidates, failed diff captures, and
+   * worker-failed legs (T-007's `maxAttempts`) are never retried by this
+   * flag. The same Gate objects re-run unchanged on the retry; both legs are
+   * recorded; the final attempt's verdict stands (decisions.md 2026-10-21).
+   * Absent/false = today's ladder exactly.
+   */
+  gateRetry?: boolean
+  /**
    * T-025 per-role harness selection: the planner's and reviewer's own
    * adapters. Optional — absent (the default) resolves to `worker`, so all
    * three roles ride the run-level adapter exactly as before and direct
@@ -148,6 +164,9 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
   mkdirSync(join(opts.artifactsDir, 'wt'), { recursive: true })
   // T-010: the run header is the first dispatch.jsonl line — recovery derives
   // the target repo and the retry bound (maxAttempts) from it after a crash.
+  // T-038: the header carries `gateRetry: true` when the flag is set, so
+  // recovery derives the one-attempt-taller bound; the field is absent
+  // otherwise (the flag-less header is byte-identical to today's).
   appendDispatchEvidence(opts.artifactsDir, {
     type: 'run',
     runId: opts.runId,
@@ -156,6 +175,7 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
     goal: opts.goal,
     model: opts.model,
     maxAttempts: opts.maxAttempts,
+    ...(opts.gateRetry === true ? { gateRetry: true } : {}),
     startedAt,
   })
 
@@ -604,14 +624,75 @@ function inputContextHash(brief: string, model: string, workspacePath: string): 
   return createHash('sha256').update(`${brief}\n${model}\n${promptWithoutWorkspace}`).digest('hex')
 }
 
+/** T-038: the composed feedback brief for the one bounded gate retry — pure
+ *  string assembly in the runner, no model call composes or adjudicates it
+ *  (decisions.md 2026-10-21). Fixed framing: the change WAS applied and
+ *  these machine gates rejected it; fix the failures — the same gates re-run
+ *  unchanged on the new attempt. Content: the original brief, the failing
+ *  attempt's captured diff (char-capped at MAX_DIFF_CHARS, the
+ *  reviewer-prompt precedent), per FAILING gate its name, its recorded
+ *  command (`GateResult.command`, T-027) and its `outputTail` (the 4000-byte
+ *  tail, src/gate/command.ts), and the worker's attempt summary where the
+ *  harness produced one. Passing gates contribute nothing. The returned
+ *  fingerprint is the sha256 of the exact text — the bytes written to the
+ *  retry attempt's `retry-brief.txt` AND wrapped into its prompt (the T-030
+ *  packetFingerprint pattern; one composition, two consumers). */
+function composeGateRetryBrief(
+  brief: string,
+  diff: string,
+  failedGates: GateResult[],
+  workerSummary: string,
+): { text: string; fingerprint: string } {
+  const truncated = diff.length > MAX_DIFF_CHARS
+  const lines = [
+    'Your previous attempt below WAS APPLIED to the workspace, but the machine gates REJECTED it.',
+    'Fix the gate failures. The SAME machine gates re-run unchanged on this new attempt.',
+    '',
+    'ORIGINAL BRIEF:',
+    brief,
+    '',
+    `YOUR PREVIOUS DIFF${truncated ? ` (truncated to ${MAX_DIFF_CHARS} chars)` : ''}:`,
+    diff.slice(0, MAX_DIFF_CHARS),
+    '',
+  ]
+  const summary = workerSummary.trim()
+  if (summary !== '') {
+    lines.push('YOUR PREVIOUS ATTEMPT SUMMARY:', summary, '')
+  }
+  lines.push('FAILED MACHINE GATES:')
+  for (const g of failedGates) {
+    lines.push(
+      '',
+      `GATE: ${g.name}`,
+      `COMMAND: ${g.command ?? '(not recorded)'}`,
+      'OUTPUT (tail):',
+      g.outputTail,
+    )
+  }
+  const text = lines.join('\n')
+  return { text, fingerprint: createHash('sha256').update(text).digest('hex') }
+}
+
 /** Execute one job (T-009): the T-007 attempt loop verbatim, with the job's
  *  resolved config in place of the run-level fields. The first attempt's
  *  worktree is leased LAZILY here — when the scheduler dispatches the job —
  *  at the run's baseSha, never up front; retry attempts lease their own
  *  fresh worktree (wt/<jobId>-a<n>) at the same baseSha. A mechanical
  *  failure (throw or !workerOk) requeues as a fresh attempt while the
- *  maxAttempts bound allows; a succeeded-but-no-op or gates-failed leg is a
- *  verdict and is never re-rolled (decisions.md: gates decide survival). */
+ *  maxAttempts bound allows; a succeeded-but-no-op or no-gates leg is a
+ *  verdict and is never re-rolled (decisions.md: gates decide survival).
+ *
+ *  T-038: under `--gate-retry`, a worker-succeeded attempt whose captured
+ *  diff is non-zero but whose machine gates reject it gets EXACTLY ONE more
+ *  attempt (a flag-firing attempt is recorded 'failed' with reason
+ *  'gates-failed', its gate results attached attempt-scoped) — the retry
+ *  brief composed mechanically from the gates' own recorded output. The
+ *  bound is one per candidate regardless of maxAttempts (total attempts
+ *  ≤ maxAttempts + 1). The retry brief becomes the retry attempt's brief:
+ *  its promptVersion and inputContextHash hash the composed text (the hash
+ *  correctly differs from attempt 1's — the brief differs), while
+ *  `base.brief` keeps the ORIGINAL brief. Blind re-rolls stay banned
+ *  (decisions.md 2026-10-21). */
 async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<CandidateReport> {
   const id = job.id
   const dir = join(opts.artifactsDir, id)
@@ -638,6 +719,19 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
   // the candidate report — recorded evidence that never changes a verdict
   // (decisions.md: gates decide survival).
   const cleanupFailures: string[] = []
+  // T-038: the brief the CURRENT attempt is dispatched with — the original
+  // brief for attempt 1, the composed feedback brief for a gate-retry leg.
+  // `base.brief` keeps the ORIGINAL brief; the composed text is attempt-scoped
+  // evidence, never a replacement.
+  let attemptBrief = job.brief
+  // T-038: the composed retry brief, composed ONCE per retry (below) and
+  // consumed at the top of the retry leg's iteration — one composition, two
+  // consumers: the exact prompt text (hashed into that attempt's
+  // promptVersion) and the `retry-brief.txt` evidence file.
+  let pendingRetryBrief: string | null = null
+  // T-038: the bound is one gate-retry per candidate, regardless of
+  // maxAttempts (total attempts ≤ maxAttempts + 1).
+  let gateRetryUsed = false
   for (let n = 1; ; n++) {
     // Attempt-scoped lease id (T-007): two leases on `wt/<id>` would both
     // derive `swarm/wt-<id>` (the T-004 branch-collision hazard), and
@@ -667,7 +761,10 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
     // that produced this attempt's evidence?" Both are audit provenance;
     // neither ever touches a verdict (decisions.md 2026-10-10: machine gates
     // decide survival; models advise).
-    const prompt = builderPrompt(job.brief, lease.path)
+    // T-038: on a gate-retry leg the brief IS the composed feedback text —
+    // attempt 2's inputContextHash correctly differs from attempt 1's,
+    // because its brief differs; the hash is doing its job.
+    const prompt = builderPrompt(attemptBrief, lease.path)
     const promptVersion = createHash('sha256').update(prompt).digest('hex')
 
     const attempt: Attempt = {
@@ -676,11 +773,20 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
       number: n,
       state: 'running',
       startedAt: new Date().toISOString(),
-      inputContextHash: inputContextHash(job.brief, job.model, lease.path),
+      inputContextHash: inputContextHash(attemptBrief, job.model, lease.path),
       promptVersion,
       outputArtifacts: [logPath],
     }
     base.attempts.push(attempt)
+    // T-038: a gate-retry leg's evidence dir carries the composed brief —
+    // the exact text hashed into `gateRetry.fingerprint` below and wrapped
+    // into this attempt's prompt above.
+    if (pendingRetryBrief !== null) {
+      const retryBriefPath = join(evidenceDir, 'retry-brief.txt')
+      writeFileSync(retryBriefPath, pendingRetryBrief)
+      attempt.outputArtifacts.push(retryBriefPath)
+      pendingRetryBrief = null
+    }
     // T-010: the dispatch is on disk the moment the lease exists — a crash
     // after this point leaves the worktree discoverable and the attempt
     // reconcilable (dispatch without a completion line = recorded-running).
@@ -784,6 +890,69 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
         continue
       }
 
+      // The gates run on every attempt that reaches here (a final attempt of
+      // either kind, or a worker-succeeded candidate the gate-retry may
+      // claim). T-038: the results land in an attempt-local array so a
+      // pre-retry leg's verdicts attach to THEIR attempt
+      // (`Attempt.gateResults`) and `base.gates` keeps meaning "the FINAL
+      // attempt's gates" — the pre-T-038 semantics, byte-for-byte.
+      const attemptGates: GateResult[] = []
+      for (const gate of job.gates) {
+        const r: GateResult = await gate.run(lease.path)
+        attemptGates.push(r)
+        // T-011: gate-side cleanup failures (a timed-out gate whose tree kill
+        // was not proven good) join the candidate's evidence, named by gate.
+        cleanupFailures.push(...(r.cleanupFailures ?? []).map((line) => `gate ${r.name}: ${line}`))
+        console.log(`[${id}] gate ${r.name}: ${r.passed ? 'PASS' : 'FAIL'} (${(r.durationMs / 1000).toFixed(1)}s)`)
+      }
+
+      // T-038: the ONE bounded feedback-informed gate retry. Every condition
+      // is machine-checked: the worker succeeded, the diff was captured and
+      // is non-zero (a zero-byte NO-OP or a failed capture has no failure
+      // output to feed back — AGENTS.md #7), at least one of a non-empty
+      // gate set failed (no-gates stays terminal), the flag is set, and this
+      // candidate has not spent its one retry. The bound is one regardless
+      // of maxAttempts — total attempts ≤ maxAttempts + 1. Blind re-rolls
+      // stay banned: this leg's inputs are NEW information the first attempt
+      // never had — the gates' own recorded output (decisions.md
+      // 2026-10-21). The same Gate objects re-run unchanged above; the final
+      // attempt's verdict below stands either way.
+      const failedGates = attemptGates.filter((g) => !g.passed)
+      if (opts.gateRetry === true && !gateRetryUsed && result.ok
+        && diffCaptured && Buffer.byteLength(diff) > 0
+        && attemptGates.length > 0 && failedGates.length > 0) {
+        gateRetryUsed = true
+        attempt.state = 'failed'
+        attempt.failure = {
+          reason: 'gates-failed',
+          message: `machine gates rejected the change (${failedGates.map((g) => g.name).join(', ')}); one feedback-informed retry follows, composed from the gates' recorded output`,
+          timedOut: false,
+          exitCode: failedGates[0]!.exitCode,
+        }
+        // Attempt-scoped gate evidence: the pre-retry leg's verdicts attach
+        // to their own attempt and would otherwise be lost (the final
+        // attempt's gates overwrite the candidate-level array below).
+        attempt.gateResults = attemptGates
+        const composed = composeGateRetryBrief(job.brief, diff, failedGates, result.responseTail)
+        pendingRetryBrief = composed.text
+        base.gateRetry = {
+          fromAttempt: n,
+          toAttempt: n + 1,
+          gates: failedGates.map((g) => g.name),
+          fingerprint: composed.fingerprint,
+        }
+        attemptBrief = composed.text
+        console.log(`[${id}] attempt ${n}: gates rejected the change (${failedGates.map((g) => g.name).join(', ')}); composing the one feedback-informed gate retry (attempt ${n + 1})`)
+        if (opts.cleanWorkspaces) {
+          try {
+            opts.workspaces.dispose(lease)
+          } catch (e) {
+            console.log(`[${id}] workspace dispose failed: ${errorMessage(e)}`)
+          }
+        }
+        continue
+      }
+
       // Final attempt (worker succeeded, or the bound was reached): the
       // job's top-level fields are this attempt's values — the exact flow
       // and verdict ladder the runner had before T-009, so the run summary,
@@ -798,15 +967,7 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
         base.diffPath = diffPath
         base.diffBytes = Buffer.byteLength(diff)
       }
-
-      for (const gate of job.gates) {
-        const r: GateResult = await gate.run(lease.path)
-        base.gates.push(r)
-        // T-011: gate-side cleanup failures (a timed-out gate whose tree kill
-        // was not proven good) join the candidate's evidence, named by gate.
-        cleanupFailures.push(...(r.cleanupFailures ?? []).map((line) => `gate ${r.name}: ${line}`))
-        console.log(`[${id}] gate ${r.name}: ${r.passed ? 'PASS' : 'FAIL'} (${(r.durationMs / 1000).toFixed(1)}s)`)
-      }
+      base.gates = attemptGates
       base.passedAllGates = base.gates.length > 0 && base.gates.every((g) => g.passed) && base.diffBytes > 0
 
       // T-015: probes ride beside the ladder as a parallel evidence seam —

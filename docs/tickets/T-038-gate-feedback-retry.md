@@ -1,6 +1,6 @@
 # T-038 — Bounded gate-failure retry: `--gate-retry` — one feedback-informed attempt composed from the gates' own recorded output (spec §24:1462, §30:1893; decisions.md entry in-ticket)
 
-**Status:** proposed
+**Status:** done 2026-10-21
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 3
 **Depends on:** — (T-007's attempt ladder is the substrate, done 2026-10-16; T-027's recorded `GateResult.command` supplies half the feedback payload, done 2026-10-19; T-029's promptVersion gives per-attempt provenance for free, done 2026-10-20). T-040 (proposed) is the successor that adds verifier findings to the same composition seam; this ticket is valuable and shippable without it.
@@ -45,21 +45,168 @@ The substrate is fully built: attempt ladder with fresh leases and per-attempt e
 
 ## Acceptance criteria
 
-- [ ] The decisions.md entry (blind vs informed; bound one; same gates re-run; both legs recorded) is in the change-set and cited by VERIFICATION.md's new gate section — pinned by the change-set contents + the gate section's citation.
-- [ ] **Red bar recorded first** (AGENTS.md #8): today's behavior — a gate-failed candidate eliminated after exactly one attempt, no attempt 2, no `gateRetry` block — demonstrated and recorded in VERIFICATION.md before the flag's code lands.
-- [ ] With `--gate-retry`: a worker-succeeded, non-zero-diff, gate-failed candidate gets attempt 2; the composed brief provably contains every failing gate's name, command, and outputTail (the `gateRetry.fingerprint` pin); attempt 2's values populate the report as the final attempt; `attempts[]` shows both legs with attempt 1 `state: 'failed'`, `failure.reason: 'gates-failed'`; the composed brief file exists in the attempt evidence dir; `CandidateReport.brief` is unchanged from the original — pinned by **Gate 1.24** (new token-free check script, fake-WorkerAdapter `runSkeleton` drives, the check-probe pattern).
-- [ ] Immunity faces: zero-byte-diff candidate not retried even with the flag; `no-gates` not retried; worker-failed legs retry under `--max-attempts` exactly as before, never consuming the gate-retry — pinned by **Gate 1.24**.
-- [ ] Final-attempt shapes byte-identical: a candidate failing gates on both legs is eliminated with `passedAllGates: false` and no new elimination vocabulary; a flag-less run's report carries no `gateRetry` block and no attempt-scoped gate fields — pinned by **Gate 1.24**.
-- [ ] Attempt-scoped gate evidence survives: the pre-retry leg's `GateResult[]` is on the attempt record and as evidence files, and the store ingests a retried candidate without loss — pinned by **Gate 1.24** (report-side) + the store leg of the drive (ingest assertions).
-- [ ] Interactions: `--rounds 2` retries within each round's ladder (round-2 id `-rN` + attempt `-aN` no collision); `--jobs` mode retries per-job through the same `runJob`; `--no-planner` composes from the raw goal — pinned by **Gate 1.24** drives.
-- [ ] The run header line carries `gateRetry: true` when the flag is set, and recovery derives the retry bound from it — pinned by **Gate 1.24** (header-line assertion) with the recovery disposition named as a manual face if not mechanically driven.
-- [ ] VERIFICATION.md extended in the same change-set (AGENTS.md #6): the new Gate 1.24 section (every leg above), the recorded red bar, the decisions-entry citation — pinned by the full fast tier `npm run verify` ALL GREEN with the new section present.
-- [ ] **Gate 2 owed** (real tokens): the change touches `src/runner.ts` verdict-adjacent code and adds an optional report block — on the trigger list. The run is a real `--goal` run with `--gate-retry` demonstrating a genuine gate-failure → feedback retry → survival (or, honestly recorded, the failure of the retry to convert — both outcomes answer the staged question); its `report.json` path recorded here and in VERIFICATION.md.
-- [ ] **Gate 3 n/a** (no adapter change; no new harness posture).
+- [x] The decisions.md entry (blind vs informed; bound one; same gates re-run; both legs recorded) is in the change-set and cited by VERIFICATION.md's new gate section — pinned by the change-set contents + the gate section's citation.
+- [x] **Red bar recorded first** (AGENTS.md #8): today's behavior — a gate-failed candidate eliminated after exactly one attempt, no attempt 2, no `gateRetry` block — demonstrated and recorded in VERIFICATION.md before the flag's code landed.
+- [x] With `--gate-retry`: a worker-succeeded, non-zero-diff, gate-failed candidate gets attempt 2; the composed brief provably contains every failing gate's name, command, and outputTail (the `gateRetry.fingerprint` pin); attempt 2's values populate the report as the final attempt; `attempts[]` shows both legs with attempt 1 `state: 'failed'`, `failure.reason: 'gates-failed'`; the composed brief file exists in the attempt evidence dir; `CandidateReport.brief` is unchanged from the original — pinned by **Gate 1.24** (new token-free check script, fake-WorkerAdapter `runSkeleton` drives, the check-probe pattern).
+- [x] Immunity faces: zero-byte-diff candidate not retried even with the flag; `no-gates` not retried; worker-failed legs retry under `--max-attempts` exactly as before, never consuming the gate-retry — pinned by **Gate 1.24**.
+- [x] Final-attempt shapes byte-identical: a candidate failing gates on both legs is eliminated with `passedAllGates: false` and no new elimination vocabulary; a flag-less run's report carries no `gateRetry` block and no attempt-scoped gate fields — pinned by **Gate 1.24**.
+- [x] Attempt-scoped gate evidence survives: the pre-retry leg's `GateResult[]` is on the attempt record and as evidence files, and the store ingests a retried candidate without loss — pinned by **Gate 1.24** (report-side) + the store leg of the drive (ingest assertions).
+- [x] Interactions: `--rounds 2` retries within each round's ladder (round-2 id `-rN` + attempt `-aN` no collision); `--jobs` mode retries per-job through the same `runJob`; `--no-planner` composes from the raw goal — pinned by **Gate 1.24** drives.
+- [x] The run header line carries `gateRetry: true` when the flag is set, and recovery derives the retry bound from it — pinned by **Gate 1.24** (header-line assertion) with the recovery disposition named as a manual face if not mechanically driven.
+- [x] VERIFICATION.md extended in the same change-set (AGENTS.md #6): the new Gate 1.24 section (every leg above), the recorded red bar, the decisions-entry citation — pinned by the full fast tier `npm run verify` ALL GREEN with the new section present.
+- [ ] **Gate 2 owed** (real tokens): the change touches `src/runner.ts` verdict-adjacent code and adds an optional report block — on the trigger list. The run is a real `--goal` run with `--gate-retry` demonstrating a genuine gate-failure → feedback retry → survival (or, honestly recorded, the failure of the retry to convert — both outcomes answer the staged question); its `report.json` path recorded here and in VERIFICATION.md. **NOT RUN by this lane** (the lane was instructed not to run verify:full; model tokens). Owed at merge: `scripts/verify.mjs`'s full tier now passes `--gate-retry` in this change-set, so the driving gate's `npm run verify:full` IS this ticket's real run — record its `report.json` path and what the run's `gateRetry` blocks show (conversion or not) here and in VERIFICATION.md when it lands. The flag is inert on any candidate whose gates pass first try, so a run where no gate ever fails demonstrates the no-regression half only — that outcome is recorded honestly, exactly as this criterion allows.
+- [x] **Gate 3 n/a** (no adapter change; no new harness posture).
 
 ## Landed
 
-(added when done: what actually changed, deviations, measured gate numbers)
+2026-10-21, lane `ticket/T-038-gate-feedback-retry`. What actually changed:
+
+- **docs/decisions.md** — new dated entry **2026-10-21** ("The re-roll
+  prohibition is about blindness, not repetition"), rewriting the scope of
+  the 2026-10-10 machine-gates decision along the blind-vs-informed line
+  exactly as this ticket specified (blind re-rolls banned unchanged; one
+  feedback-informed gate retry under the flag; the feedback is the gates'
+  own recorded output, no model composes or adjudicates it; the same Gate
+  objects re-run unchanged; both legs recorded; the final attempt's verdict
+  stands; citing §24:1462 and §30:1893). The 2026-10-10 entry gained a
+  forward pointer. Landed before the flag's code in the change-set.
+- **src/types.ts** — `FailureReason` doc updated (`'gates-failed'` may now
+  appear as a NON-final attempt's failure reason under the flag; the final
+  attempt's semantics byte-for-byte unchanged); optional
+  `Attempt.gateResults?: GateResult[]` (present only on a pre-retry leg
+  that ran gates); new `GateRetryRecord` (`{fromAttempt, toAttempt, gates,
+  fingerprint}`) and optional `CandidateReport.gateRetry?`.
+- **src/runner.ts** — `SkeletonOptions.gateRetry?: boolean`; the run header
+  line gains optional `gateRetry: true` (absent otherwise — flag-less
+  headers byte-identical); `composeGateRetryBrief` (pure string assembly,
+  no model call: original brief + captured diff capped at `MAX_DIFF_CHARS`
+  + per failing gate name/command/`outputTail` + the worker's
+  `responseTail` where produced; sha256 fingerprint of the exact text);
+  `runJob` restructured — gates now run into an attempt-local array so a
+  pre-retry leg's results attach to their own attempt while `base.gates`
+  keeps meaning "the FINAL attempt's gates"; the retryable leg (all of:
+  `result.ok`, captured `diffBytes > 0`, ≥1 of a non-empty gate set failed,
+  flag set, retry unspent) composes the brief once (two consumers: the
+  `retry-brief.txt` evidence file in the retry attempt's evidence dir and
+  the attempt's prompt, whose `promptVersion` hashes the wrapped bytes),
+  records `attempt.failure = {reason: 'gates-failed', ...}` +
+  `attempt.gateResults` + `base.gateRetry`, and continues at the same
+  `baseSha` with a fresh lease `wt/<id>-a<n>`. The bound is one per
+  candidate regardless of `--max-attempts` (total ≤ maxAttempts + 1); the
+  mechanical-retry condition is untouched.
+- **src/cli.ts** — `--gate-retry` boolean flag (parse-time, no numeric
+  knob), usage documented, passed through to `runSkeleton`; the
+  `--max-attempts` usage sentence updated (its pinned
+  `default: 1; values < 1 refused` fragment kept byte-identical — Gate 1.8
+  S8 stays green).
+- **src/recover.ts** — `RunHeader.gateRetry?`; the step-8 disposition
+  derives the bound from it: `dispositionFor` gains
+  `gateRetryRemaining` (an unconsumed retry adds exactly one attempt to the
+  bound; `maxAttempts` keeps reporting the header's declared value), and
+  the new `gateRetryConsumed` reads consumption from dispatch records only
+  (an ok completion with a captured non-zero diff followed by another
+  dispatch — a shape only the retry leg produces). The stale "a
+  gates-failed leg cannot occur in-run" comment rewritten.
+- **scripts/check-gate-retry.mjs** (new, **Gate 1.24**) and its fast-tier
+  wiring in **scripts/verify.mjs** (after Gate 1.23); the full tier's
+  skeleton args now carry `--gate-retry` (see the Gate 2 note in this
+  ticket's Verification section and VERIFICATION.md's Gate 2 section).
+- **VERIFICATION.md** — the new Gate 1.24 section (every leg, the red bar,
+  the decisions-entry citation, the store-tolerance note) and the Gate 2
+  section's T-038 paragraph.
+- **docs/tickets/** — this file (status, boxes, Landed) and the index row
+  in docs/tickets/README.md, same change.
+
+Measured gate numbers (this lane, this tree):
+
+- **Red bar (pre-change tree, before the flag's code):**
+  `node node_modules/tsx/dist/cli.mjs scripts/check-gate-retry.mjs` →
+  **9 FAIL(s)** — the flag ignored, one attempt, gates-failed elimination,
+  no block — ending in
+  `ENOENT ... c01\attempt-2\retry-brief.txt`. That ENOENT is thrown inside
+  G1, so the crash aborts `main()` and the check's G2–G6 legs never execute
+  in the red run (re-verified at review round 1: the committed script
+  against main's src yields exactly the recorded 9 failures and the
+  recorded ENOENT path, nothing after); the old bar is the pre-change
+  `scripts/check-retry.mjs` (Gate 1.8) **ALL GREEN** in the same window
+  (S6 = the old bar: "a succeeded worker whose gates fail is never
+  re-rolled — exactly one attempt").
+- **Gate 1.24 (post-change):** `check-gate-retry.mjs` **ALL GREEN — 53
+  assertions printed, 0 failures** (55 static `t()` sites in the script;
+  the 2 else-guards at the G5b/G5c run-dir checks print only on failure).
+  Measured per leg: G1 core 21, G2 immunity 8, G3 shapes 5, G4
+  interactions 6, G5 real-CLI + store 8, G6 recovery 5.
+- **Full fast tier:** `node scripts/verify.mjs fast` → **exit 0, ALL
+  GREEN, 107 s, 1454 `ok:` lines** (measured at review round 1 on this
+  tree's code — the only later delta is the Landed prose itself; the
+  tier's own Gate 1.24 section prints 54 `ok:` lines —
+  the check's 53 plus verify.mjs's one `gate-retry self-check exit 0`
+  wrapper line), all sections Gate 0 / 1 / 0.5 / 1.5 (cleanup + lock +
+  integrate) / 1.6–1.24; Gates 1.8, 1.10, 1.11, and 1.22
+  also re-run standalone green during iteration. One one-off red in the
+  passing window, recorded in Known issue #10 with its captured assertion
+  names: Gate 1.12's S4 logged `CLEANUP FAIL` lines for a tree the same
+  scenario's process-table assertions verified dead (the class's third
+  observation, different lane, zero shared change-set code); the immediate
+  re-run of the identical tree was ALL GREEN — the ledger's response
+  (re-run, not a code change).
+- **Gate 0** typecheck exit 0 throughout.
+- **Gate 2: OWED, NOT RUN by this lane** (instructed not to run
+  verify:full; real model tokens). The full tier now carries
+  `--gate-retry`, so the driving gate's `npm run verify:full` is this
+  ticket's real run; its `report.json` path and the honest
+  conversion-or-not reading of its `gateRetry` blocks are to be recorded
+  here and in VERIFICATION.md when it lands. If no candidate fails a gate
+  on that run, the flag is inert and the run demonstrates the
+  no-regression half only — recorded as such, per the criterion's own
+  either-way clause. Pending-state evidence, verified 2026-10-21 at review
+  round 2: the only run dir under `C:\swarm\verify` is `20261021053700`
+  (05:37, pre-change-set — its dispatch.jsonl header carries no `gateRetry`
+  field), and the driving workflow's T-038 tee
+  (`C:\swarm\verify-red\T-038-lane-fast.log`, 17:12) holds the lane fast
+  tier only — ALL GREEN, no Gate 2 output yet. **RECORDING BLOCK — fills
+  when the driving run lands:** run id; `report.json` path; the `rounds`
+  block outcome (two executed rounds? survivors?); whether any candidate
+  failed a gate (the flag fires only then); per fired retry the
+  `gateRetry` block (`fromAttempt`/`toAttempt`/`gates`/`fingerprint`) and
+  whether the retry CONVERTED (final `passedAllGates`) or failed to
+  convert — either outcome answers the staged question and is recorded
+  verbatim, never smoothed.
+- **Gate 3 n/a** (no adapter file touched).
+
+Deviations from the ticket text (none substantive; recorded for honesty):
+
+1. The composed brief file is written at the TOP of the retry leg's loop
+   iteration, so it appears in that attempt's `outputArtifacts` BETWEEN
+   `worker.log` and `diff.patch` (the ticket named no position; the file
+   exists before the attempt runs, which the order reflects).
+2. The recovery disposition WAS mechanically driven (the ticket allowed a
+   manual face): Gate 1.24's G6 drives the real `recover` CLI over
+   synthetic dispatch evidence, five faces (unconsumed/consumed/
+   flag-absent/consumed-at-2/no-op precedence).
+3. `JobDisposition.maxAttempts` keeps reporting the header's declared
+   value (the derived bound is visible through the disposition itself) —
+   the ticket named no reporting shape; keeping the field's meaning stable
+   preserves Gate 1.11's R5 pins byte-for-byte.
+4. The store gap named per the ticket's provision: attempt-scoped
+   `GateResult[]` are NOT store columns (schema v5 unchanged) — the report
+   field + evidence files are the durable copy, the leg's `gates-failed`
+   failure persists via `failure_json`, and ingest's tolerance is pinned
+   behaviorally (Gate 1.24 G5b + Gate 1.6 green).
+
+Review round 1 corrections (same change-set, no assertion weakened):
+
+- The Gate 1.24 count above was off by one (54 → **53**): the original
+  figure had counted verify.mjs's own `gate-retry self-check exit 0`
+  wrapper line alongside the check's printed assertions. Measured: 55
+  static `t()` sites, 2 failure-only else-guards, 53 printed on a green
+  run.
+- VERIFICATION.md's red-bar paragraph claimed the immunity and flag-less
+  faces were "green in the same run" as the red bar — an overstatement:
+  the G1 ENOENT crash aborts `main()` before G2–G6 execute. Corrected
+  there, and the pre-change red was re-verified from the committed script
+  against main's src (exactly the recorded 9 failures and ENOENT path,
+  nothing after).
 
 ## Verification
 

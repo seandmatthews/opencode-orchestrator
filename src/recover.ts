@@ -113,6 +113,11 @@ interface RunHeader {
   goal?: string
   model?: string
   maxAttempts?: number
+  /** T-038: the run granted each candidate the one bounded feedback-informed
+   *  gate retry — the effective bound is one attempt taller while a job's
+   *  retry is unconsumed (derived from the dispatch records, see
+   *  `gateRetryConsumed`). Absent on pre-T-038 and flag-less runs. */
+  gateRetry?: boolean
   startedAt?: string
 }
 
@@ -347,10 +352,13 @@ interface JobDisposition {
  * The bound spent is terminal bound-exhausted; everything else (never
  * completed, !ok, timedOut, or completed with a diff but no durably recorded
  * verdict — report.json was never written) is retryable while the bound
- * allows, because no machine verdict was ever produced. A gates-failed leg
- * cannot occur in-run: gates never dispatched a worker.
+ * allows, because no machine verdict was ever produced. T-038: a gates-failed
+ * leg CAN occur in-run since then (the pre-retry leg of the bounded
+ * feedback-informed gate retry) — it is visible here only as a CONSUMED
+ * retry (`gateRetryConsumed` below): the bound derivation accounts for it,
+ * one attempt taller while the job's retry is unspent.
  */
-function dispositionFor(jobId: string, ev: RunEvidence, maxAttempts: number): JobDisposition {
+function dispositionFor(jobId: string, ev: RunEvidence, maxAttempts: number, gateRetryRemaining: boolean): JobDisposition {
   const dispatches = ev.dispatches.filter((d) => d.jobId === jobId)
   const completions = dispatches
     .map((d) => ev.completions.get(attemptKey(d.jobId, d.attempt)))
@@ -359,10 +367,34 @@ function dispositionFor(jobId: string, ev: RunEvidence, maxAttempts: number): Jo
   if (completions.some((c) => c.ok === true && c.diffBytes === 0)) {
     return { jobId, attemptsUsed, maxAttempts, disposition: 'terminal', reason: 'no-op' }
   }
-  if (attemptsUsed >= maxAttempts) {
+  // T-038: an unconsumed gate retry adds exactly one attempt to the bound.
+  // `maxAttempts` stays the header's declared value — the derived bound is
+  // visible through the disposition itself.
+  const bound = gateRetryRemaining ? maxAttempts + 1 : maxAttempts
+  if (attemptsUsed >= bound) {
     return { jobId, attemptsUsed, maxAttempts, disposition: 'terminal', reason: 'bound-exhausted' }
   }
   return { jobId, attemptsUsed, maxAttempts, disposition: 'retryable', reason: null }
+}
+
+/**
+ * T-038: whether a job's one gate retry is already spent, from dispatch
+ * records only. The retry leg dispatches only after a completion with ok and
+ * a captured non-zero diff — a shape a mechanical retry can never produce
+ * (an ok completion is never re-rolled mechanically) — so that shape
+ * followed by another dispatch of the same job IS the consumed retry. The
+ * consumed leg's own crash (a dispatch with no completion) reads
+ * recorded-running like any attempt; the bound no longer includes the
+ * spent retry.
+ */
+function gateRetryConsumed(ev: RunEvidence, jobId: string): boolean {
+  return ev.dispatches.some((d) => {
+    if (d.jobId !== jobId) return false
+    const c = ev.completions.get(attemptKey(jobId, d.attempt))
+    return c !== undefined && c.ok === true
+      && typeof c.diffBytes === 'number' && c.diffBytes > 0
+      && ev.dispatches.some((d2) => d2.jobId === jobId && d2.attempt === d.attempt + 1)
+  })
 }
 
 // ---------- the command ----------
@@ -551,10 +583,14 @@ function main(): void {
 
     // Step 8 — retry disposition per job, from T-007's policy. maxAttempts
     // comes from the dispatch header (the CLI default 1 when unreadable).
+    // T-038: a header carrying `gateRetry: true` raises the effective bound
+    // by exactly one attempt per job whose gate retry the dispatch records
+    // show is still unspent.
     const headerMax = ev.header?.maxAttempts
     const maxAttempts = typeof headerMax === 'number' && Number.isInteger(headerMax) && headerMax >= 1 ? headerMax : 1
+    const gateRetryEnabled = ev.header?.gateRetry === true
     const jobIds = [...new Set(ev.dispatches.map((d) => d.jobId))].sort()
-    const jobs = jobIds.map((j) => dispositionFor(j, ev, maxAttempts))
+    const jobs = jobIds.map((j) => dispositionFor(j, ev, maxAttempts, gateRetryEnabled && !gateRetryConsumed(ev, j)))
     for (const j of jobs) {
       console.log(`disposition: ${j.jobId} attemptsUsed=${j.attemptsUsed}/${j.maxAttempts} -> ${j.disposition}${j.reason ? ` (${j.reason})` : ''}`)
     }

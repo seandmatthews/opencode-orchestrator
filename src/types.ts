@@ -166,15 +166,19 @@ export type AttemptState = 'running' | 'succeeded' | 'failed' | 'abandoned'
 
 /**
  * Why an attempt failed. Reuses the elimination-ladder vocabulary
- * (`eliminationReason`, src/store/index.ts). Retryable attempts only ever
- * produce 'error' (the attempt threw) or 'worker-failed' (non-zero exit or
- * timeout); 'no-op'/'no-gates'/'gates-failed' are candidate verdicts on the
- * ladder, never attempt failures — a worker that succeeded is never re-rolled
- * around a machine verdict (decisions.md: gates decide survival).
- * 'abandoned' (T-010) documents the vocabulary extension: spec §28:1863 names
- * ATTEMPT_ABANDONED but no reason vocabulary, so the abandonment failure
- * record chooses 'abandoned' per the T-008 APPROVAL_REJECTED
- * choose-and-document precedent.
+ * (`eliminationReason`, src/store/index.ts). Retryable attempts produce
+ * 'error' (the attempt threw), 'worker-failed' (non-zero exit or timeout),
+ * and — under the T-038 `--gate-retry` flag ONLY — 'gates-failed' as a
+ * NON-final attempt's failure reason: the pre-retry leg of the one bounded
+ * feedback-informed gate retry (decisions.md 2026-10-21). The FINAL attempt
+ * keeps today's semantics byte-for-byte: a succeeded worker records
+ * 'succeeded' even when gates fail — the gates-failed verdict lives in
+ * `passedAllGates` and the elimination vocabulary is unchanged. 'no-op' and
+ * 'no-gates' remain candidate verdicts on the ladder, never attempt
+ * failures; 'abandoned' (T-010) documents the vocabulary extension: spec
+ * §28:1863 names ATTEMPT_ABANDONED but no reason vocabulary, so the
+ * abandonment failure record chooses 'abandoned' per the T-008
+ * APPROVAL_REJECTED choose-and-document precedent.
  */
 export type FailureReason = 'error' | 'worker-failed' | 'no-op' | 'no-gates' | 'gates-failed' | 'abandoned'
 
@@ -240,6 +244,17 @@ export interface Attempt {
   promptVersion: string | null
   outputArtifacts: string[]
   failure?: FailureRecord
+  /**
+   * The gate results recorded on THIS attempt (T-038), present ONLY when the
+   * attempt ran the machine gates as a NON-final leg — the pre-retry leg of
+   * the one bounded gate retry. The final attempt's gates attach to the
+   * candidate report (`CandidateReport.gates`) exactly as before; without
+   * this field a pre-retry leg's `GateResult[]` would be lost. Evidence
+   * only, never a verdict input (decisions.md 2026-10-10: gates decide
+   * survival). Absent on every other attempt, so flag-less reports are
+   * unchanged (the probes/rounds optional-field pattern).
+   */
+  gateResults?: GateResult[]
 }
 
 export interface PlannerReport {
@@ -289,9 +304,21 @@ export interface CandidateReport {
   /**
    * One Attempt record per execution of this candidate (T-007). The
    * top-level fields above keep their meaning as the FINAL attempt's
-   * values; gates attach only to the final attempt.
+   * values; gates attach only to the final attempt (a pre-retry leg's gate
+   * results attach to their own attempt — `Attempt.gateResults`, T-038).
    */
   attempts: Attempt[]
+  /**
+   * The one bounded gate-failure retry (T-038, decisions.md 2026-10-21):
+   * present only when `--gate-retry` fired for this candidate — absent
+   * otherwise, so flag-less reports are unchanged (the probes/rounds
+   * optional-block pattern). `brief` above stays the ORIGINAL brief; the
+   * composed retry brief is attempt-scoped evidence in the retry attempt's
+   * evidence dir (`retry-brief.txt`), never a replacement. Recorded
+   * evidence only: never a verdict input (decisions.md 2026-10-10 — gates
+   * decide survival).
+   */
+  gateRetry?: GateRetryRecord
   /**
    * Aggregated worker-side + gate-side cleanup failures (T-011) — the one
    * place report.json answers "did anything survive a timeout". Absent on
@@ -327,6 +354,30 @@ export interface ProbeRunSummary {
   success: boolean
   durationMs: number
   bundlePath: string
+}
+
+/**
+ * The one bounded gate-failure retry's record (T-038, decisions.md
+ * 2026-10-21), carried on `CandidateReport.gateRetry` ONLY when the flag
+ * fired for this candidate. Evidence of the composition — never a verdict
+ * input: the final attempt's `passedAllGates` alone decides survival
+ * (decisions.md 2026-10-10 — gates decide survival; the same Gate objects
+ * re-run unchanged on the retry).
+ */
+export interface GateRetryRecord {
+  /** The 1-based attempt number whose gate failure seeded the feedback. */
+  fromAttempt: number
+  /** The 1-based attempt number the feedback-informed retry dispatched. */
+  toAttempt: number
+  /** The failing gates whose recorded output composed the retry brief, in
+   *  job gate order. */
+  gates: string[]
+  /** sha256 of the exact composed retry-brief text — the bytes written to
+   *  `<retry attempt evidence dir>/retry-brief.txt` and wrapped, verbatim,
+   *  into the retry attempt's builder prompt (whose own exact-text hash is
+   *  that attempt's `promptVersion`, T-029). The T-030 `packetFingerprint`
+   *  pattern. */
+  fingerprint: string
 }
 
 // ---------- Schedule (T-009, spec §22:1329 — deterministic, persisted transitions) ----------

@@ -2858,6 +2858,187 @@ rendering, that is the producer ticket and it owns its own Gate 2 run).
 Gate 3 n/a (no adapter; the dashboard
 spawns no harness, so there is nothing to PWD-probe).
 
+## Gate 1.24 — bounded gate-failure retry (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-gate-retry.mjs
+```
+
+Pins T-038 (spec §24:1462's "unless a bounded repair policy applies",
+§30:1893's "retry same worker once"; **decisions.md 2026-10-21** — the entry
+this change-set lands, which rewrites the re-roll prohibition's scope inside
+the 2026-10-10 machine-gates decision along the blind-vs-informed line:
+blind re-rolls banned unchanged; ONE feedback-informed gate retry permitted
+under the flag; the feedback is the gates' own recorded output — no model
+composes or adjudicates it; the same Gate objects re-run unchanged on the
+retry; both legs recorded; the final attempt's verdict stands): the
+run-level `--gate-retry` flag (src/cli.ts, a plain boolean — no numeric
+knob, the `RetryPolicy` carve posture) grants each candidate exactly one
+additional attempt when its worker succeeded, the captured diff is
+non-zero, and at least one machine gate failed. The retryable leg's failure
+record is `reason: 'gates-failed'` (state `'failed'`) with its
+`GateResult[]` attached attempt-scoped (`Attempt.gateResults`, present ONLY
+on a non-final leg that ran gates) and persisted as evidence files; the
+composed brief — original brief + the captured diff (char-capped at
+`MAX_DIFF_CHARS` = 30 000, the reviewer-prompt precedent) + per failing
+gate its name, recorded command (`GateResult.command`, T-027), and
+`outputTail` (the 4000-byte tail) + the worker's attempt summary — is
+written to the retry attempt's evidence dir (`retry-brief.txt`), hashed as
+`gateRetry.fingerprint` (sha256 of the exact text, the T-030
+`packetFingerprint` pattern), and wrapped VERBATIM into the retry attempt's
+builder prompt (that attempt's `promptVersion` hashes the wrapped bytes —
+one composition, two consumers). `CandidateReport.brief` stays the ORIGINAL
+brief. The bound is one per candidate regardless of `--max-attempts`
+(total attempts ≤ maxAttempts + 1: a candidate that burned attempt 1
+mechanically and failed gates on attempt 2 still gets its one gate-retry —
+the mechanical condition `attempts.length < maxAttempts` is untouched). The
+run header carries `gateRetry: true` when the flag is set (absent
+otherwise, so a flag-less header is byte-identical) and recovery derives
+the retry bound from it. The check drives `runSkeleton` directly with a
+fake `WorkerAdapter` + fake gates (the Gate 1.8 pattern) against throwaway
+fixture repos, the real CLI with a token-free `machine` worker (the Gate
+1.17 S5 pattern, `--db` at a sandbox store), and the real `recover` CLI
+over synthetic dispatch evidence (the Gate 1.11 R5 pattern) — zero model
+tokens. It asserts:
+
+- **G1 — the flag fires exactly one feedback-informed retry** (the
+  fake-adapter core drive, `plannerModel: null` — the `--no-planner`
+  composition shape, where the original brief is the goal): a
+  worker-succeeded, non-zero-diff, gate-failed candidate gets attempt 2;
+  exactly two attempts, two worker executions; attempt 1 `state: 'failed'`
+  with `failure.reason: 'gates-failed'` (exit 1, not timed out) and
+  `attempt.gateResults` carrying all three gate results in job order
+  (failing ones false); the SAME gate objects re-ran unchanged (execution
+  order `build, lint, always-pass` twice — a retry never weakens, skips, or
+  substitutes a gate); attempt 2 `state: 'succeeded'`, no failure record,
+  NO attempt-scoped gateResults; attempt 2's values populate the report as
+  the final attempt (worker ok, gates pass, diff non-empty,
+  `workspacePath` = `wt/c01-a2`); `gateRetry` is exactly
+  `{fromAttempt: 1, toAttempt: 2, gates: ['build', 'lint'], fingerprint}`
+  (64-hex); the composed brief file exists in the retry attempt's evidence
+  dir and sha256-hashes EXACTLY to the recorded fingerprint (the
+  content pin: the brief provably contains every failing gate's name,
+  command, and outputTail — asserted on the file text — plus the original
+  brief, the captured diff, and the worker summary; it contains NO
+  passing-gate output); attempt 2's `promptVersion` equals
+  `sha256(builderPrompt(briefText, lease2))` recomputed in the check
+  (never the engine's composition path alone); attempt 2's
+  `inputContextHash` DIFFERS from attempt 1's (the brief differs — the
+  hash is doing its job), both 64-hex; each attempt's `outputArtifacts`
+  names its own paths including the brief file, all existing on disk;
+  attempt 1's `diff.patch` captured the pre-retry leg's work;
+  dispatch.jsonl keeps its line shapes (one run header with
+  `gateRetry: true`, two dispatch lines on fresh leases `wt/c01` /
+  `wt/c01-a2`, two ok completions with captured diffs — no new line
+  shapes).
+- **G2 — immunity faces** (flag set): a zero-byte-diff candidate is never
+  retried (one attempt, the no-op elimination, no block, no attempt
+  gateResults); a no-gates candidate is never retried (one attempt,
+  terminal); worker-failed legs retry under `--max-attempts` exactly as
+  before and never consume the gate-retry (fail-fail under maxAttempts 2 +
+  the flag = exactly two `worker-failed` attempts, no block); the
+  mechanical-then-gate-retry ladder (maxAttempts 2, worker fails once then
+  fails gates then fixes) runs THREE attempts = maxAttempts + 1 with leg
+  reasons `worker-failed`, `gates-failed` (attempt gateResults present),
+  `succeeded`, and the `gateRetry` block naming the a2 → a3 leg; a FAILED
+  diff capture is terminal (no captured diff = no feedback payload —
+  exactly today's elimination).
+- **G3 — final-attempt shapes byte-identical; flag-less runs unchanged**:
+  gates failing on BOTH legs = exactly two attempts, the retry consumed, no
+  attempt 3, the final attempt `succeeded` with failing candidate gates,
+  eliminated with `passedAllGates: false`, `error` undefined — no new
+  elimination vocabulary; a FLAG-LESS drive of the same scenario is
+  today's behavior verbatim — one attempt, eliminated, NO `gateRetry`
+  block, NO attempt-scoped gate fields, and a run header carrying NO
+  `gateRetry` key (Gate 1.8's S6 pin — "gates-fail-then-pass is never
+  re-rolled" — is the flag-less posture and stays green byte-for-byte; no
+  existing assertion was weakened).
+- **G4 — interactions**: `--rounds 2` (the shared-fake planner drive): the
+  retry lives inside round 1's ladder (c01-a1 gates-failed → c01-a2
+  survives), round 2 runs on the survivor (c01-r2), round ids and attempt
+  ids never collide (`c01-a1`/`c01-a2` vs `c01-r2-a1`), one branch per leg
+  across rounds (`swarm/wt-c01`, `swarm/wt-c01-a2`, `swarm/wt-c01-r2`), the
+  rounds block records both rounds executed with the right survivorIds, and
+  the retry brief file sits in the round-1 retry attempt's evidence dir;
+  `--jobs` mode retries per-job through the same `runJob` (a scheduled
+  two-job drive: the gate-failed job retries and survives with its block,
+  the straight-through job records one attempt and no block).
+- **G5 — the real CLI** (token-free `machine` worker end to end, the
+  fixture's committed gate script deciding, the machine command's
+  cwd-discriminating marker standing in for the converting fix):
+  `--help` documents `--gate-retry`; a `--jobs --gate-retry --no-review`
+  run exits 0 with the report on disk carrying both attempts (attempt 1
+  `gates-failed` with attempt gateResults), the `gateRetry` block, the
+  composed brief file hashing to the recorded fingerprint, and the
+  dispatch.jsonl header carrying `gateRetry: true` (the header-line
+  assertion through the real CLI); **the store leg** — the run ingested
+  into a sandbox DB without loss: two `attempts` rows (`failed` with the
+  gates-failed `failure_json`, then `succeeded`), one `gate_results` row
+  (the FINAL attempt's), one `passed_all_gates` candidate row, and no
+  `PERSISTENCE FAILED`; a flag-less real-CLI run of the same spec in a
+  separate fixture repo is today's behavior (one attempt, eliminated, no
+  block).
+- **G6 — recovery derives the retry bound from the header** (synthetic
+  dispatch.jsonl + the real `recover` CLI, the Gate 1.11 R5 pattern): with
+  `gateRetry: true` and the retry UNCONSUMED, `attemptsUsed 1` of a
+  declared `maxAttempts 1` is `retryable` (the bound is one attempt
+  taller); with the retry CONSUMED — an ok completion with a captured
+  non-zero diff followed by another dispatch, a shape only the retry leg
+  can produce (a mechanical retry never re-rolls an ok completion) — the
+  bound is `maxAttempts` again and 2 attempts is terminal
+  `bound-exhausted` (the consumed leg's own crash reads recorded-running
+  like any attempt); a header WITHOUT `gateRetry` keeps today's bound
+  verbatim (1 of 1 is terminal — unchanged); consumed at maxAttempts 2 →
+  2 of 2 terminal (no second retry owed); and the no-op verdict keeps
+  precedence under the flag (ok + diffBytes 0 is terminal no-op, never
+  re-rolled).
+
+**The store's tolerance, named (the ticket's verified-in-ticket duty):**
+the schema-v5 `attempts` table has no gate-results column, and this
+change-set adds none; a pre-retry leg's `GateResult[]` rides the report
+(`Attempt.gateResults`) and the attempt's evidence files as the durable
+copy, while the leg's `gates-failed` FailureRecord persists through the
+existing `failure_json` column. Ingest reads named fields only, so the
+additive field is tolerated structurally — pinned behaviorally by G5b's
+store leg (a retried candidate ingested without loss) and by Gate 1.6
+staying green (its fixtures carry no gateRetry blocks, and the hand-built
+retried variant is unchanged). The gap — attempt-scoped gate results are
+not queryable store columns — is recorded here, never silent; a successor
+that wants them queryable owns the schema change.
+
+**Red bar (AGENTS.md #8), recorded before the flag's code landed:** against
+the pre-change tree, this check ran with the flag's drives RED — the engine
+ignored the unknown option and ran today's ladder exactly: 9 assertion
+failures (`exactly two attempts recorded`, `attempt 1 failed with reason
+gates-failed`, the attempt-scoped gate results, the gates-re-ran-unchanged
+count, attempt 2's final-values faces, the `gateRetry` block shape, the
+composed-brief faces) ending in
+`ENOENT ... c01\attempt-2\retry-brief.txt` — no attempt 2, no block, no
+brief. That ENOENT is thrown inside G1, so the crash aborts `main()` and
+the check's G2–G6 legs NEVER EXECUTE in the red run — the immunity and
+flag-less faces are not observed green there; their green is established on
+the POST-change tree (G2, G3b, G5c above), and on the pre-change tree by
+the old bar: `check-retry.mjs` (Gate 1.8) ALL GREEN in the same window,
+whose S6 pins the pre-change posture verbatim ("a succeeded worker whose
+gates fail is never re-rolled — exactly one attempt").
+
+Not pinned here and carved by the ticket: per-job gate-retry policy in
+`--jobs` specs (the spec's `retryPolicy` stays `maxAttempts`-only,
+src/types.ts); numeric retry knobs; retrying `no-op`/zero-byte, `no-gates`,
+or worker-failed legs under this flag (worker-failed stays T-007's); any
+model involvement in composing or adjudicating the feedback (no model call
+added — the diagnostician is a template, which is why no model-verdict
+carve-out is needed); gate modification between attempts; session
+resumption (§11.1:875, `resumableSession` stays unproduced — a fresh
+session per attempt as today); verifier findings in the retry brief
+(T-040, the successor at the same composition seam); rounds beyond 2
+(decisions.md 2026-10-20, T-033); reviewer or review-ordering changes (the
+reviewer still sees only final `passedAllGates` candidates and the ORIGINAL
+brief). Gate 2 is OWED for this change-set (the runner's verdict-adjacent
+code + an optional report block are on its trigger list): the full tier's
+real run carries `--gate-retry` — see Gate 2's section. Gate 3 n/a (no
+adapter change; no new harness posture).
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
@@ -2868,7 +3049,25 @@ Runs a real two-tier skeleton run (GLM-5.3 planner + flash workers, 2
 candidates per round) on a fresh fixture — **a real 2-round run since T-030**
 (the ticket's mandate: this change-set touches `src/runner.ts` and report
 shape, and the loop must demonstrably run on real model tokens; the
-single-pass default stays pinned token-free by Gates 1.10/1.21/1.22) — then
+single-pass default stays pinned token-free by Gates 1.10/1.21/1.22) —
+**and a real `--gate-retry` run since T-038** (the ticket's mandate: the
+change-set touches the runner's verdict-adjacent code and adds an optional
+report block; Gate 1.24 pins the flag's mechanics token-free). The flag is
+INERT on any candidate whose gates pass first try — it fires only on a
+worker-succeeded, non-zero-diff, gate-FAILED candidate, exactly once per
+candidate — so it cannot weaken any assertion below: a retried candidate
+still must pass every gate to survive, and the unchanged ladder still
+decides. Worst-case runtime grows by one worker leg per gate-failed
+candidate, inside the ceiling below. Whether a given real run produces a
+genuine gate-failure → feedback retry → survival — or the retry fails to
+convert — is the staged empirical question T-038 records as open, not
+answered; both outcomes are honest Gate 2 outcomes, read off the run's
+`gateRetry` blocks and verdicts and recorded in the ticket's Landed
+section. **Recording pending at this change-set's landing:** the driving
+run had not executed when T-038 was reviewed (verified 2026-10-21 — no run
+dir under `C:\swarm\verify` carries the flag's dispatch header yet); the
+ticket's Landed section holds the recording block its `report.json` path
+and `gateRetry` outcome fill. Then
 asserts on the artifacts:
 
 - every candidate's worker exited 0 (both rounds' candidates),
@@ -3072,6 +3271,28 @@ landing in T-017's Landed section).
    with the check's captured `FAIL: <name>` line before any code change
    is considered, and the honest classification until then is a
    loud-by-design one-off, benign, evidence-only.
+   **2026-10-21 third observation (T-038 lane, final-tree fast tier) —
+   the threshold's captured line arrived; classification unchanged.**
+   The T-038 lane's fast tier aborted at Gate 1.12 with three failing
+   assertions, this time CAPTURED (the tier ran to the check's own summary
+   and the names are on record): `FAIL: S4: no cleanup failures on a
+   verified kill`, `FAIL: S4: log carries the verified kill line`,
+   `FAIL: S4: log carries no CLEANUP FAIL` — while the SAME scenario's
+   process-table assertions stayed green (`whole tree dead (root, mid,
+   leaf)`, `all three pids dead`): the recorded `CLEANUP FAIL` lines sat
+   on a tree that verifiably died, the exact signature this issue was
+   opened with. The T-038 change-set touches no kill-tree file (its diff:
+   src/types.ts, src/runner.ts, src/cli.ts, src/recover.ts,
+   scripts/check-gate-retry.mjs, scripts/verify.mjs, docs). The response
+   was a re-run, not a code change: the immediate re-run of the identical
+   tree was ALL GREEN (exit 0, 108 s). Three observations, six days,
+   different lanes, zero shared change-set code — and the class has now
+   delivered its captured line, so the condition this ledger set for
+   considering a code change is MET on the next recurrence: the next
+   observation should carry a diagnosis of the triggering line (the
+   snapshot/kill window vs an already-gone root) before any edit, and
+   until that diagnosis the classification stays loud-by-design,
+   benign, evidence-only.
 11. **A one-off Gate 1.17 red with a single failed assertion, not
    reproducible (observed once, 2026-10-18, T-021 lane review round 1).**
    One fast-tier run failed inside `scripts/check-machine-worker.mjs` — exit

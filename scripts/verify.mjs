@@ -893,6 +893,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.24: bounded gate-failure retry (T-038) ----------
+section('Gate 1.24 — bounded gate-failure retry (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-gate-retry.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'gate-retry self-check exit 0')
+} catch (e) {
+  fail(`gate-retry self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
@@ -912,6 +922,16 @@ const skeletonArgs = [
   // on a real run). The single-pass default stays pinned token-free by
   // Gates 1.10/1.21/1.22.
   '--rounds', '2',
+  // T-038: Gate 2 is a real --gate-retry run (the ticket's mandate — the
+  // change-set touches the runner's verdict-adjacent code and adds an
+  // optional report block). The flag is INERT on any candidate whose gates
+  // pass first try (it fires only on a worker-succeeded, non-zero-diff,
+  // gate-FAILED candidate, exactly once), so it changes nothing about a
+  // passing run; on a gate-failed candidate it grants one feedback-informed
+  // attempt and the unchanged ladder still decides survival. Whether a real
+  // run produces a genuine gate-failure -> retry -> survival is the staged
+  // empirical question, recorded honestly either way.
+  '--gate-retry',
   '--run-root', verifyRoot.replace(/\//g, '\\'),
 ]
 console.log('$ tsx src/cli.ts', skeletonArgs.slice(3).join(' '))

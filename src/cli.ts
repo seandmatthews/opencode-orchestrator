@@ -89,8 +89,22 @@ Options:
                            non-zero exit/timeout or thrown error) as a fresh
                            attempt in a fresh worktree, up to n total
                            attempts per candidate (default: 1; values < 1
-                           refused). Verdicts (no-op, gates-failed) are
-                           never retried.
+                           refused). Mechanical failures only; verdicts are
+                           never blindly re-rolled (--gate-retry adds the
+                           one bounded exception).
+  --gate-retry             Grant each candidate EXACTLY ONE extra attempt
+                           when its worker succeeded but the machine gates
+                           rejected the change (T-038): the retry brief is
+                           composed mechanically from the gates' own
+                           recorded output (name, command, output tail)
+                           plus the captured diff, and the same gates re-run
+                           unchanged on the retry. Blind re-rolls stay
+                           banned: zero-byte diffs, no-gates candidates, and
+                           failed diff captures are never retried, and a
+                           retry that fails again is eliminated by the
+                           unchanged ladder. Total attempts per candidate <=
+                           --max-attempts + 1. The report's retried
+                           candidates carry an additive "gateRetry" block.
   --clean                  Dispose candidate workspaces after evidence capture
   --opencode-bin <path>    Override the opencode executable path
 
@@ -123,6 +137,8 @@ interface Options {
   db: string
   timeoutMs: number
   maxAttempts: number
+  /** T-038: the one bounded feedback-informed gate retry per candidate. */
+  gateRetry: boolean
   clean: boolean
   gates: { name: string; command: string }[]
   opencodeBin: string
@@ -168,6 +184,7 @@ function parseArgs(argv: string[]): Options {
     db: 'C:\\swarm\\refinery.db',
     timeoutMs: 15 * 60_000,
     maxAttempts: 1,
+    gateRetry: false,
     clean: false,
     gates: [],
     opencodeBin: '',
@@ -235,6 +252,13 @@ function parseArgs(argv: string[]): Options {
         opts.maxAttempts = n
         break
       }
+      case '--gate-retry':
+        // T-038: a run-level boolean — no numeric knob (the RetryPolicy
+        // carve posture, src/types.ts). Accepted in every mode: --jobs
+        // rides the same runJob per job, --no-planner composes from the
+        // raw goal, and the retry lives inside each round's ladder.
+        opts.gateRetry = true
+        break
       case '--clean': opts.clean = true; break
       case '--opencode-bin': opts.opencodeBin = value(); break
       case '--gate': {
@@ -464,6 +488,9 @@ async function runPipeline(opts: Options, jobsSpec: JobsSpec | null): Promise<vo
     rounds: opts.rounds,
     timeoutMs: opts.timeoutMs,
     maxAttempts: opts.maxAttempts,
+    // T-038: the bounded gate-failure retry flag; false (the default) =
+    // today's ladder exactly.
+    gateRetry: opts.gateRetry,
     gates: opts.gates.map((g) => new CommandGate(g.name, g.command)),
     worker: createWorker(opts.workerId, opts),
     // T-025: a non-default advisory role builds its own adapter through the
