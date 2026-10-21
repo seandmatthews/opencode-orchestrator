@@ -272,7 +272,7 @@ if (!out.flagged && draft !== null) {
       "- docs/tickets/README.md\n" +
       "\nCommit message: docs(tickets): " + ticket.title + " (" + ticket.id + ")\n" +
       "This machine has NO global git identity — commit with:\n" +
-      "git -c user.name=matth -c user.email=matth@local commit -m \"docs(tickets): " + ticket.title + " (" + ticket.id + ")\"\n" +
+      "git -c user.name=matth -c user.email=matthews.sean.d@gmail.com commit -m \"docs(tickets): " + ticket.title + " (" + ticket.id + ")\"\n" +
       "Never push, never rebase, never stage unrelated files. If anything unexpected is already staged or the commit fails, git reset to a clean staged-nothing state and return status blocked with the reason. Return the CommitResult (short hash in commit).",
   );
   if (committed.status !== "committed") {

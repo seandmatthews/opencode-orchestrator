@@ -8,7 +8,7 @@ args:
 */
 const repo = "C:/Users/matth/Documents/opencode-orchestrator";
 const laneRoot = "C:/Users/matth/Documents/orchestrator-lanes";
-const IDENTITY = ["-c", "user.name=matth", "-c", "user.email=matth@local"];
+const IDENTITY = ["-c", "user.name=matth", "-c", "user.email=matthews.sean.d@gmail.com"];
 // Every gate run's output is teed to a file here (2026-10-21 lesson: the first
 // auto-revert, T-032, lost its red output entirely — the journal keeps only
 // sliced tails, and the tree reproduced green afterward, so the bar is gone).
@@ -156,7 +156,7 @@ for (const t of queue) {
     "",
     "While iterating, run in the lane: node scripts/verify.mjs fast (Gate 0+1, seconds) at minimum, plus any pinned fast-tier gate the ticket names. Do NOT run verify:full yourself — the driving script re-runs the fast tier after you, and runs the full e2e gate (real model tokens, minutes) when the pipeline is touched; report touchesPipeline honestly.",
     "",
-    "Commit on the lane branch: git -c user.name=matth -c user.email=matth@local commit, message \"feat(<scope>): <description> (" + t.id + ")\". A claimed-but-red gate will bounce the lane, so report honestly. Reply with the structured result.",
+    "Commit on the lane branch: git -c user.name=matth -c user.email=matthews.sean.d@gmail.com commit, message \"feat(<scope>): <description> (" + t.id + ")\". A claimed-but-red gate will bounce the lane, so report honestly. Reply with the structured result.",
   ].join("\n");
 
   let impl: LaneImpl | null = null;
