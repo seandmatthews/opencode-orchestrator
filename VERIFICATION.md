@@ -1331,7 +1331,11 @@ command recording quantitative durations), and, since T-019,
 command whose PNG is copied under the run artifacts dir), and, since T-024,
 `WebProbe` (the first launch-without-awaiting-exit lifecycle: a long-running
 server target launched, readiness-polled, HTTP-captured, and
-verified-torn-down under one timeout budget) — the bundle
+verified-torn-down under one timeout budget), and, since T-032,
+`AdversarialProbe` (the first probe whose evidence is about generated
+inputs: `ADVERSARIAL_PROBE_CASE_COUNT` seeded, replayable fuzz cases fed
+over argv, each case's crash/survival recorded — a crash list recomputable
+from the seed alone) — the bundle
 validator, the
 evidence writer, and the minimal `--jobs` wiring. The seam
 module's docblock chooses and documents the vocabulary the spec uses but
@@ -1346,22 +1350,26 @@ Probes produce evidence; survival still belongs to machine gates
 diffBytes > 0`) is byte-identical and a probe result, including a
 success:false bundle, never enters any verdict. No new CLI flags: probes
 attach via the `--jobs` spec's per-job `probes` array
-(`{id, type: "command"|"test"|"benchmark"|"screenshot"|"web", command: {exe,
-args}, timeoutMs?, repeats?, capture?, url?}` — `repeats` is required positive
+(`{id, type: "command"|"test"|"benchmark"|"screenshot"|"web"|"adversarial", command: {exe,
+args}, timeoutMs?, repeats?, capture?, url?, seed?}` — `repeats` is required positive
 integer ≥ 1 on a benchmark
-probe and refused on command/test/screenshot/web probes, the field existing only where it
+probe and refused on command/test/screenshot/web/adversarial probes, the field existing only where it
 means something; `capture` is required non-empty workspace-relative on a
 screenshot probe (absolute paths and `..` segments refused — the evidence
 contract stays local to the disposable workspace; the durable copy is the
-probe's job) and refused on command/test/benchmark/web probes; `url` is
+probe's job) and refused on command/test/benchmark/web/adversarial probes; `url` is
 required non-empty http(s) on a web probe and refused on
-command/test/benchmark/screenshot probes (T-024 — the one probe field
+command/test/benchmark/screenshot/adversarial probes (T-024 — the one probe field
 pointing outside the workspace, its operator-chosen port machine-global);
+`seed` is required positive integer ≥ 1 on an adversarial probe and refused
+on command/test/benchmark/screenshot/web probes (T-032 — a fuzz run with no
+seed is not replayable, so it is not an adversarial probe);
 ids match
 the job-id charset because they name evidence files; default timeout 5 min,
-the CommandGate default, a PER-REPEAT budget on a benchmark and a
+the CommandGate default, a PER-REPEAT budget on a benchmark, a
 WHOLE-LIFECYCLE budget (launch → readiness poll → capture → teardown) on a
-web probe); default
+web probe, and a PER-CASE budget on an adversarial (total wall time bounded
+by case count × timeoutMs)); default
 `--goal` mode has none, so default-mode
 reports are unchanged. Zero new npm dependencies; every probe subprocess is
 list-form `spawn` (never `exec`) with the T-011 verified tree kill at
@@ -1422,7 +1430,53 @@ even on later failure faces). Artifacts: the standard `.log` (launch banner
 + poll attempts + child output + capture/teardown outcome) plus
 `<probeId>.response.json`, kind `'report'` (the kind's second producer:
 `{url, status, contentType?, bodySnippet, bodyBytes}` — the bounded snippet
-keeps the file bounded whatever the served body was).
+keeps the file bounded whatever the served body was). T-032's adversarial
+semantics (the spec names "adversarial probes" in Milestone-8's add list,
+§34:2139, and nowhere defines them — chosen and documented in the
+`src/probe.ts` module docblock): the scenario carries `seed`, a required
+positive integer ≥ 1 — the input of the exported, pure
+`generateAdversarialCases`, which expands it into a byte-identical,
+replayable case list of exactly `ADVERSARIAL_PROBE_CASE_COUNT` = 20 cases.
+JS has no stdlib seeded PRNG and the zero-new-deps posture (decisions.md
+2026-10-10) forbids `seedrandom`, so the module chooses and documents one:
+mulberry32, a ~6-line 32-bit integer-math PRNG, driving a documented
+case-mix recipe — the seed-independent `ADVERSARIAL_EDGE_CORPUS` (the empty
+string; control characters; non-ASCII; numeric edges such as
+`'NaN'`/`'Infinity'`/`'1e308'`/`'-0'`; malformed-JSON-looking strings) in
+corpus order, then PRNG-driven ASCII-soup strings and corpus permutations
+(seeded Fisher-Yates shuffles, first two entries joined with a space) up to
+the count. Each case runs SEQUENTIALLY through the unchanged
+`executeProbeCommand` core, appended to the scenario command's args (the
+core has no stdin — argv-feeding changes nothing shared; stdin is carved),
+each with the FULL `timeoutMs` budget. Crash/survival vocabulary: a case
+SURVIVES when the target spawned cleanly, exited 0, and did not time out; it
+CRASHES when it ran and exited non-zero or timed out; a SPAWN-REFUSED case
+produced no run — neither survived nor crashed (a target cannot crash on an
+input it never received). Success = the case list non-empty AND every case
+spawned cleanly AND every case survived; zero completed cases is
+success:false, never a pass (AGENTS.md #7); `error` names the FIRST breaking
+case with counts ("case 3/20 exited with code 1" / "case 5/20 timed out
+after Nms" / "case 1/20 could not be spawned: ENOENT"). Measurements
+recorded regardless of success — evidence about crashes is the point: one
+`case-<i> duration` (ms) per case that actually ran, plus `cases-run` and
+`cases-crashed` counts (unit `'cases'`). Artifacts: the combined `.log` with
+`=== case <i> ===` separators plus `<probeId>.results.json`, kind
+`'report'` (the kind's THIRD producer): `{probeId, scenarioId, seed, cases:
+[{index, input, outcome, durationMs?}], casesRun, casesCrashed}` with
+outcome ∈ survived | crashed-exit | crashed-timeout | spawn-refused and
+every input truncated to `ADVERSARIAL_PROBE_MAX_CASE_CHARS` = 8192 — cases
+ride argv and Windows bounds a spawned command line (CreateProcess's ~32k
+limit), so the constant bounds the probe's contribution with margin (the
+operator's base `command` is expected to stay small — documented
+limitation). gateResults: one entry per case, in case order, named
+`'<probeId>#case-<i>'` (the `'<id>#run-<i>'` precedent) — the crash list is
+machine-readable from the failed rows. NO verdict input of any kind: the
+pipeline is type-agnostic (`runProbes` iterates `job.probes` with no type
+switch; `probe_runs` ingest has no type knowledge; `ProbeRunSummary` is
+type-agnostic), and a success:false adversarial bundle changes nothing
+downstream — adversarial findings advise the human and the round-2 planner
+(the T-030 composer already renders probe summaries into round-2 evidence
+with zero composer edits).
 
 T-018's flip, recorded: Gate 1.15's P2 leg previously ACTIVELY PINNED
 `type: 'benchmark'` as refused (`type must be "command" or "test"`). The
@@ -1464,6 +1518,23 @@ existing per-job probes[] length/order pins were EXTENDED (job-a 4→5
 probes, job-b 3→4) to carry the new web probes — coverage added, nothing
 weakened (the T-019 label-correction precedent for drive-extending edits).
 
+T-032's flip, recorded — this change-set's only intentional invalidation of
+an existing assertion: Gate 1.15's P2 leg actively pinned the unknown-type
+refusal message (`type must be "command", "test", "benchmark", "screenshot",
+or "web"` — the message T-024's landing left behind, with `'godot'` as the
+unknown-type example since T-019). The adversarial probe now exists, so that
+one assertion was flipped explicitly in T-032's change-set: the expected
+message became `type must be "command", "test", "benchmark", "screenshot",
+"web", or "adversarial"` and `'godot'` stays genuinely unknown and remains
+the example (only the message string changed — exactly T-024's flip shape),
+and the flip gained positive coverage (an adversarial probe with `seed`
+parses and is preserved verbatim). Net strictness increases (the T-013 flip
+precedent); no other existing check was weakened. The P5 drive's existing
+per-job probes[] length/order pins were EXTENDED (job-a 5→6 probes, with the
+adversarial probe the FAILING one — a passing-gates/failing-adversarial job
+still passes) to carry the new adversarial probe — coverage added, nothing
+weakened (the T-024 extension precedent).
+
 No existing gate can pin any probe criterion — Gate 2 is a `--goal`-mode run
 that exercises no probe code (probe emission rides `--jobs` runs), so this
 gate has three legs, all token-free:
@@ -1485,14 +1556,16 @@ gate has three legs, all token-free:
   legitimately so);
   `parseJobsSpec` accepts a well-formed
   `probes` array verbatim — since T-018 including a benchmark probe with
-  `repeats`, since T-019 a screenshot probe with `capture`, and since T-024
-  a web probe with `url`, each
+  `repeats`, since T-019 a screenshot probe with `capture`, since T-024
+  a web probe with `url`, and since T-032 an adversarial probe with
+  `seed`, each
   preserved verbatim — parses a probe-less spec to output
   byte-identical JSON to today, and refuses a genuinely-unknown probe type
   with the updated message (`type must be "command", "test", "benchmark",
-  "screenshot", or "web"` since T-024's flip; the unknown-type example is a
+  "screenshot", "web", or "adversarial"` since T-032's flip; the unknown-type example is a
   type still unknown at the
-  landing — `'godot'` since T-019, still unknown at the T-024 landing),
+  landing — `'godot'` since T-019, still unknown at the T-024 and T-032
+  landings),
   malformed entries
   (non-object, probes non-array, missing exe, non-string args, bad
   timeoutMs), duplicate probe ids per job, probe-id charset violations,
@@ -1505,7 +1578,10 @@ gate has three legs, all token-free:
   and `capture` on a command/test/benchmark probe refused, and T-024's
   `url` shape rule: missing/empty/non-string/non-http(s)-scheme
   (`ftp://host/`, URL junk) on a web probe all refused naming the offense,
-  and `url` on a command/test/benchmark/screenshot probe refused;
+  and `url` on a command/test/benchmark/screenshot probe refused, and
+  T-032's `seed` shape rule: missing/0/-1/1.5/non-number (`'seven'`) on an
+  adversarial probe all refused naming the offense, and `seed` on a
+  command/test/benchmark/screenshot/web probe refused;
 - **direct token-free executions**: on a fresh demo-target fixture
   (scripts/demo-target.mjs, Gate 1's own generator) `CommandProbe{node
   build.js}` yields success true, exitCode 0, exactly one GateResult entry,
@@ -1600,7 +1676,41 @@ gate has three legs, all token-free:
   child) verified dead on the real process table** — the tree kill is what
   reaps a launched server — kill evidence on the GateResult entry; every
   leg sweeps its fixture server (no process left alive, the P4 sweep
-  fallback).
+  fallback). T-032's `AdversarialProbe` pins, on a generated known-weak-spot
+  fuzzee fixture in the verify sandbox (the T-024 write-and-run pattern —
+  zero-dep scripts generated per leg, no checked-in fixture; the fuzzee
+  exits non-zero exactly on inputs failing `Number.isFinite(Number(arg))`,
+  the same weak-spot class as the real demo target's `add()`:
+  scripts/demo-target.mjs:15-35, and this check derives the expected crash
+  subset INDEPENDENTLY from the recomputed case list, never from the
+  bundle): determinism/replayability, token-free — the exported
+  `generateAdversarialCases` invoked twice with the same seed returns
+  byte-identical lists of exactly `ADVERSARIAL_PROBE_CASE_COUNT`; over
+  several seeds every generated case's length is ≤
+  `ADVERSARIAL_PROBE_MAX_CASE_CHARS`; the probe's recorded per-case table
+  inputs match the independently recomputed list case-for-case (every
+  recorded input bounded); two same-seed probe runs against the same
+  fixture agree case-for-case on outcome (a replayable crash list). The
+  crash face: the weak-spot fixture crashes on the known subset → success
+  false, `error` names the FIRST breaking case with counts, exactly that
+  subset recorded as failed `'<id>#case-<i>'` rows (every other row
+  passed), `cases-crashed` equals the subset size, `cases-run` the full
+  count, one `case-<i> duration` per ran case, and the `'report'`-kind
+  results artifact `<id>.results.json` on disk parsing to
+  `{probeId, scenarioId, seed, cases[], casesRun, casesCrashed}` whose
+  per-case outcomes match the independently-derived subset. The no-crash
+  face: a robust fixture → success true, `cases-crashed` 0, every
+  `'<id>#case-<i>'` row passed, the bundle validator-clean. The
+  spawn-refusal / zero-completed face: a non-existent exe → success false,
+  zero `case-<i>` duration measurements, `cases-run` 0, every row
+  spawn-refused, `error` naming case 1, never a pass (AGENTS.md #7). The
+  timeout face (the P4 sleeper pattern with its process-table assertions):
+  a generated target sleeping past `timeoutMs` on exactly one case → that
+  case's GateResult exitCode null, durationMs ≥ timeoutMs, its duration
+  still recorded, `cases-crashed` 1, the spawned tree verified dead on the
+  real process table, kill evidence on that case's entry; a directly
+  constructed adversarial scenario without `seed` is refused by the class
+  itself, never silently run.
 - **evidence emission in a real pipeline** (the Gate 1.8/1.10 pattern —
   `runSkeleton` driven end-to-end with a fake `WorkerAdapter` and fake
   gates against throwaway fixture repos): a `--jobs` run carrying probes
@@ -1630,7 +1740,19 @@ gate has three legs, all token-free:
   artifacts dir — NEVER inside the candidate worktree (pinned against the
   report's `workspacePath`) — parsing to the captured body snippet; and a
   passing-gates/FAILING-web job still passes (the web outcome never enters
-  a verdict); default mode records no `probes`
+  a verdict); since T-032 a `--jobs` drive carrying an adversarial probe
+  (the fixture repo's own weak-spot fuzzee, seed 7, FAILING by
+  construction) pins: the adversarial bundle on disk, validator-clean
+  (success false), its summary agreeing (a passing-gates/FAILING-adversarial
+  job still passes — the adversarial outcome never enters a verdict), one
+  `'<id>#case-<i>'` GateResult row per case, `error` naming the FIRST
+  breaking case, the `cases-run`/`cases-crashed` counts matching the
+  independently recomputed seed-7 list, and the on-disk `'report'` results
+  artifact under the artifacts dir — NEVER inside the candidate worktree
+  (pinned against the report's `workspacePath`) — parsing to
+  `{probeId, scenarioId, seed, cases[], casesRun, casesCrashed}` with every
+  recorded input bounded by `ADVERSARIAL_PROBE_MAX_CASE_CHARS` and matching
+  the recomputed list case-for-case; default mode records no `probes`
   field and no `probes/` dir.
 
 Not pinned here and carved by the ticket(s): Godot/Blender probes
@@ -2485,9 +2607,13 @@ producer); no candidate lineage/generation records and no
 store keeps persisting verdicts only — the Gate 1.6 extension above); no
 new WorkerAdapter or harness code and no execution-policy change
 (decisions.md 2026-10-10 — both honored by construction); n ≤ 2; no
-adversarial probes; no memoization; and no claim that a feedback round
+memoization; and no claim that a feedback round
 IMPROVES outcomes — that is the empirical question the first real run
-exists to answer, recorded in T-030's Landed section. Gate 2 is mandated
+exists to answer, recorded in T-030's Landed section. (The "no adversarial
+probes" carve this paragraph carried at T-030's landing dropped in T-032's
+change-set: adversarial probes exist since T-032 — evidence-only, never a
+verdict input, no loop — pinned by Gate 1.15's T-032 legs above, exactly
+the move T-030:95's carve anticipated.) Gate 2 is mandated
 for this change-set (`src/runner.ts` and report shape are on its trigger
 list): `verify:full` runs a real 2-round loop — see Gate 2's section; the
 run itself is the driving run, recorded in T-030's Landed section. Gate 3

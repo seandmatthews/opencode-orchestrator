@@ -159,6 +159,77 @@
 //     pixel-content assertion are successor slices (§6.8:480-481). No
 //     verdict input of any kind: a success:false screenshot bundle changes
 //     nothing downstream (decisions.md 2026-10-10).
+//   - Adversarial semantics (T-032; the spec names "adversarial probes" in
+//     Milestone-8's add list (§34:2139) and run step 9 (§1:29) with ZERO
+//     definition — §24's Phase-9 examples are Godot-game scenarios and §25's
+//     workflow-level `adversarial` phase is not a landed scheduler concept;
+//     chosen and documented here, the T-007/T-012/T-013/T-018/T-019/T-024
+//     precedent). The scenario carries `seed`: a REQUIRED positive integer
+//     >= 1 on an adversarial probe, REFUSED on every other type (the
+//     repeats/capture/url precedent) — a fuzz run with no seed is not
+//     replayable, so it is not an adversarial probe. The probe actively
+//     tries to break the target: generateAdversarialCases(seed) expands the
+//     seed into N = ADVERSARIAL_PROBE_CASE_COUNT deterministic, replayable
+//     input cases. JS has no stdlib seeded PRNG (zero-new-deps posture,
+//     decisions.md 2026-10-10 — no Chance, no seedrandom), so this module
+//     CHOOSES one: mulberry32, a ~6-line 32-bit PRNG (integer math only,
+//     Math.imul), seeded from the integer seed. The documented case-mix
+//     recipe it drives: the seed-independent ADVERSARIAL_EDGE_CORPUS in
+//     corpus order (the empty string; control characters; non-ASCII; numeric
+//     edges such as 'NaN'/'Infinity'/'1e308'/'-0'; malformed-JSON-looking
+//     strings), then PRNG-driven ASCII-soup strings (printable-ASCII
+//     alphabet, seeded length) and corpus permutations (seeded Fisher-Yates
+//     shuffles of the corpus, first two entries joined with a space) up to
+//     the case count. Same seed → byte-identical case list, every time, on
+//     every platform (no wall clock, no Math.random, no locale — the
+//     rounds-composer determinism contract); the list is recomputable by
+//     any consumer from the seed alone, and Gate 1.15 recomputes it and
+//     pins byte-equality. Each case runs SEQUENTIALLY, appended to the
+//     scenario command's args, through the shared executeProbeCommand core
+//     (list-form spawn, AGENTS.md #4, the T-011 verified tree kill at
+//     expiry — NO second spawn path is forked and the shared core is
+//     unchanged; it has no stdin support, which makes argv-feeding the path
+//     of least change — stdin is carved). Each case gets the FULL timeoutMs
+//     budget (default DEFAULT_PROBE_TIMEOUT_MS) — a per-case budget, total
+//     wall time bounded by case count × timeoutMs (the BenchmarkProbe
+//     per-repeat budget posture). Crash/survival vocabulary: a case
+//     SURVIVES when the target spawned cleanly, exited 0, and did not time
+//     out; it CRASHES when it ran and exited non-zero or timed out; a
+//     SPAWN-REFUSED case (e.g. ENOENT) produced NO run — neither survived
+//     nor crashed (a target cannot crash on an input it never received). A
+//     case that crashes still ran: its durationMs is real wall-clock
+//     evidence. Success = the case list is non-empty AND every case spawned
+//     cleanly AND every case survived (the no-crash target passes); zero
+//     completed cases is success: false, NEVER a pass (AGENTS.md #7 applied
+//     to bundles). `error` names the FIRST breaking case with counts ("case
+//     3/20 exited with code 1" / "case 5/20 timed out after Nms" / "case
+//     1/20 could not be spawned: ENOENT"). Measurements are recorded
+//     regardless of success — evidence about crashes is the point: one
+//     `case-<i> duration` (unit ms) per case that actually ran, plus
+//     `cases-run` and `cases-crashed` counts (unit 'cases'). Artifacts: the
+//     combined output of all cases in one .log artifact with `=== case <i>
+//     ===` separators, plus one 'report'-kind per-case table artifact
+//     <probeId>.results.json (the kind's THIRD producer):
+//     {probeId, scenarioId, seed, cases: [{index, input, outcome,
+//     durationMs?}], casesRun, casesCrashed} with outcome ∈ survived |
+//     crashed-exit | crashed-timeout | spawn-refused and every recorded
+//     input truncated to ADVERSARIAL_PROBE_MAX_CASE_CHARS — cases ride argv
+//     and Windows bounds a spawned command line (CreateProcess's ~32k
+//     limit), so that constant bounds every emitted case with margin (the
+//     operator's base command is expected to stay small — documented
+//     limitation), and the truncation keeps the evidence bounded whatever
+//     the case was (the WEB_PROBE_SNIPPET_BYTES posture; case content is
+//     artifact material, never a measurement). gateResults: one GateResult
+//     entry per case, in case order, named '<probeId>#case-<i>' (the
+//     '<id>#run-<i>' precedent) so each case's evidence row is self-naming
+//     — the crash list is machine-readable from the failed rows. NO verdict
+//     input of any kind: the ladder (src/runner.ts passedAllGates) is
+//     untouched by construction, the pipeline is type-agnostic (runProbes
+//     iterates job.probes with no type switch), probe_runs ingest has no
+//     type knowledge, and a success:false adversarial bundle changes
+//     nothing downstream (decisions.md 2026-10-10: gates decide survival;
+//     adversarial findings advise the human and the round-2 planner via the
+//     T-030 composer's probe-summary rendering).
 //
 // Every probe subprocess is list-form `spawn` (never `exec` — AGENTS.md #4,
 // stricter than CommandGate's operator-typed shell strings), with the T-011
@@ -177,16 +248,20 @@ import type { GateResult, WorkspaceLease } from './types.js'
  *  `screenshot` with T-019 — the first directly human-reviewable evidence;
  *  `web` with T-024 — the first launch-without-awaiting-exit lifecycle: a
  *  long-running server target, readiness-polled and verified-torn-down
- *  under one timeout budget). Godot/Blender probes and browser-automation
- *  Web proper (§12.1:925-935) are successor slices. */
-export type ProbeType = 'command' | 'test' | 'benchmark' | 'screenshot' | 'web'
+ *  under one timeout budget; `adversarial` with T-032 — spec §34:2139's
+ *  Milestone-8 "adversarial probes" add: seeded, replayable fuzz cases fed
+ *  over argv, recording which cases the target survived and which it
+ *  crashed on). Godot/Blender probes and browser-automation Web proper
+ *  (§12.1:925-935) are successor slices. */
+export type ProbeType = 'command' | 'test' | 'benchmark' | 'screenshot' | 'web' | 'adversarial'
 
 /** Kind of an evidence artifact file (§12.1 names logs, screenshots, video).
  *  Producers so far write `log` (every probe's combined output), `report`
- *  (T-018's benchmark per-run results table — that kind's first producer),
- *  and `screenshot` (T-019's durable image copy under the run artifacts
- *  dir — that kind's first producer); the vocabulary is documented, not
- *  grown speculatively. */
+ *  (T-018's benchmark per-run results table — that kind's first producer,
+ *  T-024's web capture record its second, T-032's adversarial per-case
+ *  table its third), and `screenshot` (T-019's durable image copy under the
+ *  run artifacts dir — that kind's first producer); the vocabulary is
+ *  documented, not grown speculatively. */
 export type EvidenceArtifactKind = 'log' | 'report' | 'screenshot'
 
 /** The probe's configuration, as written in the --jobs spec (§12:891-893's
@@ -227,6 +302,15 @@ export interface ScenarioSpec {
    *  `capture` precedent). Enforced by parseJobsSpec (src/scheduler.ts);
    *  this type carries it optionally because the union is shared. */
   url?: string
+  /** Adversarial probes only (T-032): REQUIRED, a positive integer >= 1 —
+   *  the seed generateAdversarialCases expands into the fixed,
+   *  byte-identical, replayable case list the probe feeds over argv. A fuzz
+   *  run with no seed is not replayable, so it is not an adversarial probe.
+   *  REFUSED on every other probe type: the field exists only where it
+   *  means something (the `repeats` / `capture` / `url` precedent).
+   *  Enforced by parseJobsSpec (src/scheduler.ts); this type carries it
+   *  optionally because the union is shared. */
+  seed?: number
 }
 
 /** The run-level context a probe needs beyond the workspace (§12:891-893's
@@ -321,6 +405,23 @@ export const WEB_PROBE_MAX_BODY_BYTES = 1024 * 1024
  *  served body was (the validator accepts any finite measurement value,
  *  so body content is an artifact, never a measurement). */
 export const WEB_PROBE_SNIPPET_BYTES = 2048
+
+/** The adversarial probe's case count (T-032, pinned by Gate 1.15): the
+ *  documented case-mix size — the seed-independent ADVERSARIAL_EDGE_CORPUS
+ *  in corpus order, then PRNG-driven ASCII-soup strings and corpus
+ *  permutations up to this count. Every adversarial probe feeds exactly
+ *  this many cases (see the module docblock's adversarial semantics). */
+export const ADVERSARIAL_PROBE_CASE_COUNT = 20
+
+/** The adversarial probe's max-case-length bound (T-032, pinned by Gate
+ *  1.15, beside the web probe's bounds above): the generator never emits a
+ *  case longer than it, and the per-case report truncates recorded inputs
+ *  to it. Cases ride argv and Windows bounds a spawned command line
+ *  (CreateProcess's ~32k limit) — the constant bounds the probe's
+ *  contribution with margin; the operator's base `command` is expected to
+ *  stay small (documented limitation). Evidence stays bounded whatever the
+ *  case was (the WEB_PROBE_SNIPPET_BYTES posture). */
+export const ADVERSARIAL_PROBE_MAX_CASE_CHARS = 8192
 
 /** Tail length for a GateResult's outputTail — the CommandGate shape. */
 const TAIL_BYTES = 4000
@@ -1315,9 +1416,275 @@ export class WebProbe implements Probe {
   }
 }
 
+// ---------- AdversarialProbe: the seeded argv-fuzz probe (T-032) ----------
+
+/** One recorded adversarial case (T-032): what was fed and what happened.
+ *  `durationMs` is present only when the case actually ran — a
+ *  spawn-refused case produced no run (a target cannot crash on an input
+ *  it never received), so it carries neither survived nor crashed
+ *  vocabulary and no duration. */
+interface AdversarialCaseRecord {
+  index: number
+  input: string
+  outcome: 'survived' | 'crashed-exit' | 'crashed-timeout' | 'spawn-refused'
+  durationMs?: number
+}
+
+/** The seed-independent edge-case corpus (T-032, the documented mix's fixed
+ *  part — see the module docblock's adversarial semantics): the empty
+ *  string, control characters, non-ASCII, numeric edges, and
+ *  malformed-JSON-looking strings, in corpus order. The seeded randomized
+ *  portion (ASCII soup + corpus permutations) fills the list up to
+ *  ADVERSARIAL_PROBE_CASE_COUNT. */
+const ADVERSARIAL_EDGE_CORPUS: readonly string[] = [
+  '',
+  'a\tb\nc\x01d',
+  'ünïcödé ✓ 中文 🙃',
+  'NaN',
+  'Infinity',
+  '1e308',
+  '-0',
+  '0x10',
+  '1,000',
+  '{"a":',
+  '[1,2,',
+  '"unterminated',
+]
+
+/** The ASCII-soup alphabet (T-032): printable ASCII only, no whitespace —
+ *  fixed and order-stable, so soup output is byte-identical on every
+ *  platform. */
+const ADVERSARIAL_SOUP_ALPHABET = '!"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~'
+
+/** mulberry32 — the seeded PRNG this module chooses and documents (the
+ *  T-015 choose-and-document precedent; zero new dependencies per
+ *  decisions.md 2026-10-10 — JS has no stdlib seeded PRNG): a ~6-line
+ *  32-bit PRNG, integer math only (Math.imul), returning floats in [0, 1).
+ *  Same seed → the same float sequence, on every platform, forever — no
+ *  wall clock, no Math.random, no locale. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/**
+ * The adversarial probe's seeded case generator (T-032; the exported, pure
+ * heart of the replayability contract): the seed expands to a fixed list of
+ * exactly ADVERSARIAL_PROBE_CASE_COUNT input cases — the seed-independent
+ * ADVERSARIAL_EDGE_CORPUS in corpus order, then PRNG-driven ASCII-soup
+ * strings (seeded length over ADVERSARIAL_SOUP_ALPHABET) and corpus
+ * permutations (seeded Fisher-Yates shuffles of the corpus, first two
+ * entries joined with a space) up to the count. Same seed → byte-identical
+ * list, every time, on every platform (no wall clock, no Math.random, no
+ * locale); the list is recomputable by any consumer from the seed alone —
+ * Gate 1.15 recomputes it and pins byte-equality. Expects the enforced
+ * positive integer seed (parseJobsSpec on --jobs specs; the AdversarialProbe
+ * class for directly constructed scenarios); no case exceeds
+ * ADVERSARIAL_PROBE_MAX_CASE_CHARS (the slice is structural, whatever the
+ * recipe produces).
+ */
+export function generateAdversarialCases(seed: number): string[] {
+  const rand = mulberry32(seed)
+  const cases: string[] = [...ADVERSARIAL_EDGE_CORPUS]
+  const soupCount = 4
+  const permutationCount = ADVERSARIAL_PROBE_CASE_COUNT - ADVERSARIAL_EDGE_CORPUS.length - soupCount
+  for (let i = 0; i < soupCount; i++) {
+    const len = 1 + Math.floor(rand() * 96)
+    let s = ''
+    for (let j = 0; j < len; j++) {
+      s += ADVERSARIAL_SOUP_ALPHABET[Math.floor(rand() * ADVERSARIAL_SOUP_ALPHABET.length)]
+    }
+    cases.push(s)
+  }
+  for (let i = 0; i < permutationCount; i++) {
+    const shuffled = [...ADVERSARIAL_EDGE_CORPUS]
+    for (let j = shuffled.length - 1; j > 0; j--) {
+      const k = Math.floor(rand() * (j + 1))
+      const tmp = shuffled[j]!
+      shuffled[j] = shuffled[k]!
+      shuffled[k] = tmp
+    }
+    cases.push(`${shuffled[0]} ${shuffled[1]}`)
+  }
+  return cases.map((c) => c.slice(0, ADVERSARIAL_PROBE_MAX_CASE_CHARS))
+}
+
+/** The machine-readable per-case table of an adversarial probe (T-032) —
+ *  the 'report' evidence-artifact kind's THIRD producer (T-018's benchmark
+ *  results table the first, T-024's web response the second): written
+ *  beside the bundle as <probeId>.results.json. Every recorded input is
+ *  truncated to ADVERSARIAL_PROBE_MAX_CASE_CHARS, so the file stays bounded
+ *  whatever the generated cases were. */
+function adversarialResultsArtifact(
+  environment: EnvironmentSpec,
+  results: {
+    probeId: string
+    scenarioId: string
+    seed: number
+    cases: AdversarialCaseRecord[]
+    casesRun: number
+    casesCrashed: number
+  },
+): EvidenceArtifactRef {
+  const dir = probeEvidenceDir(environment.artifactsDir, environment.candidateId)
+  mkdirSync(dir, { recursive: true })
+  const path = join(dir, `${results.probeId}.results.json`)
+  const body = JSON.stringify(results, null, 2)
+  writeFileSync(path, body)
+  return { name: `${results.probeId}.results.json`, path, kind: 'report', sizeBytes: Buffer.byteLength(body) }
+}
+
+/** The adversarial probe (T-032; the semantics are the module-docblock
+ *  choices — §34:2139 names "adversarial probes" in Milestone-8's add list
+ *  and defines nothing): feeds the target a fixed, seed-expanded list of
+ *  replayable input cases over argv, one sequential execution each through
+ *  the shared executeProbeCommand core (the case appended to the scenario
+ *  command's args — no second spawn path, the shared core unchanged), and
+ *  records which cases the target survived and which it crashed on.
+ *
+ *   - seed: required positive integer >= 1 on an adversarial scenario
+ *     (parseJobsSpec enforces; refused on other probe types). The class
+ *     holds the contract too for a directly constructed scenario — a
+ *     refusal here is a thrown Error, recorded by the runner's failedBundle
+ *     path, never a crash of the run, and never a silent unseeded fuzz.
+ *   - Crash/survival vocabulary: a case SURVIVES when the target spawned
+ *     cleanly, exited 0, and did not time out; it CRASHES when it ran and
+ *     exited non-zero or timed out; a SPAWN-REFUSED case produced no run —
+ *     neither survived nor crashed.
+ *   - Every case runs, sequentially, regardless of earlier outcomes —
+ *     evidence about crashes is the point. Each case gets the FULL
+ *     timeoutMs budget (default DEFAULT_PROBE_TIMEOUT_MS): a per-case
+ *     budget, total wall time bounded by case count × timeoutMs.
+ *   - Measurements (recorded regardless of success): one `case-<i>
+ *     duration` (unit ms) per case that actually ran (a crashing or
+ *     timing-out case still ran — its durationMs is real wall-clock
+ *     evidence; a spawn-refused case produced no run and gets none), plus
+ *     `cases-run` and `cases-crashed` counts (unit 'cases').
+ *   - Success = the case list is non-empty AND every case spawned cleanly
+ *     AND every case survived. Zero completed cases is success: false,
+ *     never a pass (AGENTS.md #7 applied to bundles). `error` names the
+ *     FIRST breaking case with counts ("case 3/20 exited with code 1" /
+ *     "case 5/20 timed out after Nms" / "case 1/20 could not be spawned:
+ *     ENOENT").
+ *   - NO verdict input of any kind: no threshold, no assertion, no model
+ *     opinion — the probe records, never judges (decisions.md 2026-10-10),
+ *     and a success:false adversarial bundle changes nothing downstream.
+ *   - Artifacts: the combined output of all cases in one .log artifact
+ *     with `=== case <i> ===` separators, plus the 'report'-kind per-case
+ *     table <probeId>.results.json — {probeId, scenarioId, seed, cases:
+ *     [{index, input, outcome, durationMs?}], casesRun, casesCrashed},
+ *     every input truncated to ADVERSARIAL_PROBE_MAX_CASE_CHARS.
+ *   - gateResults: one GateResult entry per case, in case order, named
+ *     '<probeId>#case-<i>' so each case's evidence row is self-naming. */
+export class AdversarialProbe implements Probe {
+  readonly id: string
+  readonly scenario: ScenarioSpec
+
+  constructor(scenario: ScenarioSpec) {
+    this.id = scenario.id
+    this.scenario = scenario
+  }
+
+  async run(input: ProbeInput): Promise<EvidenceBundle> {
+    const s = input.scenario
+    const seed = s.seed
+    // The seed contract for a directly constructed scenario (the
+    // parseJobsSpec refusals are the --jobs enforcement point; this keeps a
+    // hand-built scenario from silently escaping the same rule — an
+    // unseeded fuzz run would not be replayable).
+    if (typeof seed !== 'number' || !Number.isInteger(seed) || seed < 1) {
+      throw new Error(`adversarial probe '${this.id}': seed must be a positive integer >= 1 (got ${JSON.stringify(seed)})`)
+    }
+    const cases = generateAdversarialCases(seed)
+    const timeoutMs = s.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS
+    const measurements: Measurement[] = []
+    const gateResults: GateResult[] = []
+    const caseRows: AdversarialCaseRecord[] = []
+    const logParts: string[] = []
+    let casesRun = 0
+    let casesCrashed = 0
+    let firstError: string | undefined
+    for (let i = 0; i < cases.length; i++) {
+      const n = i + 1
+      const c = cases[i]!
+      logParts.push(`=== case ${n} ===`)
+      const execution = await executeProbeCommand(
+        { exe: s.command.exe, args: [...s.command.args, c] },
+        input.workspace.path,
+        timeoutMs,
+      )
+      logParts.push(execution.output)
+      const outcome: AdversarialCaseRecord['outcome'] = execution.spawnError !== undefined
+        ? 'spawn-refused'
+        : execution.timedOut
+          ? 'crashed-timeout'
+          : execution.exitCode !== 0
+            ? 'crashed-exit'
+            : 'survived'
+      gateResults.push(toGateResult(`${this.id}#case-${n}`, execution, { passed: outcome === 'survived' }))
+      if (outcome !== 'spawn-refused') {
+        // The case ran — its wall-clock duration is evidence even when it
+        // crashed or timed out. A spawn-refused case produced no run.
+        casesRun++
+        measurements.push({ name: `case-${n} duration`, value: execution.durationMs, unit: 'ms' })
+      }
+      if (outcome === 'crashed-exit' || outcome === 'crashed-timeout') casesCrashed++
+      caseRows.push({
+        index: n,
+        input: c.slice(0, ADVERSARIAL_PROBE_MAX_CASE_CHARS),
+        outcome,
+        ...(outcome !== 'spawn-refused' ? { durationMs: execution.durationMs } : {}),
+      })
+      if (firstError === undefined) {
+        if (outcome === 'spawn-refused') {
+          firstError = `case ${n}/${cases.length} could not be spawned: ${execution.spawnError}`
+        } else if (outcome === 'crashed-timeout') {
+          firstError = `case ${n}/${cases.length} timed out after ${timeoutMs}ms`
+        } else if (outcome === 'crashed-exit') {
+          firstError = `case ${n}/${cases.length} exited with code ${execution.exitCode}`
+        }
+      }
+    }
+    // Recorded regardless of success — evidence about crashes is the point.
+    measurements.push(
+      { name: 'cases-run', value: casesRun, unit: 'cases' },
+      { name: 'cases-crashed', value: casesCrashed, unit: 'cases' },
+    )
+    // Success = the case list is non-empty AND every case spawned cleanly
+    // AND every case survived; zero completed cases is never a pass
+    // (AGENTS.md #7 applied to bundles).
+    const success = cases.length > 0 && casesRun === cases.length && casesCrashed === 0
+    const bundle: EvidenceBundle = {
+      probeId: this.id,
+      scenarioId: s.id,
+      success,
+      artifacts: [
+        logArtifact(input.environment, this.id, logParts.join('\n')),
+        adversarialResultsArtifact(input.environment, {
+          probeId: this.id,
+          scenarioId: s.id,
+          seed,
+          cases: caseRows,
+          casesRun,
+          casesCrashed,
+        }),
+      ],
+      measurements,
+      gateResults,
+      ...(firstError !== undefined ? { error: firstError } : {}),
+    }
+    return bundle
+  }
+}
+
 /** The --jobs probe factory: the parsed ScenarioSpec's type has already been
- *  narrowed to 'command' | 'test' | 'benchmark' | 'screenshot' | 'web' by
- *  parseJobsSpec (src/scheduler.ts). */
+ *  narrowed to 'command' | 'test' | 'benchmark' | 'screenshot' | 'web' |
+ *  'adversarial' by parseJobsSpec (src/scheduler.ts). */
 export function createProbe(scenario: ScenarioSpec): Probe {
   switch (scenario.type) {
     case 'test':
@@ -1328,6 +1695,8 @@ export function createProbe(scenario: ScenarioSpec): Probe {
       return new ScreenshotProbe(scenario)
     case 'web':
       return new WebProbe(scenario)
+    case 'adversarial':
+      return new AdversarialProbe(scenario)
     default:
       return new CommandProbe(scenario)
   }
