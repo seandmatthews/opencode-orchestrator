@@ -17,9 +17,12 @@ moves a milestone.
 | 5 | Codex/Sol worker adapter (read-only verifiers first) | spec Milestone 5 |
 | 6 | First full R&D loop (small fan-out per spec Milestone 6) | partial 2026-10-20 — T-030: the bounded R&D loop demonstrably running end to end (`--rounds 2`: round-1 gate survivors composed by the T-012-reserved packet→prompt composer (`src/rounds.ts`) into the round-2 planner prompt; fresh `<survivorId>-r2` candidate wave at the same base SHA; additive `rounds` report block; gates decide every round) — M6-shaped composition of parts that all exist with the M8 feedback edge worn early, bounded to n=2; remaining for literal M6/M8: researcher/distiller/synthesizer roles (stage 5's read-only workspaces), the Sol verifier per survivor (Codex adapter), candidate lineage/generations, early stop, in-run approval pause |
 | 7 | UI (run dashboard, DAG, context inspector, approval queue) | spec Milestone 7 — last |
-| 8 | Generations, adversarial probes, early stop | spec Milestone 8 |
+| 8 | Generations, adversarial probes, early stop | dispositioned 2026-10-20 — early stop → T-031 (proposed); adversarial probes → T-032 (proposed); bounded generation loops + candidate lineage → deferred (decisions.md 2026-10-20) |
 
-Deliberately deferred: memoization (spec §19), multi-generation adversarial loops,
+Deliberately deferred: memoization (spec §19), multi-generation adversarial
+loops (decisions.md 2026-10-20 — `--rounds` stays 1..2; re-enters on a
+demonstrated round-2 recovery, the generation-loop stop conditions, or
+candidate lineage),
 disposable clones (decisions.md 2026-10-18 — `WorktreeProvider` stays the only
 `WorkspaceProvider`; re-enters with stage 5's read-only roles or a demonstrated
 worktree failure class).

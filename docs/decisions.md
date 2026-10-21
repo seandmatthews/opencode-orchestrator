@@ -66,3 +66,48 @@ contradicts one of these must first rewrite its entry here, with a date and a re
     (T-021:52-55).
   - **GC**: T-020's orphan classification is worktree/branch-evidence shaped by
     construction and explicitly carves clones out (T-020:112-113).
+- **2026-10-20 — Multi-generation feedback loops are deferred; `--rounds`
+  stays integer 1..2 (T-033).** The rule: `--rounds` accepts only integers
+  1..2 — the parse-time cap (`src/cli.ts:218-219`, refusal "capped at one
+  feedback round this slice"), machine-pinned by Gate 1.22 leg D's
+  `--rounds 3 (beyond the cap)` refusal face (`scripts/check-rounds.mjs:556`;
+  VERIFICATION.md:2386, :2251). Scope, so ROADMAP.md:22's ambiguity dies
+  with it: the deferral covers (i) widening the T-030 survivor-evidence
+  feedback loop beyond one feedback round — spec §34:2140's "bounded
+  generation loops" — AND (ii) any adversarial-in-loop generation structure
+  (the second reading of ROADMAP.md:22's "multi-generation adversarial
+  loops"). It does NOT cover T-032's adversarial probe (evidence bundle,
+  never a verdict, no loop) and does NOT ban candidate lineage records as
+  such (§34:2137, carved by T-030:88-90) — lineage is re-entry condition
+  (c) below, not a forbidden structure. Whatever shape eventually re-enters
+  keeps composed survivor evidence a planning input only, never a verdict
+  input (the machine-gates decision above, 2026-10-10 — gates decide
+  survival; models advise) — already how `src/rounds.ts` is built and pinned
+  (Gate 1.22).
+  Empirical grounding, stated honestly: the bounded loop demonstrably runs
+  end to end on real tokens — the driving Gate 2 run's artifacts at
+  `C:\swarm\verify\20261020171354\report.json` record round 1 executed with
+  survivors `[c01, c02]` and round 2 executed with survivors
+  `[c01-r2, c02-r2]`, all four candidates `passedAllGates`, planner `ok` —
+  but as an improvement signal the run shows NOTHING: round-1 survival was
+  100% (2/2), so round 2 had nothing to recover (the larger round-2
+  `diffBytes` — 4761/8915 vs 3888/4830 — ride different briefs, not a
+  controlled comparison). T-030's staged question (T-030:107-108, mirrored
+  VERIFICATION.md:2401-2403) is unanswered, not answered-yes. Two honesty
+  caveats: the run id appears in no repo doc besides the ticket log (grep
+  over VERIFICATION.md, docs/, README.md, AGENTS.md — its only hits are the
+  T-033 ticket file itself), so this entry is the run's first durable record
+  outside the ticket that proposed it; and the run's artifacts live outside
+  the repo with the wrapper's exit status recorded nowhere in it — this
+  entry cites the artifacts, never a passing verdict.
+  Re-entry conditions, any of which reopens this via a new dated entry that
+  rewrites this one (the mechanism at the top of this file), never a
+  relitigation: (a) recorded runs where round-1 survival is below 100% and
+  round 2 demonstrably recovers — T-030's staged empirical question actually
+  answered; (b) T-031's generation-loop stop conditions land (spec
+  §20:1273-1274, consecutive-generations-no-new-survivor /
+  max-generation-count) and need generations to iterate — the extension
+  point T-031 itself names (T-031:128-131, `src/runner.ts:209-257`); or
+  (c) candidate lineage lands (§34:2137; T-030:88-90's carve) — without
+  generation identity beyond the `-rN` id suffix, iterated generations are
+  unaccountable.

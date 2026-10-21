@@ -69,5 +69,5 @@ Rules:
 | T-030 | Bounded R&D loop: survivor-evidence feedback rounds (`--rounds`) + the T-012-reserved packet→prompt composer (ROADMAP stage 6; spec §34 M6 composition, M8 feedback edge) | high | done 2026-10-20 |
 | T-031 | Phase-level early stop: `EarlyStopPolicy.minSurvivors` on the `--jobs` spec — stop dispatching, never kill, record the stop (spec §20, §34 M8) | medium | proposed |
 | T-032 | Adversarial probe: seeded fuzz cases fed over argv → crash/survival EvidenceBundle (spec §34:2139 M8, §24 Phase 9; fills T-030:95's carve) | high | proposed |
-| T-033 | Multi-generation feedback loops deferred: `--rounds` stays 1..2 (ROADMAP stage 8; spec §20, §34 M8) | medium | proposed |
+| T-033 | Multi-generation feedback loops deferred: `--rounds` stays 1..2 (ROADMAP stage 8; spec §20, §34 M8) | medium | done 2026-10-20 |
 | T-034 | Run dashboard first slice: local read-only HTTP view over the recorded store — runs, gates, evidence pointers, DAG, approval queue + decide (spec §26.1/§26.2/§26.6, §34 M7; ROADMAP stage 7) | medium | proposed |
