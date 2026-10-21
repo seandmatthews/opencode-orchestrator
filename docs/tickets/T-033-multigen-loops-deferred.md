@@ -1,6 +1,6 @@
 # T-033 — Multi-generation feedback loops deferred: `--rounds` stays 1..2 (ROADMAP stage 8; spec §20, §34 M8)
 
-**Status:** proposed
+**Status:** done 2026-10-20
 **Category:** docs
 **Value (1-5):** 3 · **Risk (1-5):** 1
 **Depends on:** —
@@ -124,13 +124,13 @@ extended).
 
 ## Acceptance criteria
 
-- [ ] The change-set touches exactly four paths — `docs/decisions.md`,
+- [x] The change-set touches exactly four paths — `docs/decisions.md`,
       `docs/ROADMAP.md`, `docs/tickets/T-033-multigen-loops-deferred.md`,
       `docs/tickets/README.md` (index row) — and nothing under `src/`,
       `scripts/`, or VERIFICATION.md. Human-judgement item, named manual
       check: `git diff --stat` against the base reviewed in change-set review;
       any extra path fails it.
-- [ ] The decisions entry carries its date, the 1..2 rule with its Gate 1.22
+- [x] The decisions entry carries its date, the 1..2 rule with its Gate 1.22
       leg-D pin anchor (`scripts/check-rounds.mjs:556`), the scope statement
       (both covered structures; both explicitly not-covered: T-032's probe,
       lineage-as-such), the empirical grounding with the no-signal statement
@@ -138,12 +138,12 @@ extended).
       no wrapper verdict), and all three re-entry conditions. Human-judgement
       item, named manual check: the entry is read against the What section in
       change-set review.
-- [ ] The ROADMAP stage-8 row carries the per-item disposition (T-031 proposed,
+- [x] The ROADMAP stage-8 row carries the per-item disposition (T-031 proposed,
       T-032 proposed, loops + lineage deferred with the dated pointer), and the
       deliberately-deferred line names the multi-generation item with the
       decisions.md 2026-10-20 pointer. Pinned by the same named manual check
       (diff read).
-- [ ] `npm run verify` exits 0 in the same change-set — Gate 0 typecheck plus
+- [x] `npm run verify` exits 0 in the same change-set — Gate 0 typecheck plus
       the fast tier, Gate 1.22 green UNCHANGED: its leg-D refusal face
       `--rounds 3 (beyond the cap)` (`scripts/check-rounds.mjs:556`) is the
       machine pin that the cap this decision records still holds. No behavioral
@@ -153,6 +153,72 @@ No new check is added: no gate can pin decision prose, and adding one would be
 ceremony — docs/tickets/README.md:29-30 sends human-judgement items to a named
 manual check instead (the T-022:131-133 reasoning verbatim in spirit: the
 behavioral side is already pinned by the untouched, riding-green Gate 1.22).
+
+## Landed
+
+2026-10-20, lane branch `ticket/T-033-multigen-loops-deferred` (base
+0f84c72). Docs-only, exactly the four paths this ticket names — `git diff
+--stat 0f84c72` at landing names `docs/decisions.md`, `docs/ROADMAP.md`,
+`docs/tickets/README.md`, and this ticket file, and nothing under `src/`,
+`scripts/`, or VERIFICATION.md (the named manual check re-runs it in
+change-set review).
+
+What changed:
+
+- **docs/decisions.md** — one dated entry (2026-10-20): the 1..2 rule with
+  its machine pin (the parse-time cap at `src/cli.ts:218-219`, Gate 1.22 leg
+  D's `--rounds 3 (beyond the cap)` refusal face at
+  `scripts/check-rounds.mjs:556`, VERIFICATION.md:2386/:2251), the scope
+  statement (both covered structures — the §34:2140 loop widening AND
+  adversarial-in-loop generation structure; both explicitly not-covered —
+  T-032's probe and lineage-as-such per §34:2137 / T-030:88-90), the honest
+  empirical grounding (run `C:\swarm\verify\20261020171354\report.json`:
+  round 1 executed with survivors `[c01, c02]`, round 2 executed with
+  survivors `[c01-r2, c02-r2]`, all four candidates `passedAllGates`,
+  planner `ok` — round-1 survival 100%, so no improvement signal; the
+  diffByte growth rides different briefs; T-030's staged question
+  unanswered, not answered-yes), both honesty caveats, and all three
+  re-entry conditions. Every anchor was re-verified against the tree at the
+  base commit before landing, including a fresh read of the run's
+  report.json — the numbers cited are the numbers in the file.
+- **docs/ROADMAP.md** — the stage-8 row carries the per-item disposition
+  (early stop → T-031 proposed; adversarial probes → T-032 proposed; bounded
+  generation loops + candidate lineage → deferred, decisions.md 2026-10-20);
+  the deliberately-deferred line names the multi-generation item with the
+  dated pointer and the re-entry conditions, exactly the disposable-clones
+  precedent beside it.
+- **docs/tickets/README.md** — this ticket's index row → `done 2026-10-20`.
+  Nothing else in the index changed.
+- **This ticket file** — status flipped, boxes checked, this section added.
+
+Deviations: none in substance; two wording notes. (1) Inside decisions.md
+the What-section's "the mechanism at the top of decisions.md, :3-4"
+self-reference became "the mechanism at the top of this file" and
+"decisions.md:19-21" became "the machine-gates decision above, 2026-10-10 —
+gates decide survival; models advise" — a file cannot cite its own line
+numbers stably (the T-022 Landed precedent); the rules cited are verbatim
+decisions.md:3-4 and :19-21. (2) The What's first honesty caveat ("that run
+id appears in no repo doc today … zero hits") was true when drafted, but
+this ticket file itself — now committed — carries the run id (:33, :107,
+:191), so the entry phrases the caveat as "the run id appears in no repo
+doc besides the ticket log (grep over VERIFICATION.md, docs/, README.md,
+AGENTS.md — its only hits are the T-033 ticket file itself), so this entry
+is the run's first durable record outside the ticket that proposed it": the
+caveat's substance is carried intact and stays true.
+
+Gates measured (all run in the lane on this change-set):
+
+- `npm run verify` (fast tier) — exit 0, `verify (fast) complete: ALL GREEN`
+  (Gate 0 typecheck + Gate 1 fixture baseline + the fast-tier gate suite),
+  run twice: once after the content edits and again on the exact final tree
+  with this Landed section in it. Gate 1.22 green UNCHANGED — its leg-D
+  faces all print `ok`, including `--rounds 3 (beyond the cap) — exit 1,
+  names the offense, zero side effects (no artifacts dir, no lock)`, the
+  machine pin that the cap this decision records still holds. No `src/` or
+  `scripts/` file is touched by this change-set, so no gate's inputs
+  changed.
+- `git diff --stat 0f84c72` — exactly the four paths above, nothing under
+  `src/`, `scripts/`, or VERIFICATION.md.
 
 ## Verification
 
