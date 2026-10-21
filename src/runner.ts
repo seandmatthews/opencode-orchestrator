@@ -296,6 +296,24 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
   return report
 }
 
+/** The dispatch-eligible nodes: the job DAG minus the early-stop-suppressed
+ *  jobs (T-031). This filtering MUST happen BEFORE `readyJobs` applies its
+ *  concurrency-cap slice, not after it: a suppressed-but-ready job sorting
+ *  ahead of another phase's ready job would otherwise occupy the whole cap
+ *  slice every iteration, strand that phase's dispatchable work for the rest
+ *  of the run, and record a false 'blocked' (review round 1 red — ES7 pins
+ *  exactly that adversarial ordering). A stopped phase may only skip its OWN
+ *  undispatched work; it never consumes another phase's dispatch capacity.
+ *  Suppression is monotone (a met policy stays met), so recomputing the
+ *  filter per iteration is stable. No policies ⇒ no suppression ⇒ the
+ *  caller passes the input through unchanged. */
+function eligibleForDispatch(
+  nodes: { id: string; phaseId: string; dependencies: string[] }[],
+  suppressed: ReadonlySet<string>,
+): { id: string; phaseId: string; dependencies: string[] }[] {
+  return suppressed.size === 0 ? nodes : nodes.filter((n) => !suppressed.has(n.id))
+}
+
 /** The scheduler loop (T-009): repeatedly take the deterministic ready list
  *  and dispatch up to the concurrency cap. dispatchIndex is a job's position
  *  in the run's dispatch order; terminal states feed the next ready call. A
@@ -309,7 +327,9 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
  *  --jobs spec's phases (`opts.scheduled`); default mode has none and the
  *  loop is untouched. Per iteration, a phase whose policy is MET (the pure
  *  `earlyStopMet` — monotone, since terminal success never un-happens) has
- *  its ready-but-undispatched jobs filtered out of the dispatch pass. The
+ *  its not-yet-dispatched jobs filtered out of the dispatch-eligible input
+ *  BEFORE the ready call's concurrency-cap slice (`eligibleForDispatch`) —
+ *  a stopped phase never occupies another phase's dispatch capacity. The
  *  stop ONLY suppresses dispatch: an in-flight job runs to completion —
  *  never killed, no cancellation path; a suppressed job stays non-terminal,
  *  records `dispatchIndex: null` (not-dispatched, never fabricated as
@@ -349,8 +369,7 @@ async function driveJobs(jobs: ResolvedJob[], opts: SkeletonOptions): Promise<{
         }
       }
     }
-    for (const id of readyJobs(nodes, terminal, running, opts.concurrency)) {
-      if (suppressed.has(id)) continue
+    for (const id of readyJobs(eligibleForDispatch(nodes, suppressed), terminal, running, opts.concurrency)) {
       const job = byId.get(id)!
       dispatchIndexOf.set(id, dispatched++)
       running.add(id)

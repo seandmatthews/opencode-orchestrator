@@ -273,14 +273,17 @@ index row. No CLI change
 - `src/runner.ts` — `driveJobs` reads policies from `opts.scheduled.phases`
   only (default mode: no policies, the loop untouched), evaluates
   `earlyStopMet` per iteration (monotone — once met it stays met), and
-  filters the met phases' ready-but-undispatched jobs out of the dispatch
-  pass; the stop only suppresses DISPATCH (in-flight jobs run to
-  completion; no cancellation path added); suppressed jobs record
-  `dispatchIndex: null` with no candidate report and no lease; dependents
-  stay never-dispatched for free (a never-dispatched dependency never
-  reaches terminal success); termination unchanged (the `inFlight.size ===
-  0` break fires exactly as before). `runSkeleton` attaches the
-  `earlyStops` block when non-empty.
+  filters the met phases' not-yet-dispatched jobs out of the
+  dispatch-ELIGIBLE input BEFORE the ready call's concurrency-cap slice
+  (`eligibleForDispatch` — review round 1: a post-slice filter could let a
+  suppressed-but-ready job occupy the whole cap slice and strand another
+  phase's dispatchable work); the stop only suppresses DISPATCH (in-flight
+  jobs run to completion; no cancellation path added); suppressed jobs
+  record `dispatchIndex: null` with no candidate report and no lease;
+  dependents stay never-dispatched for free (a never-dispatched dependency
+  never reaches terminal success); termination unchanged (the
+  `inFlight.size === 0` break fires exactly as before). `runSkeleton`
+  attaches the `earlyStops` block when non-empty.
 - `src/store/index.ts` — only the `upsertPhase` docblock updated (earlyStop
   now HAS a producer; the record lives in the report block, not
   `early_stop_json`, which stays null; `approval_gate_json` stays null
@@ -306,13 +309,39 @@ index row. No CLI change
   dispatches complete with full verdict ladders); ES4 (declared-but-unfired
   policies recorded met:false — a failing phase keeps `failed` precedence,
   a starved phase keeps `blocked`); ES5 (met + zero never-dispatched ⇒
-  `completed`); ES6 (policy-less `--jobs` carries no block); the S6
-  default-mode face extended with the no-earlyStops pin.
+  `completed`); ES6 (policy-less `--jobs` carries no block); ES7 (review
+  round 1 — a suppressed job sorting AHEAD of an independent phase's job
+  under cap 1 never consumes the dispatch capacity: `z1` still dispatches,
+  `zz` records `completed`, never a false `blocked`); the S6 default-mode
+  face extended with the no-earlyStops pin.
 - `scripts/check-store.mjs` (Gate 1.6) — the earlyStops-carrying tolerance
   variant (the rounds-variant pattern): policy columns stay null, verdict
   rows identical to the same report minus the block, no new table, a
   concluded-early status deriving no `PHASE_COMPLETED` event, re-ingest
   idempotent.
+
+**Review round 1 (2026-10-21), red-before/green-after per AGENTS.md #8.**
+The reviewer found a real stranding bug: the suppression filter sat AFTER
+`readyJobs`' concurrency-cap slice, so a suppressed-but-ready job sorting
+ahead of another phase's ready job could occupy the whole cap slice every
+iteration — an independent policy-less phase's job never dispatched (a free
+slot wasted for the rest of the run) and its phase recorded `blocked`
+(starved-by-upstream-failure — active misinformation, the exact failure
+this ticket's `concluded-early` status exists to prevent). My landed ES
+faces missed it because their ids sorted favorably (ES2's own comment said
+so). Reproduced red on the lane code with the reviewer's exact scenario
+(phase `aa` {a1, a2, minSurvivors 1}, independent `zz` {z1}, cap 1, ids
+ascending) pinned as ES7 FIRST — Gate 1.10 exited 1 with exactly the two
+new ES7 assertions failing (`FAIL: ES7: the independent job still
+dispatches…`, `FAIL: ES7: the independent phase records completed…`, the
+third ES7 face — what the stop owes its own phase — already green), every
+pre-existing face unchanged and green. Then the fix: suppression is applied
+to the dispatch-eligible input BEFORE the cap slice (`eligibleForDispatch`
+in `src/runner.ts` — a stopped phase may only skip its own undispatched
+work; it never consumes another phase's dispatch capacity; no policies ⇒
+the input passes through unchanged). Same check re-run: ALL GREEN, exit 0,
+all three ES7 faces ok. This is an added pin, not a weakened one — no
+existing assertion changed in this round.
 
 Gates measured in the lane (every number from this change-set's runs):
 
@@ -325,6 +354,11 @@ Gates measured in the lane (every number from this change-set's runs):
   earlyStops-variant assertions ok, every pre-existing fixture unchanged.
 - Full fast tier `node scripts/verify.mjs fast` (Gate 0+0.5+1+1.5+1.6+
   1.7-1.22): ALL GREEN, 0 failures.
+- Review round 1 re-runs (2026-10-21, in the lane): the red bar — Gate 1.10
+  with ES7 landed BEFORE the fix: exit 1, `check-scheduler: 2 failure(s)`,
+  only the two ES7 assertions failing; after the fix — Gate 1.10 standalone
+  ALL GREEN (exit 0, all three ES7 faces ok), then the full fast tier
+  `node scripts/verify.mjs fast` ALL GREEN, `grep -c '^FAIL'` = 0.
 - **Gate 2 (`npm run verify:full`) NOT run by this lane** — mandated by
   VERIFICATION.md ("Required when touching `src/runner.ts` … or anything
   that changes report shape") and delegated to the driving wrapper per the

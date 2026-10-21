@@ -665,6 +665,38 @@ async function main() {
     t('ES6: a policy-less --jobs report carries NO earlyStops block (in memory or on disk)',
       !('earlyStops' in report) && JSON.parse(read(join(artifactsDir, 'report.json'))).earlyStops === undefined)
   }
+  {
+    // ES7 — review round 1 (red-before/green-after, AGENTS.md #8): a
+    // suppressed job must never consume another phase's dispatch capacity.
+    // Here the suppressed job sorts BEFORE the independent job (a2 < z1):
+    // under cap 1 a filter applied AFTER the ready call's cap slice would
+    // hand the whole slice to the suppressed job every iteration, strand z1
+    // for the rest of the run (a free dispatch slot wasted), and record
+    // 'zz' as 'blocked' — starved-by-upstream-failure, active misinformation.
+    // The stop may only skip the declared phase's own undispatched work.
+    const spec = {
+      phases: [
+        { id: 'aa', completion: 'all', earlyStop: { minSurvivors: 1 } },
+        { id: 'zz', completion: 'all' },
+      ],
+      jobs: [
+        { id: 'a1', phase: 'aa', brief: 'strand brief a1' },
+        { id: 'a2', phase: 'aa', brief: 'strand brief a2' },
+        { id: 'z1', phase: 'zz', brief: 'strand brief z1' },
+      ],
+    }
+    const worker = okWorker(5)
+    const { report } = await drive('early-stop-no-strand', { scheduled: buildScheduled(spec, { worker, gates: [passGate] }), worker, concurrency: 1 })
+    const byId = new Map(report.schedule.jobs.map((j) => [j.id, j]))
+    t('ES7: the independent job still dispatches under the same cap although the suppressed job sorts ahead of it',
+      byId.get('z1')?.dispatchIndex !== null && report.candidates.some((c) => c.id === 'z1' && c.passedAllGates)
+      && worker.briefsSeen().includes('strand brief z1'))
+    t('ES7: the independent phase records completed and the stopped phase concluded-early (never a false blocked)',
+      eq(report.schedule.phases.map((p) => [p.id, p.status]), [['aa', 'concluded-early'], ['zz', 'completed']]))
+    t('ES7: the stop still suppressed exactly the stopped phase remaining undispatched job',
+      byId.get('a1')?.dispatchIndex === 0 && byId.get('a2')?.dispatchIndex === null
+      && eq(report.earlyStops, [{ phaseId: 'aa', condition: 'minSurvivors', threshold: 1, met: true, survivorIds: ['a1'], neverDispatchedIds: ['a2'] }]))
+  }
 
   // ---------- S6: default mode is today's behavior (no --jobs) ----------
   {

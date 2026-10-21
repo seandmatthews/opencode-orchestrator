@@ -755,7 +755,14 @@ directly and the runner end-to-end with a **fake `WorkerAdapter`** (the
   failed > concluded-early > completed > blocked: a met policy with zero
   never-dispatched jobs leaves `completed`; failure keeps `failed`; a
   declared-but-unfired policy changes no status — a starved phase stays
-  `blocked`); and the additive `earlyStops` report block — present only
+  `blocked`); a suppressed job never consumes another phase's dispatch
+  capacity — with a suppressed-but-ready job sorting AHEAD of it under cap
+  1 (suppressed `a2` before independent `z1`), the independent phase's job
+  still dispatches and its phase records `completed`, never a false
+  `blocked` (review round 1 red, recorded in T-031's Landed: the pre-fix
+  filter sat AFTER the ready call's cap slice and could strand another
+  phase's ready work for the rest of the run — red-before/green-after per
+  AGENTS.md #8); and the additive `earlyStops` report block — present only
   when a phase DECLARED a policy (default mode AND policy-less `--jobs`
   reports carry no block, in memory or on disk), one record per declaring
   phase in spec order with
