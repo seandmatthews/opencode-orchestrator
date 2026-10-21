@@ -12,6 +12,7 @@
     "integrate": "tsx src/integrate.ts",
     "dag": "tsx src/dag.ts",
     "approvals": "tsx src/approvals.ts",
+    "dashboard": "tsx src/dashboard.ts",
     "recover": "tsx src/recover.ts",
     "context": "tsx src/context-inspect.ts",
     "verify": "node scripts/verify.mjs fast",

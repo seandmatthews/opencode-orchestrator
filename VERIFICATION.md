@@ -2493,6 +2493,122 @@ list): `verify:full` runs a real 2-round loop — see Gate 2's section; the
 run itself is the driving run, recorded in T-030's Landed section. Gate 3
 n/a (no adapter change, no new harness to probe).
 
+## Gate 1.23 — run dashboard first slice (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-dashboard.mjs
+```
+
+Pins T-034 (the first Milestone-7 slice, spec §26.1:1686-1701 run overview,
+§26.2:1703-1715 DAG view, §26.6:1770-1772 approval queue; ROADMAP stage 7):
+the standalone `npm run dashboard -- [--port <port>] [--db <path>]`
+(`src/dashboard.ts`, the clean/integrate/dag/approvals standalone-entry
+pattern) serving a localhost-only, read-only HTML view over the schema-v5
+store. **Zero new npm dependencies** — plain `node:http` serving plus
+`node:sqlite` reads; `package.json` gains exactly the one `dashboard` script
+and nothing else. No engine code is touched: the dashboard is a consumer of
+recorded state, it knows no harness, spawns no models, spawns no processes,
+and touches no repository (decisions.md 2026-10-10: gates decide survival —
+the pages render recorded verdicts and produce none). All read routes open
+the DB `{ readOnly: true }` (the src/dag.ts:69-98 pattern); `--db` defaults
+to the `C:\swarm\refinery.db` literal shared by src/cli.ts/src/dag.ts/
+src/approvals.ts; a missing DB file refuses startup with a clear message and
+never creates a refinery.db as a side effect (the T-006/T-008 refusal
+pattern); binds 127.0.0.1 only, no auth (operator-local tooling, the same
+trust domain as the CLI precursors). The gate ingests the vendored fixture
+(`scripts/fixtures/report-real.json` → run 20261011022419) into fresh temp
+DBs (the Gate 1.6/1.9 pattern) and drives the server over stdlib `fetch` on
+an ephemeral localhost port (the T-024 WebProbe client precedent) —
+token-free. It asserts:
+
+- **the CLI faces**: `--help` documents `--port` and `--db` with its
+  `C:\swarm\refinery.db` default; a missing DB file refuses with exit
+  non-zero naming the path, nothing on stdout, and no DB file created;
+  `--port` with a non-integer or an out-of-range value refuses naming the
+  flag; an explicit `--port` is honored; the server's bound address is
+  `127.0.0.1`;
+- **`GET /`** renders the ingested fixture run with its repo/base_sha/
+  goal/model/started_at/finished_at equal to the `runs` row, its
+  survivor/eliminated counts equal to the `candidates.passed_all_gates`
+  rows, and the honesty label on the page itself: ingested post-hoc state,
+  never live (the store has no run-status column; ingest is post-hoc and
+  derived, so the pages show only ingested runs' derived verdicts);
+- **`GET /run/<id>`** renders every candidate id with its
+  `passed_all_gates` verdict, every `gate_results` row (gate name, pass/
+  FAIL, exit code, duration — equal to the temp DB's rows), every
+  `artifacts` evidence pointer (path / size_bytes / content_hash, with
+  NULL rendered as "missing", never fabricated — AGENTS.md #7), the
+  `probe_runs` rows (bundle_path; pinned on a hand-built probes variant of
+  the fixture — the elim-variant pattern, sandbox-local bundle file), and
+  the run's recorded DAG from `phases`/`jobs`/`job_dependencies`, whose
+  section EQUALS src/dag.ts's own read of the same DB — cross-checked
+  against `npm run dag -- --json` (the Gate 1.7 surface) over the flat
+  fixture AND the hand-built schedule variant (two real phases
+  foundation → app with the expanded edge c02 -> c01, the check-store
+  construction); an unknown run id renders 404 carrying
+  `no recorded run '<id>'`;
+- **`GET /approvals`** renders exactly `listPendingApprovals`'s rows —
+  every pending row's run/phase/job/state/requested_at/requested_by equal
+  to a direct store call on the same temp DB (seeded via the real
+  `requestApproval`, two pending rows on the schedule variant), with the
+  row count asserted (no extras), and an empty queue saying so;
+- **`POST /approvals/decide`** — the dashboard's ONLY write, operator-
+  driven, through the store's `decideApproval` called verbatim (the T-008
+  wall-clock scoping case): approve flips the row with
+  `decided_at`/`decided_by`/note recorded and appends exactly one
+  `APPROVAL_GRANTED` event at the row stamp (payload naming phase/job/
+  decider); reject appends exactly one `APPROVAL_REJECTED` (the documented
+  vocabulary extension) with `decided_by` defaulting to the OS username;
+  each decided row drops out of the rendered queue and the empty queue
+  says so; the decides touch nothing outside the approval rows and their
+  two events (candidates/gate_results value-identical). Every store
+  refusal surfaces as an HTTP 4xx CARRYING THE REFUSAL MESSAGE with
+  nothing written — unknown run (404), unknown job (404), non-survivor
+  (409, on the elim variant of the schedule fixture: the resurrect rule
+  named), double-decide (409, the audit record named), unknown decision
+  (400, the vocabulary named), missing form field (400) — row/event
+  snapshots identical before and after the refusal block;
+- **read-only proof, not assertion** (AGENTS.md #9): the DB file's sha256
+  is byte-identical across ALL GET routes (/, /run/<id>, /approvals, the
+  404 face, / again — on the main fixture, the schedule variant, and the
+  probes variant alike); the decide POST is expected to mutate and is not
+  in the byte-identity set; and a write against a `readOnly`-opened handle
+  throws — the Known issues #7 node:sqlite churn guard, same as Gates
+  1.7/1.9;
+- **importing starts no server**: the module is imported dynamically under
+  a wrapped `console.log`, and no startup banner appears — a module-level
+  `main()` (observed once at authoring, red, and fixed with the entry-
+  module guard before landing) would have bound the DEFAULT store path
+  `C:\swarm\refinery.db` inside the check's own process, the exact
+  consult-the-live-store accident the T-028 review round 1 fixed for
+  integrate's fast-tier faces;
+- **the dependency pin**: `package.json`'s `dependencies`/
+  `devDependencies` blocks equal their recorded values (`opencode-ai`
+  plus the three dev tools) and `scripts.dashboard` is exactly
+  `tsx src/dashboard.ts` — zero new npm dependencies, flipping this pin
+  requires its own decisions entry (the node:sqlite fallback posture
+  below).
+
+Not pinned here and carved by the ticket: §26.4 context-inspector page
+(T-012:149's carve stands — the CLI is the precursor); §26.5 artifact
+viewer serving contents (pointers only); §26.3 candidate comparison;
+§26.7 retention/disk view (T-021:124's carve stands); §26.8 prompt
+registry (T-029's carve stands); §26.2's interactive graph JS; live
+status/auto-refresh (no producer — ingest stays post-hoc and derived);
+§26.1's producerless fields (token usage, disk usage, worktree count);
+dispatchIndex rendering from report.json; §34:2131's Sol screenshot-based
+UI verification (needs the stage-5 Codex/Sol adapter, ROADMAP.md:17,
+unlanded); auth or binding beyond 127.0.0.1; any engine/store write beyond
+the existing `decideApproval`. The dashboard rides the store's engine —
+`node:sqlite` is experimental on Node 22 (Known issue #7, benign
+stderr warning); the named fallback (`better-sqlite3`) would be a new
+dependency and its own decisions entry, deliberately not this slice.
+Gate 2 is not triggered: the change-set touches nothing on the trigger
+list (src/runner.ts, adapters, gates, workspace handling, report shape)
+— the T-006/T-008/T-012 standalone-consumer precedent. Gate 3 n/a (no
+adapter; the dashboard spawns no harness, so there is nothing to
+PWD-probe).
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash

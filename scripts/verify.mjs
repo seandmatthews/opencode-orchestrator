@@ -883,6 +883,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.23: run dashboard (T-034) ----------
+section('Gate 1.23 — run dashboard (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-dashboard.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'dashboard self-check exit 0')
+} catch (e) {
+  fail(`dashboard self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
