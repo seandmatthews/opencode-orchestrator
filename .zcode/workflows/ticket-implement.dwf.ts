@@ -16,7 +16,12 @@ const IDENTITY = ["-c", "user.name=matth", "-c", "user.email=matth@local"];
 const REDLOG = "C:/swarm/verify-red";
 const TEE = [
   "-e",
-  "const cp=require('child_process'),fs=require('fs'),path=require('path');const out=process.argv[1],args=process.argv.slice(2);fs.mkdirSync(path.dirname(out),{recursive:true});const fd=fs.openSync(out,'w');const r=cp.spawnSync(process.execPath,args,{stdio:['ignore',fd,fd]});fs.closeSync(fd);const t=fs.readFileSync(out,'utf8');process.stdout.write('[full output: '+out+']\n'+t.slice(-4000));process.exit(r.status===null?-1:r.status);",
+  // The \\n is double-escaped DELIBERATELY: this source string is parsed once
+  // by the workflow-script layer (which turns \n into a real newline — a raw
+  // newline inside the -e script's single-quoted literal is a compile-time
+  // SyntaxError, observed 2026-10-21 as T-035 review round 1's fast-tier red),
+  // so the -e script itself must receive the two characters \ + n.
+  "const cp=require('child_process'),fs=require('fs'),path=require('path');const out=process.argv[1],args=process.argv.slice(2);fs.mkdirSync(path.dirname(out),{recursive:true});const fd=fs.openSync(out,'w');const r=cp.spawnSync(process.execPath,args,{stdio:['ignore',fd,fd]});fs.closeSync(fd);const t=fs.readFileSync(out,'utf8');process.stdout.write('[full output: '+out+']\\n'+t.slice(-4000));process.exit(r.status===null?-1:r.status);",
 ];
 
 interface TicketSpec {
