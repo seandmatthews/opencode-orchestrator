@@ -1,6 +1,6 @@
 # T-037 — Run context page: per-run context evidence — attempts' `input_context_hash` + the report.json rounds block, producer-less §26.4 fields marked (extends T-034/T-035; spec §26.4; ROADMAP stage 7)
 
-**Status:** proposed
+**Status:** done 2026-10-21
 **Category:** ops
 **Value (1-5):** 2 · **Risk (1-5):** 1
 **Depends on:** T-034, T-035 (the dashboard surface + the Gate 1.23 harness). Renders T-030's recorded rounds block; is the consumer slice named by T-035:57-63's and VERIFICATION.md:2770-2794's §26.4 carve — NOT the producer successor itself (see What).
@@ -31,20 +31,102 @@ This is exactly the shape VERIFICATION.md:2770-2794's carve note predicts: §26.
 
 ## Acceptance criteria
 
-- [ ] `GET /run/<id>/context` renders 200 for a recorded run; non-GET is refused 405; an unknown run renders 404 — pinned by the extended Gate 1.23 (`scripts/check-dashboard.mjs`): the new route exercised on the existing fixture DBs with the same method-refusal/404 pattern as the drill-down pins.
-- [ ] The store-backed face renders the run's attempts rows (`job_id`, `attempt_number`, `state`, `started_at`, `input_context_hash`) EQUAL to direct read-only SELECTs on the same DB, with each job linked to its existing drill-down page — pinned by Gate 1.23 equality assertions on the fixture DBs; the flat fixture (which predates attempts) renders "(none recorded)" — nothing fabricated.
-- [ ] The report-backed face renders the `rounds` block equal to the fixture report's recorded rounds (round, executed, survivorIds; `packetFingerprint` verbatim; `renderedBlockPath` as verbatim pointer text, never served or linked to content) — pinned by Gate 1.23 against a hand-built **rounds-report variant**: a report.json carrying a round-2 record with fingerprint + block path, ingested into a temp DB with the report written at the recorded `report_path` (the Gate 1.23 hand-built-variant pattern).
-- [ ] The page carries the honesty label on the report-backed face: "report.json read via runs.report_path — not store rows" — pinned by Gate 1.23 asserting the label text (the VERIFICATION.md:2785-2788 pattern).
-- [ ] The `executed: false` face renders "not executed", and a missing/unreadable report file renders its true state with the store-backed face still present — pinned by Gate 1.23 variants (an executed:false round record; a `report_path` pointing at a nonexistent file) — never fabricated (AGENTS.md #7).
-- [ ] Every producer-less §26.4 field (token budget, mandatory/selected/distilled/excluded artifacts, source chain, plan/packet records) renders an explicit "no producer" marker, and the page renders `input_context_hash` and `packetFingerprint` under distinct labels, never as one kind of value — pinned by Gate 1.23 asserting the marker strings and both hash labels (disjointness per the `src/rounds.ts` header).
-- [ ] Links: the run page links to `/run/<id>/context` and the job drill-down's attempts section links to it, plain `<a href>` (no JS) — pinned by Gate 1.23 asserting the anchors on the run and drill-down pages.
-- [ ] Read-only proof, not assertion: the sha256 DB byte-identity set extends across the new GET route on every fixture DB (the report.json read touches no DB bytes); the standing no-`<script>` sweep covers the new page; POSTing the route is refused 405 with the DB byte-identical after — pinned by the extended Gate 1.23 byte-identity/sweep/405 assertions.
-- [ ] Zero new dependencies: `package.json` deps/devDeps equal their recorded values and `scripts.dashboard` stays exactly `tsx src/dashboard.ts` — pinned by Gate 1.23's existing dependency pin re-run green (flipping it would need its own decisions entry, VERIFICATION.md:2763-2768).
-- [ ] VERIFICATION.md extends in the same change-set (AGENTS.md #6): Gate 1.23's section documents the new faces and pins; the §26.4 carve note (:2770-2794) updated to record this page as the report-read consumer slice while the producer carve stands, with Gate 2 explicitly not triggered (consumer-only — no `src/runner.ts`, adapter, gate, workspace-handling, or report-shape file touched) and Gate 3 n/a (no harness spawn).
+- [x] `GET /run/<id>/context` renders 200 for a recorded run; non-GET is refused 405; an unknown run renders 404 — pinned by the extended Gate 1.23 (`scripts/check-dashboard.mjs`): the new route exercised on the existing fixture DBs with the same method-refusal/404 pattern as the drill-down pins.
+- [x] The store-backed face renders the run's attempts rows (`job_id`, `attempt_number`, `state`, `started_at`, `input_context_hash`) EQUAL to direct read-only SELECTs on the same DB, with each job linked to its existing drill-down page — pinned by Gate 1.23 equality assertions on the fixture DBs; the flat fixture (which predates attempts) renders "(none recorded)" — nothing fabricated.
+- [x] The report-backed face renders the `rounds` block equal to the fixture report's recorded rounds (round, executed, survivorIds; `packetFingerprint` verbatim; `renderedBlockPath` as verbatim pointer text, never served or linked to content) — pinned by Gate 1.23 against a hand-built **rounds-report variant**: a report.json carrying a round-2 record with fingerprint + block path, ingested into a temp DB with the report written at the recorded `report_path` (the Gate 1.23 hand-built-variant pattern).
+- [x] The page carries the honesty label on the report-backed face: "report.json read via runs.report_path — not store rows" — pinned by Gate 1.23 asserting the label text (the VERIFICATION.md:2785-2788 pattern).
+- [x] The `executed: false` face renders "not executed", and a missing/unreadable report file renders its true state with the store-backed face still present — pinned by Gate 1.23 variants (an executed:false round record; a `report_path` pointing at a nonexistent file) — never fabricated (AGENTS.md #7).
+- [x] Every producer-less §26.4 field (token budget, mandatory/selected/distilled/excluded artifacts, source chain, plan/packet records) renders an explicit "no producer" marker, and the page renders `input_context_hash` and `packetFingerprint` under distinct labels, never as one kind of value — pinned by Gate 1.23 asserting the marker strings and both hash labels (disjointness per the `src/rounds.ts` header).
+- [x] Links: the run page links to `/run/<id>/context` and the job drill-down's attempts section links to it, plain `<a href>` (no JS) — pinned by Gate 1.23 asserting the anchors on the run and drill-down pages.
+- [x] Read-only proof, not assertion: the sha256 DB byte-identity set extends across the new GET route on every fixture DB (the report.json read touches no DB bytes); the standing no-`<script>` sweep covers the new page; POSTing the route is refused 405 with the DB byte-identical after — pinned by the extended Gate 1.23 byte-identity/sweep/405 assertions.
+- [x] Zero new dependencies: `package.json` deps/devDeps equal their recorded values and `scripts.dashboard` stays exactly `tsx src/dashboard.ts` — pinned by Gate 1.23's existing dependency pin re-run green (flipping it would need its own decisions entry, VERIFICATION.md:2763-2768).
+- [x] VERIFICATION.md extends in the same change-set (AGENTS.md #6): Gate 1.23's section documents the new faces and pins; the §26.4 carve note (:2770-2794) updated to record this page as the report-read consumer slice while the producer carve stands, with Gate 2 explicitly not triggered (consumer-only — no `src/runner.ts`, adapter, gate, workspace-handling, or report-shape file touched) and Gate 3 n/a (no harness spawn).
 
 ## Verification
 
 Gate 0 (typecheck) — always, first. Gate 1 — unaffected (no fixture/demo change), run green. **Extended Gate 1.23** — `node node_modules/tsx/dist/cli.mjs scripts/check-dashboard.mjs`, token-free, wired in the fast tier: pins every criterion above. Baseline recorded green this session: ALL GREEN, exit 0. **Gate 2 not triggered**: the change-set touches only `src/dashboard.ts`, `scripts/check-dashboard.mjs`, and docs (VERIFICATION.md, this ticket + index) — nothing on the trigger list (VERIFICATION.md:2865), no report-shape change; the moment persistence is wanted instead of rendering, that is the producer ticket and it owns its own Gate 2 run. Gate 3 n/a (no adapter; the dashboard spawns no harness, nothing to PWD-probe).
+
+## Landed
+
+2026-10-21, lane `ticket/T-037-run-context-page`. What actually changed:
+
+- `src/dashboard.ts` — one new read route `GET /run/<id>/context`
+  (`renderContext` + `renderRoundsSection` + `readRunReport`, parsed under
+  the existing `/run/` prefix block: a `rest.endsWith('/context')` branch
+  before the `/job/` split, same `methodNotAllowed` 405 / `notFound` 404
+  faces). Three faces, nothing fabricated: (1) the store-backed face —
+  `attempts` rows (`job_id`/`attempt_number`/`state`/`started_at`/
+  `input_context_hash`) via one direct SELECT ordered `job_id,
+  attempt_number`, grouped per job under an `<h3>` linking each job's
+  drill-down, zero rows rendering "(none recorded)"; (2) the report-backed
+  face — `runs.report_path` read via `readFileSync`/`JSON.parse` inside
+  `readRunReport`, every failure mode (no report_path / file missing /
+  unreadable) rendered as its true state with the store face standing, the
+  `rounds` block rendered verbatim (round / executed ("not executed" for
+  false) / survivorIds / `packetFingerprint` never recomputed /
+  `renderedBlockPath` as pointer text, never served or linked) under the
+  honesty label `report.json read via runs.report_path — not store rows`
+  on every face; (3) the §26.4 producer-less face — all seven fields
+  (token budget, mandatory/selected/distilled/excluded artifacts, source
+  chain, plan/packet records) as explicit `no producer` markers. The two
+  hash kinds render under distinct labels (`worker-attempt input hash` for
+  `attempts.input_context_hash`, `composed context packet fingerprint` for
+  `rounds[].packetFingerprint`; the fingerprint label rides the section's
+  common part so both kinds are labeled on every face — the authoring
+  round-1 red: the label originally rendered only when a rounds table
+  rendered, caught by the gate's standing-faces pins, fixed before
+  landing). Run page links the context page; the drill-down's attempts
+  section links it; `--help` documents the route; the header carve bullet
+  rewritten (consumer slice landed, producer carve stands).
+- `scripts/check-dashboard.mjs` — Gate 1.23 extended (115 → 144 `ok:`
+  assertions, 0 FAIL): context-route usage line; main-fixture page (200,
+  honesty label, "(none recorded)", distinct hash labels, 7 no-producer
+  markers); unknown-run context 404; POST on the route refused 405; run
+  page + drill-down attempts-section `<a href>` anchors (the latter pinned
+  on the retried variant, the only fixture with attempts); store-backed
+  equality with direct SELECTs on the retried variant (2 grouped rows,
+  c02 rendering no group); three hand-built rounds-report variants (the
+  reportPathOf construction: `planner.rawOutputPath` → `<dir>/report.json`,
+  report file written at the derived path) — executed round-2 record with
+  fingerprint + block path (verbatim, never linked), an `executed: false`
+  record rendering "not executed", and a nonexistent report file rendering
+  the true missing state with the store face standing; byte-identity
+  extended across the context GET/404/405 on every fixture DB (including
+  the three rounds variants); the zero-`<script>` sweep now covers 28
+  pages.
+- `VERIFICATION.md` — Gate 1.23 section extended in the same change-set:
+  intro names T-037; CLI faces name the context route; the new
+  `GET /run/<id>/context` bullet documents every face and pin; the
+  read-only-proof bullet's byte-identity set extended; the §26.4 carve
+  note rewritten to record this page as the landed report-read consumer
+  slice while the producer carve stands, with Gate 2 explicitly not
+  triggered (consumer-only — only `src/dashboard.ts`,
+  `scripts/check-dashboard.mjs`, and docs touched; nothing on the
+  VERIFICATION.md:2865 trigger list, no report-shape change) and Gate 3
+  n/a (no harness spawn).
+- `docs/tickets/T-037-run-context-page.md` + `docs/tickets/README.md` —
+  status done, ACs ticked, this Landed section, index row updated, all in
+  the same commit.
+
+Gate numbers measured this session, in the lane:
+
+- Gate 0: `npm run typecheck` — exit 0.
+- Gate 1: `npm run demo` — exit 0, `build ok` + `tests ok`.
+- Extended Gate 1.23: `node node_modules/tsx/dist/cli.mjs
+  scripts/check-dashboard.mjs` — ALL GREEN, exit 0, 144 `ok:` assertions,
+  0 `FAIL:` (standalone run ×4 while iterating; the full fast tier re-ran
+  it green).
+- Fast tier: `node scripts/verify.mjs fast` — ALL GREEN, exit 0.
+- Gate 2 NOT run and not required: consumer-only change-set, nothing on
+  the trigger list (VERIFICATION.md:2865). Gate 3 n/a (no adapter; the
+  dashboard spawns no harness).
+
+Carves honored, not reopened: no ContextPlan/Packet persistence (the
+producer ticket owns its own Gate 2), no rendered-block/artifact content
+serving (pointers only), no candidate-lineage rendering, no fingerprint
+recomputation, no verdict surface, zero new npm dependencies (the
+dependency pin re-ran green inside Gate 1.23), `POST /approvals/decide`
+stays the dashboard's only write.
 
 ## References
 

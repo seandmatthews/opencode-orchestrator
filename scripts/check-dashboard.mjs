@@ -28,9 +28,26 @@
 // every value equal to a direct SELECT on the same temp DB, NULLs rendered
 // as "missing", and the DB byte-identity proof extended across the new GET
 // routes on every fixture DB.
+// T-037 extends every pin to the per-run context route GET /run/<id>/context
+// (spec §26.4's honest consumer slice): 200/405/404 faces, the store-backed
+// face (attempts rows: job_id/attempt_number/state/started_at/
+// input_context_hash grouped per job, EQUAL to direct SELECTs, each job
+// linked to its drill-down; the flat fixture renders "(none recorded)"), the
+// report-backed face pinned against hand-built rounds-report variants (a
+// round-2 record with fingerprint + block path whose report FILE is written
+// at the report_path ingest derives, plus an executed:false round record and
+// a report_path pointing at a nonexistent file) with packetFingerprint
+// rendered verbatim and renderedBlockPath as verbatim pointer text never
+// served or linked, the honesty label "report.json read via
+// runs.report_path — not store rows", both hash labels distinct (the
+// attempts.input_context_hash vs rounds[].packetFingerprint disjointness per
+// the src/rounds.ts header), every producer-less §26.4 field rendering its
+// no-producer marker, the run page and drill-down attempts section linking
+// the context page with plain <a href>, and the DB byte-identity set + the
+// zero-<script> sweep extended across the new route on every fixture DB.
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { tmpdir, userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -179,6 +196,32 @@ const approvalSnapshot = (db) => ({
   events: db.prepare('SELECT seq, type, at, payload FROM events ORDER BY seq').all(),
 })
 
+// T-037: spec §26.4's context-inspector fields — NONE has a producer
+// anywhere in stage-0 (the ingest upsert binds jobs.context_plan_json
+// literal null; no context_plans/context_packets/artifact_lineage table
+// exists; the composer is pure/zero-I/O), so the context page must render
+// each as an explicit no-producer marker, never fabricated structure.
+const NO_PRODUCER_SPECS = [
+  'token budget',
+  'mandatory artifacts',
+  'selected artifacts',
+  'distilled artifacts',
+  'excluded artifacts',
+  'source chain',
+  'plan/packet records (context_plans / context_packets / artifact_lineage)',
+]
+const noProducerMarkersOk = (body) =>
+  NO_PRODUCER_SPECS.every((f) => body.includes(`<td>${f}</td><td class="refusal"`))
+  && countOccurrences(body, '>no producer</td>') === NO_PRODUCER_SPECS.length
+// The two hash kinds are disjoint by design (the src/rounds.ts header);
+// the page must label them distinctly and never as one kind of value.
+const bothHashLabelsOk = (body) =>
+  body.includes('<strong>worker-attempt input hash</strong>')
+  && body.includes('<strong>composed context packet fingerprint</strong>')
+  && body.includes('<code>attempts.input_context_hash</code>')
+  && body.includes('<code>rounds[].packetFingerprint</code>')
+const HONESTY_LABEL = '<strong>report.json read via runs.report_path &mdash; not store rows</strong>'
+
 const sandbox = mkdtempSync(join(tmpdir(), 't034-dashboard-'))
 try {
   // ---------- AC: zero new npm dependencies ----------
@@ -193,6 +236,7 @@ try {
   t('usage documents --port', help.stdout.includes('--port <port>'))
   t('usage documents --db with its default C:\\swarm\\refinery.db', help.stdout.includes('--db <path>') && help.stdout.includes('C:\\swarm\\refinery.db'))
   t('usage documents the T-035 drill-down route /run/<id>/job/<jobId>', help.stdout.includes('/run/<id>/job/<jobId>'))
+  t('usage documents the T-037 context route /run/<id>/context', help.stdout.includes('/run/<id>/context'))
 
   const absentDb = join(sandbox, 'absent.db')
   const noDb = runDashboardCli(['--db', absentDb])
@@ -264,6 +308,9 @@ try {
   t('main fixture run page: the flat derived DAG renders (one main phase, one job per candidate, zero edges)',
     runPage.body.includes('phases (1):') && runPage.body.includes(`jobs (${report.candidates.length}):`) && runPage.body.includes('edges (0):'))
   assertDagSection(runPage.body, report.runId, runDagCli(dbMainPath, report.runId), 'main fixture')
+  // T-037: the run page links to the context page with a plain <a href>.
+  t('run page: links to /run/<id>/context with a plain <a href> (zero client-side JS)',
+    runPage.body.includes(`<a href="/run/${report.runId}/context">`))
 
   // ---------- T-035 AC: the drill-down pages on the flat fixture ----------
   // Every value a direct SELECT on the same temp DB; NULLs render as
@@ -292,6 +339,29 @@ try {
       && jobPage.body.includes(`<h2>probe runs (${jprobes})</h2>`) && jobPage.body.includes('<tr><td colspan="5">(none recorded)</td></tr>'))
   }
 
+  // ---------- T-037: the per-run context page on the flat fixture ----------
+  // The flat fixture predates attempts: the store-backed face renders
+  // "(none recorded)" — nothing fabricated. Its report-face STATE is
+  // machine-dependent (the fixture's report_path is a heuristic
+  // reconstruction pointing into the long-disposed verify sandbox), so the
+  // rounds table is pinned only on the controlled variants below; here the
+  // standing faces are pinned: the honesty label, the distinct hash labels,
+  // and the no-producer markers.
+  const ctxPage = await get(explicit.base, `/run/${report.runId}/context`)
+  t(`context page: GET exits 200 (got ${ctxPage.status})`, ctxPage.status === 200)
+  t('context page: the honesty label on the report-backed face reads "report.json read via runs.report_path — not store rows"',
+    ctxPage.body.includes(HONESTY_LABEL))
+  t('context page: the flat fixture predates attempts — (none recorded), no per-job attempt groups rendered',
+    ctxPage.body.includes('(none recorded)') && !ctxPage.body.includes('<h3>job <a href='))
+  t('context page: input_context_hash and packetFingerprint render under DISTINCT labels, never one kind of value',
+    bothHashLabelsOk(ctxPage.body))
+  t('context page: every producer-less §26.4 field renders an explicit no-producer marker (7 fields)',
+    noProducerMarkersOk(ctxPage.body))
+
+  const ctxUnknown = await get(explicit.base, '/run/19990101000000/context')
+  t(`context page: GET /run/<unknown>/context exits 404 (got ${ctxUnknown.status})`, ctxUnknown.status === 404)
+  t('context page: unknown run carries the refusal message', ctxUnknown.body.includes(`no recorded run '19990101000000'`))
+
   const unknownRun = await get(explicit.base, '/run/19990101000000')
   t(`GET /run/<unknown> exits 404 (got ${unknownRun.status})`, unknownRun.status === 404)
   t('unknown run: the page carries the refusal message', unknownRun.body.includes(`no recorded run '19990101000000'`))
@@ -306,13 +376,16 @@ try {
   // ---------- T-035 pin: POST /approvals/decide remains the ONLY write ----------
   const postToJobPage = await post(explicit.base, `/run/${report.runId}/job/c01`)
   t(`POST on the drill-down route is refused 405 (got ${postToJobPage.status}) — it is a read route`, postToJobPage.status === 405)
+  // T-037: the context route is a read too — non-GET refused 405.
+  const postToContext = await post(explicit.base, `/run/${report.runId}/context`)
+  t(`POST on the context route is refused 405 (got ${postToContext.status}) — it is a read route`, postToContext.status === 405)
 
   // ---------- read-only proof: the DB is byte-identical across ALL GET routes ----------
   const list1 = await get(explicit.base, '/')
   const approvals0 = await get(explicit.base, '/approvals')
   t(`GET /approvals exits 200 on an approval-less DB (got ${approvals0.status})`, approvals0.status === 200)
   t('approvals page: an empty queue says so', approvals0.body.includes('no pending approvals'))
-  t(`DB byte-identical across ALL GET routes plus the refused drill-down POST (/, /run/<id>, /run/<id>/job/<jobId>, the drill-down 404s, the 405, /approvals, 404, / again)`, sha256(dbMainPath) === shaMain0)
+  t(`DB byte-identical across ALL GET routes plus the refused read-route POSTs (/, /run/<id>, /run/<id>/job/<jobId>, /run/<id>/context, the drill-down + context 404s, both 405s, /approvals, 404, / again)`, sha256(dbMainPath) === shaMain0)
   await stopServer(explicit.server)
 
   // ---------- AC3: the hand-built schedule+approval variant (phases/jobs/edges + queue) ----------
@@ -550,7 +623,31 @@ try {
   t('retried variant drill-down c02: the pre-T-007 candidate renders attempts (0) — zero rows, nothing fabricated',
     retriedC02Page.status === 200 && retriedC02Page.body.includes('<h2>attempts (0)</h2>')
     && retriedC02Page.body.includes('<tr><td colspan="10">(none recorded)</td></tr>'))
-  t('retried DB byte-identical across its GET routes', sha256(dbRetriedPath) === shaRetried0)
+  // T-037: the drill-down's attempts section links to the context page.
+  t('retried variant drill-down: the attempts section links to /run/<id>/context with a plain <a href>',
+    retriedJobPage.body.includes(`<a href="/run/${retriedR.runId}/context">`))
+  // T-037: the context page's STORE-BACKED face equals direct read-only
+  // SELECTs on the same DB — attempts grouped per job, each job linked to
+  // its drill-down, state/started_at/input_context_hash rendered as
+  // recorded (NULL started_at as missing).
+  const retriedCtx = await get(retriedSrv.base, `/run/${retriedR.runId}/context`)
+  t(`retried variant context page: GET exits 200 (got ${retriedCtx.status})`, retriedCtx.status === 200)
+  const retriedCtxRows = retriedDbRo.prepare(
+    'SELECT job_id, attempt_number, state, started_at, input_context_hash FROM attempts WHERE run_id = ? ORDER BY job_id, attempt_number',
+  ).all(retriedR.runId)
+  t(`retried variant context page: the store-backed face renders the attempts rows EQUAL to direct SELECTs, grouped per job (${retriedCtxRows.length} rows), c01 linked to its drill-down`,
+    retriedCtxRows.length === 2
+    && retriedCtxRows.every((r) => r.job_id === 'c01')
+    && retriedCtx.body.includes(`<h3>job <a href="/run/${retriedR.runId}/job/c01">c01</a> (2 attempts)</h3>`)
+    && retriedCtxRows.every((r) => retriedCtx.body.includes(
+      `<tr><td>${r.attempt_number}</td><td>${r.state}</td>`
+      + `<td>${r.started_at === null ? 'missing' : r.started_at}</td>`
+      + `<td>${r.input_context_hash}</td></tr>`)))
+  t('retried variant context page: c02 (pre-T-007, zero attempts) renders no job group — nothing fabricated',
+    !retriedCtx.body.includes(`<h3>job <a href="/run/${retriedR.runId}/job/c02">`))
+  t('retried variant context page: standing faces present (honesty label, distinct hash labels, no-producer markers)',
+    retriedCtx.body.includes(HONESTY_LABEL) && bothHashLabelsOk(retriedCtx.body) && noProducerMarkersOk(retriedCtx.body))
+  t('retried DB byte-identical across its GET routes (drill-downs + the context page)', sha256(dbRetriedPath) === shaRetried0)
   retriedDbRo.close()
   await stopServer(retriedSrv.server)
 
@@ -580,6 +677,102 @@ try {
     ndC01Page.status === 200 && ndC01Page.body.includes('<h2>verdict') && !ndC01Page.body.includes('never-dispatched'))
   t('never-dispatched DB byte-identical across its GET routes', sha256(dbNdPath) === shaNd0)
   await stopServer(ndSrv.server)
+
+  // ---------- T-037: the report-backed face — hand-built rounds-report variants ----------
+  // The rounds block rides report.json ONLY (the store persists verdicts
+  // alone), so its faces are pinned on hand-built variants, the
+  // hand-built-variant pattern: ingest binds runs.report_path from
+  // reportPathOf (planner.rawOutputPath → <dir>/report.json), so a variant
+  // whose report FILE is written at that derived path exercises the
+  // report-present face, one whose dir has no report.json exercises the
+  // missing-file face. Verbatim rendering is the point: packetFingerprint is
+  // never recomputed, renderedBlockPath is pointer text never served or
+  // linked, and an executed:false round renders "not executed" — recorded,
+  // never fabricated (AGENTS.md #7).
+  const roundFp = 'f'.repeat(64)
+  const roundsRunDir = join(sandbox, 'rounds-run')
+  const roundsReportPath = join(roundsRunDir, 'report.json')
+  const roundsBlockPath = join(roundsRunDir, 'round-2-context-block.txt')
+  const roundsExec = structuredClone(report)
+  roundsExec.planner.rawOutputPath = join(roundsRunDir, 'planner-raw.txt')
+  roundsExec.rounds = [
+    { round: 1, executed: true, survivorIds: ['c01', 'c02'] },
+    { round: 2, executed: true, survivorIds: ['c01-r2'], packetFingerprint: roundFp, renderedBlockPath: roundsBlockPath },
+  ]
+  mkdirSync(roundsRunDir, { recursive: true })
+  writeFileSync(roundsReportPath, JSON.stringify(roundsExec, null, 2))
+  const dbRoundsPath = join(sandbox, 'rounds.db')
+  ingest(roundsExec, dbRoundsPath)
+  const dbRoundsRo = openDb(dbRoundsPath)
+  t('rounds variant: ingest recorded report_path at the derived path where the report file was written',
+    dbRoundsRo.prepare('SELECT report_path FROM runs WHERE run_id = ?').get(roundsExec.runId).report_path === roundsReportPath)
+  const shaRounds0 = sha256(dbRoundsPath)
+  const roundsSrv = await startServer(dbRoundsPath)
+  const roundsCtx = await get(roundsSrv.base, `/run/${roundsExec.runId}/context`)
+  t(`rounds variant context page: GET exits 200 (got ${roundsCtx.status})`, roundsCtx.status === 200)
+  t('rounds variant: the honesty label reads "report.json read via runs.report_path — not store rows"',
+    roundsCtx.body.includes(HONESTY_LABEL))
+  t('rounds variant: round 1 renders executed with its survivorIds and no packet fields (nothing fabricated)',
+    roundsCtx.body.includes('<tr><td>1</td><td>executed</td><td>c01, c02</td><td>missing</td><td>missing</td></tr>'))
+  t('rounds variant: round 2 renders executed with the packetFingerprint VERBATIM (never recomputed) and the renderedBlockPath as pointer text',
+    roundsCtx.body.includes(`<tr><td>2</td><td>executed</td><td>c01-r2</td><td>${roundFp}</td><td>${roundsBlockPath}</td></tr>`))
+  t('rounds variant: the rendered block path is never served or linked to content (verbatim pointer only, §26.5 stays carved)',
+    roundsCtx.body.includes(`<td>${roundsBlockPath}</td>`) && !roundsCtx.body.includes(`<a href="${roundsBlockPath}"`))
+  t('rounds variant: both hash kinds render under DISTINCT labels (attempts.input_context_hash vs rounds[].packetFingerprint, disjoint per src/rounds.ts)',
+    bothHashLabelsOk(roundsCtx.body))
+  t('rounds variant: standing faces present (distinct hash labels, no-producer markers)',
+    bothHashLabelsOk(roundsCtx.body) && noProducerMarkersOk(roundsCtx.body))
+  t('rounds DB byte-identical across its GET routes (the report.json read touches no DB bytes)',
+    sha256(dbRoundsPath) === shaRounds0)
+  await stopServer(roundsSrv.server)
+  dbRoundsRo.close()
+
+  // The executed:false face (the runner records it when round 2 has no
+  // round-1 survivor or no planner phase — src/runner.ts): rendered as
+  // "not executed", never fabricated as executed.
+  const notExecDir = join(sandbox, 'rounds-notexec-run')
+  const roundsNotExec = structuredClone(report)
+  roundsNotExec.planner.rawOutputPath = join(notExecDir, 'planner-raw.txt')
+  roundsNotExec.rounds = [
+    { round: 1, executed: true, survivorIds: ['c01'] },
+    { round: 2, executed: false, survivorIds: [] },
+  ]
+  mkdirSync(notExecDir, { recursive: true })
+  writeFileSync(join(notExecDir, 'report.json'), JSON.stringify(roundsNotExec, null, 2))
+  const dbNotExecPath = join(sandbox, 'rounds-notexec.db')
+  ingest(roundsNotExec, dbNotExecPath)
+  const shaNotExec0 = sha256(dbNotExecPath)
+  const notExecSrv = await startServer(dbNotExecPath)
+  const notExecCtx = await get(notExecSrv.base, `/run/${roundsNotExec.runId}/context`)
+  t(`not-executed variant context page: GET exits 200 (got ${notExecCtx.status})`, notExecCtx.status === 200)
+  t('not-executed variant: the executed:false round renders "not executed" (recorded, never fabricated)',
+    notExecCtx.body.includes('<tr><td>2</td><td>not executed</td><td></td><td>missing</td><td>missing</td></tr>')
+    && notExecCtx.body.includes('<tr><td>1</td><td>executed</td><td>c01</td><td>missing</td><td>missing</td></tr>'))
+  t('not-executed DB byte-identical across its GET routes', sha256(dbNotExecPath) === shaNotExec0)
+  await stopServer(notExecSrv.server)
+
+  // The missing-report face — report_path pointing at a nonexistent file
+  // (the live state of most ingested runs: report_path is a heuristic
+  // reconstruction into run dirs that clean/disposal may have removed). The
+  // page renders the TRUE state and the store-backed face still stands.
+  const missingDir = join(sandbox, 'missing-run')
+  const missingRep = structuredClone(report)
+  missingRep.planner.rawOutputPath = join(missingDir, 'planner-raw.txt')
+  // report.json deliberately NOT written in missingDir.
+  const dbMissingPath = join(sandbox, 'missing.db')
+  ingest(missingRep, dbMissingPath)
+  const missingReportPath = join(missingDir, 'report.json')
+  const shaMissing0 = sha256(dbMissingPath)
+  const missingSrv = await startServer(dbMissingPath)
+  const missingCtx = await get(missingSrv.base, `/run/${missingRep.runId}/context`)
+  t(`missing-report variant context page: GET exits 200 (got ${missingCtx.status})`, missingCtx.status === 200)
+  t('missing-report variant: the page renders the true state — the report file is missing at its recorded report_path',
+    missingCtx.body.includes(`report file missing at ${missingReportPath}`))
+  t('missing-report variant: the honesty label still stands and the store-backed face is still present ((none recorded), hash labels, no-producer markers)',
+    missingCtx.body.includes(HONESTY_LABEL) && missingCtx.body.includes('(none recorded)')
+    && bothHashLabelsOk(missingCtx.body) && noProducerMarkersOk(missingCtx.body))
+  t('missing DB byte-identical across its GET routes', sha256(dbMissingPath) === shaMissing0)
+  await stopServer(missingSrv.server)
 
   // ---------- readOnly is enforced at the API level ----------
   // Guards the open option itself against node:sqlite churn across Node

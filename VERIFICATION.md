@@ -2629,7 +2629,8 @@ Pins T-034 (the first Milestone-7 slice, spec §26.1:1686-1701 run overview,
 §26.2:1703-1715 DAG view, §26.6:1770-1772 approval queue; ROADMAP stage 7)
 and — since T-035 — the per-job drill-down over the recorded store (spec
 §26.2:1703-1715's node-click drill-down, its store-backed text/table
-no-JS slice): the standalone `npm run dashboard -- [--port <port>] [--db <path>]`
+no-JS slice) and — since T-037 — the per-run context page (spec §26.4's
+honest consumer slice): the standalone `npm run dashboard -- [--port <port>] [--db <path>]`
 (`src/dashboard.ts`, the clean/integrate/dag/approvals standalone-entry
 pattern) serving a localhost-only, read-only HTML view over the schema-v5
 store. **Zero new npm dependencies** — plain `node:http` serving plus
@@ -2651,7 +2652,8 @@ token-free. It asserts:
 
 - **the CLI faces**: `--help` documents `--port` and `--db` with its
   `C:\swarm\refinery.db` default, and (T-035) the drill-down route
-  `/run/<id>/job/<jobId>`; a missing DB file refuses with exit
+  `/run/<id>/job/<jobId>`, and (T-037) the context route
+  `/run/<id>/context`; a missing DB file refuses with exit
   non-zero naming the path, nothing on stdout, and no DB file created;
   `--port` with a non-integer or an out-of-range value refuses naming the
   flag; an explicit `--port` is honored; the server's bound address is
@@ -2722,7 +2724,46 @@ token-free. It asserts:
   (drill-downs included) is swept for `<script>` tags, zero allowed — and
   **POSTing a drill-down route is refused 405** with the DB byte-identical
   after (the route is a read; `POST /approvals/decide` stays the ONLY
-  write);
+  write); and (T-037) the run page links `/run/<id>/context` with a plain
+  `<a href>` and the drill-down's attempts section links it too (pinned on
+  the retried variant, the only fixture with attempts);
+- **`GET /run/<id>/context`** (T-037) — spec §26.4's honest consumer slice,
+  same surface and patterns as the drill-down: 200 for a recorded run,
+  non-GET refused 405, an unknown run 404 carrying
+  `no recorded run '<id>'`. Three faces, nothing fabricated (AGENTS.md #7):
+  the **store-backed face** — the run's `attempts` rows (`job_id`,
+  `attempt_number`, `state`, `started_at`, `input_context_hash`) EQUAL to
+  direct read-only SELECTs on the same DB, grouped per job with each job
+  linked to its existing drill-down; pinned on the retried variant (2 rows,
+  both `c01`, c02 — the pre-T-007 shape — rendering NO job group), while
+  the flat fixture (which predates attempts) renders "(none recorded)";
+  the **report-backed face**, pinned against hand-built rounds-report
+  variants (ingest binds `runs.report_path` from the `reportPathOf`
+  heuristic — `planner.rawOutputPath` → `<dir>/report.json` — so a variant
+  whose report FILE is written at the derived path exercises the
+  report-present face): the report's `rounds` block rendered equal to the
+  recorded rounds — round 1 executed with its survivorIds and no packet
+  fields ("missing", not fabricated); round 2 executed with the
+  `packetFingerprint` VERBATIM (never recomputed) and the
+  `renderedBlockPath` as verbatim pointer text, asserted present as a
+  `<td>` cell and never inside an `<a href>` (§26.5 stays carved — the
+  block content is never served or linked); an `executed: false` round
+  record (the runner's no-survivor/no-planner shape) renders "not
+  executed", never fabricated as executed; the section carries the honesty
+  label `report.json read via runs.report_path — not store rows` on every
+  face, and a variant whose `report_path` points at a nonexistent file —
+  the live state of most ingested runs — renders exactly that
+  (`report file missing at <path>`) with the store-backed face still
+  standing (label, "(none recorded)", both hash labels, all markers);
+  the **producer-less §26.4 face** — every spec §26.4 field (token budget,
+  mandatory/selected/distilled/excluded artifacts, source chain, plan/
+  packet records) rendered as an explicit `no producer` marker (all seven
+  asserted on every context page the gate drives), never fabricated
+  structure; and the two hash kinds render under DISTINCT labels,
+  `attempts.input_context_hash` as the worker-attempt input hash (packet-
+  free) and `rounds[].packetFingerprint` as the composed context packet
+  fingerprint (attempt-free) — both labels asserted on every context page,
+  the disjointness per the src/rounds.ts header, never one kind of value;
 - **`GET /approvals`** renders exactly `listPendingApprovals`'s rows —
   every pending row's run/phase/job/state/requested_at/requested_by equal
   to a direct store call on the same temp DB (seeded via the real
@@ -2746,10 +2787,13 @@ token-free. It asserts:
   snapshots identical before and after the refusal block;
 - **read-only proof, not assertion** (AGENTS.md #9): the DB file's sha256
   is byte-identical across ALL GET routes (/, /run/<id>,
-  /run/<id>/job/<jobId>, the drill-down 404 faces, the refused drill-down
-  POST, /approvals, the run 404
+  /run/<id>/job/<jobId>, /run/<id>/context — T-037: the report.json read
+  touches no DB bytes —, the drill-down and context 404 faces, the refused
+  drill-down and context POSTs,
+  /approvals, the run 404
   face, / again — on the main fixture, the schedule variant, the retried
-  variant, the never-dispatched variant, and the probes variant alike);
+  variant, the never-dispatched variant, the probes variant, and the three
+  T-037 rounds-report variants alike);
   the decide POST is expected to mutate and is not in the byte-identity
   set; and a write against a `readOnly`-opened handle throws — the Known
   issues #7 node:sqlite churn guard, same as Gates 1.7/1.9;
@@ -2767,16 +2811,28 @@ token-free. It asserts:
   requires its own decisions entry (the node:sqlite fallback posture
   below).
 
-Not pinned here and carved by the ticket: §26.4 context-inspector page —
-carved, and BLOCKED ON A PRODUCER, not merely unpaged: nothing persists
+Not pinned here and carved by the ticket: §26.4's FULL context-inspector
+page — the producer carve STANDS, and T-037 landed exactly the consumer
+slice the carve predicted: `GET /run/<id>/context` renders the only
+producer-backed per-run context data there is (the store's
+`attempts.input_context_hash` rows and the report.json `rounds` block,
+read via `runs.report_path` and honestly labeled as not store rows), with
+every still-producer-less §26.4 field (token budget, mandatory/selected/
+distilled/excluded artifacts, source chain, plan/packet records) rendered
+as an explicit no-producer marker. Still BLOCKED ON A PRODUCER, not merely
+unpaged: nothing persists
 ContextPlan/Packet into the store (the ingest upsert binds
 `jobs.context_plan_json` literal null among the §6.4 policy columns; the
-only plan/packet JSON writer anywhere is the gate sandbox), so there is
-literally nothing store-backed to render; persisting it is an
-engine/report-shape change owning its own Gate 2, and the inspector page
+only plan/packet JSON writer anywhere is the gate sandbox; no
+`context_plans`/`context_packets`/`artifact_lineage` table exists), so the
+page has nothing store-backed to render for them and renders markers
+instead of fabricated structure; persisting it is an
+engine/report-shape change owning its own Gate 2, and the full §26.4 page
 is that producer ticket's consumer successor (T-012:149's CLI-precursor
 carve stands for this sharper reason); §26.5 artifact viewer serving
-contents (pointers only; per-job artifact filtering also stays carved —
+contents (pointers only — T-037's `renderedBlockPath` is a verbatim
+pointer, never served or linked; per-job artifact filtering also stays
+carved —
 the run page keeps its full artifacts table); §26.3 candidate comparison;
 §26.7 retention/disk view (T-021:124's carve stands); §26.8 prompt
 registry (T-029's carve stands); §26.2's interactive graph JS (the
@@ -2795,7 +2851,11 @@ dependency and its own decisions entry, deliberately not this slice.
 Gate 2 is not triggered: the change-set touches nothing on the trigger
 list (src/runner.ts, adapters, gates, workspace handling, report shape)
 — the T-006/T-008/T-012 standalone-consumer precedent, extended to
-T-035's consumer-only drill-down. Gate 3 n/a (no adapter; the dashboard
+T-035's consumer-only drill-down and T-037's consumer-only context page
+(a report.json READ through the store's recorded `report_path` handle,
+no report-shape change; the moment persistence is wanted instead of
+rendering, that is the producer ticket and it owns its own Gate 2 run).
+Gate 3 n/a (no adapter; the dashboard
 spawns no harness, so there is nothing to PWD-probe).
 
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)

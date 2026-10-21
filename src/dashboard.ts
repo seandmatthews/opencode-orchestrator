@@ -31,11 +31,21 @@
 //   drill-down keeps that posture: no per-job artifact filtering, no
 //   artifact contents (§26.5 stays carved); the run page keeps its full
 //   artifacts table.
-// - No context-inspector page (§26.4): carved, and BLOCKED ON A PRODUCER —
-//   nothing persists ContextPlan/Packet into the store (the ingest upsert
-//   binds jobs.context_plan_json literal null), so there is literally
-//   nothing store-backed to render; persisting it is the producer-first
-//   successor ticket and owns its own Gate 2.
+// - The §26.4 context page (T-037, GET /run/<id>/context) is the REPORT-READ
+//   CONSUMER SLICE only: it renders the store's per-attempt
+//   input_context_hash rows (the only store-backed context data), the run
+//   report's rounds block read via runs.report_path (honestly labeled as a
+//   report read, not store rows), and §26.4's producer-less fields as
+//   explicit no-producer markers — never fabricated structure (AGENTS.md
+//   #7). Nothing persists ContextPlan/Packet into the store (the ingest
+//   upsert binds jobs.context_plan_json literal null; no
+//   context_plans/context_packets/artifact_lineage table exists), so the
+//   FULL §26.4 page stays BLOCKED ON A PRODUCER — persisting it is the
+//   producer-first successor ticket and owns its own Gate 2. The two hash
+//   kinds are rendered under distinct labels and never conflated
+//   (src/rounds.ts header: worker attempts never see a packet); the
+//   rendered block path is a verbatim pointer only — never served, never
+//   linked to content (§26.5 stays carved).
 // - No interactive graph — the DAG renders as text/table; the drill-down
 //   links are plain <a href> (zero client-side JS). Dispatch order and
 //   phase/job-status rendering stay carved (report.json-only).
@@ -47,7 +57,7 @@
 //
 // node:sqlite is experimental on Node 22 (VERIFICATION.md Known issue #7) —
 // the dashboard rides the same engine as the store.
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import {
   createServer,
   type IncomingMessage,
@@ -61,7 +71,7 @@ import { decideApproval, listPendingApprovals, type ApprovalDecision, type Appro
 
 const DEFAULT_DB = 'C:\\swarm\\refinery.db'
 
-const usage = `Run dashboard: a local, read-only HTTP view over the recorded store (T-034, T-035).
+const usage = `Run dashboard: a local, read-only HTTP view over the recorded store (T-034, T-035, T-037).
 
 Usage:
   npm run dashboard -- [--port <port>] [--db <path>]
@@ -80,6 +90,12 @@ Routes:
                             one job's drill-down: the job row, the machine
                             verdict, its gate results, attempt history, and
                             probe runs (never-dispatched jobs say so)
+  GET  /run/<id>/context    one run's context evidence (T-037): every
+                            attempt's input_context_hash (store rows),
+                            the report's rounds block read via
+                            runs.report_path (honestly labeled, pointers
+                            only), and spec §26.4's producer-less fields
+                            marked no-producer
   GET  /approvals           the pending-approval queue (read-only)
   POST /approvals/decide    record an operator decision (form fields: run,
                             job, decision, optional by/note) — the ONLY write
@@ -397,6 +413,8 @@ function renderRun(dbPath: string, runId: string): string | null {
       `<td>${esc(run.goal as string)}</td><td>${esc(run.model as string)}</td>` +
       `<td>${esc(run.started_at as string)}</td><td>${esc(run.finished_at as string)}</td></tr></table>`,
       `<p>${INGESTED_LABEL}</p>`,
+      // T-037: plain <a href> to the per-run context page (zero client-side JS).
+      `<p><a href="/run/${esc(runId)}/context">per-run context evidence (attempt input hashes, report rounds block)</a></p>`,
       `<h2>candidates (${candidates.length})</h2>`,
       '<table><tr><th>candidate</th><th>worker</th><th>model</th><th>brief</th><th>worker</th><th>timeout</th><th>duration</th><th>diff bytes</th><th>verdict</th><th>error</th></tr>',
       ...candidateRows,
@@ -593,6 +611,9 @@ function renderJob(dbPath: string, runId: string, jobId: string): string | null 
       '<table><tr><th>attempt</th><th>state</th><th>started_at</th><th>ended_at</th><th>input_context_hash</th><th>prompt_version</th><th>process_identity_json</th><th>worker_session_id</th><th>output_artifacts_json</th><th>failure_json</th></tr>',
       ...attemptRows,
       '</table>',
+      // T-037: plain <a href> from the attempts section to the per-run
+      // context page, which groups every attempt's input_context_hash.
+      `<p><a href="/run/${esc(runId)}/context">per-run context evidence (all attempts&rsquo; input_context_hash, report rounds block)</a></p>`,
     )
 
     const probeRows = probes.length === 0
@@ -604,6 +625,221 @@ function renderJob(dbPath: string, runId: string, jobId: string): string | null 
       `<h2>probe runs (${probes.length})</h2>`,
       '<table><tr><th>probe</th><th>scenario</th><th>outcome</th><th>duration</th><th>bundle path</th></tr>',
       ...probeRows,
+      '</table>',
+      '',
+    )
+    return parts.join('\n')
+  } finally {
+    db.close()
+  }
+}
+
+// ---------- T-037: the per-run context page ----------
+
+interface ContextAttemptRow {
+  jobId: string
+  attemptNumber: number
+  state: string
+  startedAt: string | null
+  inputContextHash: string
+}
+
+/** The two hash kinds are DISJOINT by design (the src/rounds.ts header):
+ *  `input_context_hash` hashes one worker attempt's composed INPUT (brief +
+ *  model + prompt, lease path excluded) — packet-free, worker attempts never
+ *  see a packet; `packetFingerprint` hashes the CONTEXT a planner sees (the
+ *  composed survivor-evidence packet, §7.7) — attempt-free, rides the report
+ *  only. Rendered under distinct labels, never as one kind of value. */
+const ATTEMPT_HASH_LABEL =
+  '<strong>worker-attempt input hash</strong> &mdash; <code>attempts.input_context_hash</code>: ' +
+  'what ONE worker attempt was composed from (brief + model + the composed prompt, lease path ' +
+  'excluded; the T-007 per-attempt input provenance). Packet-free by design &mdash; worker ' +
+  'attempts never see a packet (src/rounds.ts header).'
+const PACKET_FINGERPRINT_LABEL =
+  '<strong>composed context packet fingerprint</strong> &mdash; <code>rounds[].packetFingerprint</code>: ' +
+  'the context the composed round&rsquo;s planner prompt was seeded with (the &sect;7.7 fingerprint over ' +
+  'the composed survivor-evidence packet). Attempt-free, recorded on composed rounds only, and it ' +
+  'rides the report.json only &mdash; the store holds no packet rows.'
+
+/** The spec §26.4 context-inspector fields with NO producer anywhere in
+ *  stage-0: the ingest upsert binds jobs.context_plan_json literal null among
+ *  the §6.4 policy columns (src/store/index.ts "no producer" comment), no
+ *  context_plans/context_packets/artifact_lineage table exists, the composer
+ *  is pure and zero-I/O (src/rounds.ts), and `context inspect` reads files,
+ *  never the store. Rendered as explicit markers, never fabricated structure
+ *  (AGENTS.md #7). */
+const NO_PRODUCER_FIELDS: [spec: string, field: string][] = [
+  ['token budget', 'token budget'],
+  ['mandatory artifacts', 'mandatory artifacts'],
+  ['selected artifacts', 'selected artifacts'],
+  ['distilled artifacts', 'distilled artifacts'],
+  ['excluded artifacts', 'excluded artifacts'],
+  ['source chain', 'source chain'],
+  ['plan/packet records (context_plans / context_packets / artifact_lineage)', 'plan/packet records'],
+]
+
+interface RoundFace {
+  round: number | null
+  executed: boolean | null
+  survivorIds: string[]
+  packetFingerprint: string | null
+  renderedBlockPath: string | null
+}
+
+/** Safely read the report file named by runs.report_path. Returns the
+ *  parsed JSON object, or an error string describing the TRUE state (no
+ *  report_path recorded / file missing / file unreadable) — the caller
+ *  renders the state it is given, never a fabricated report (AGENTS.md #7). */
+function readRunReport(reportPath: string | null): { ok: true; report: Record<string, unknown> } | { ok: false; reason: string } {
+  if (reportPath === null) {
+    return { ok: false, reason: 'no report_path is recorded for this run (ingest binds runs.report_path from the report&rsquo;s own artifact paths; this run&rsquo;s report carried none)' }
+  }
+  if (!existsSync(reportPath)) {
+    return { ok: false, reason: `report file missing at ${esc(reportPath)} &mdash; runs.report_path is a heuristic reconstruction from the report&rsquo;s artifact paths and the run&rsquo;s artifacts dir may be disposed` }
+  }
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(reportPath, 'utf8'))
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ok: false, reason: `report file unreadable at ${esc(reportPath)}: not a JSON object &mdash; the store-backed face above stands` }
+    }
+    return { ok: true, report: parsed as Record<string, unknown> }
+  } catch (e) {
+    return { ok: false, reason: `report file unreadable at ${esc(reportPath)}: ${esc(e instanceof Error ? e.message : String(e))} &mdash; the store-backed face above stands` }
+  }
+}
+
+/** The report-backed face of the context page: the run report's `rounds`
+ *  block (T-030), rendered verbatim — round / executed / survivorIds, and on
+ *  a composed round the packetFingerprint (verbatim, NEVER recomputed) and
+ *  the renderedBlockPath (a verbatim pointer only: never served, never
+ *  linked to content — §26.5 stays carved). Labeled as a report.json read
+ *  via runs.report_path, not store rows. A failed read (no report_path /
+ *  missing file / unreadable file) renders its TRUE state under the same
+ *  label — the store-backed face above still stands, nothing fabricated. */
+function renderRoundsSection(read: { ok: true; report: Record<string, unknown> } | { ok: false; reason: string }): string {
+  const parts: string[] = [
+    `<h2>report-backed face &mdash; the run report&rsquo;s rounds block (T-030)</h2>`,
+    `<p><strong>report.json read via runs.report_path &mdash; not store rows</strong>. The store persists verdicts only (candidates/gate_results); the rounds block rides the report file named by <code>runs.report_path</code>. Fingerprints render verbatim, never recomputed; the rendered-block path is a pointer only &mdash; its content is never served or linked (the artifact viewer stays carved).</p>`,
+    // The packetFingerprint label rides the section's common part so BOTH
+    // hash kinds are labeled on every face — a run whose report is missing
+    // or carries no rounds still says what kind of value the fingerprint is
+    // (and that none is recorded), never leaving one hash kind unlabeled.
+    `<p>${PACKET_FINGERPRINT_LABEL}</p>`,
+  ]
+  if (!read.ok) {
+    parts.push(`<p class="refusal">${read.reason}</p>`)
+    return parts.join('\n')
+  }
+  const rawRounds = read.report.rounds
+  if (!Array.isArray(rawRounds)) {
+    parts.push(
+      '<p class="refusal">' +
+      (rawRounds === undefined
+        ? 'no rounds block is recorded in the report &mdash; the run predates the T-030 loop or ran the single-pass default (--rounds 1); nothing fabricated.'
+        : 'the report&rsquo;s rounds block is present but not an array &mdash; rendered as absent rather than fabricated (AGENTS.md #7).') +
+      '</p>',
+    )
+    return parts.join('\n')
+  }
+  const rounds = rawRounds.map((r: unknown): RoundFace => {
+    const rec = (r ?? {}) as Record<string, unknown>
+    return {
+      round: typeof rec.round === 'number' ? rec.round : null,
+      executed: typeof rec.executed === 'boolean' ? rec.executed : null,
+      survivorIds: Array.isArray(rec.survivorIds) ? rec.survivorIds.filter((s): s is string => typeof s === 'string') : [],
+      packetFingerprint: typeof rec.packetFingerprint === 'string' ? rec.packetFingerprint : null,
+      renderedBlockPath: typeof rec.renderedBlockPath === 'string' ? rec.renderedBlockPath : null,
+    }
+  })
+  parts.push(
+    '<table><tr><th>round</th><th>executed</th><th>survivorIds</th><th>packetFingerprint</th><th>renderedBlockPath (pointer only &mdash; never served)</th></tr>',
+    ...rounds.map((r) =>
+      `<tr><td>${r.round === null ? 'missing' : String(r.round)}</td>` +
+      `<td>${r.executed === null ? 'missing' : r.executed ? 'executed' : 'not executed'}</td>` +
+      `<td>${esc(r.survivorIds.join(', '))}</td>` +
+      `<td>${r.packetFingerprint === null ? 'missing' : esc(r.packetFingerprint)}</td>` +
+      `<td>${r.renderedBlockPath === null ? 'missing' : esc(r.renderedBlockPath)}</td></tr>`),
+    '</table>',
+    '',
+  )
+  return parts.join('\n')
+}
+
+/**
+ * One run's context page (T-037, spec §26.4's honest slice). Faces:
+ * (1) the STORE-BACKED face — every attempts row's input_context_hash
+ *     grouped per job, each job linked to its drill-down; the only context
+ *     data the store has;
+ * (2) the REPORT-BACKED face — the run report's rounds block, read via
+ *     runs.report_path and honestly labeled as a report read, not store
+ *     rows; a missing/unreadable report renders its true state and the
+ *     store-backed face still stands;
+ * (3) the §26.4 producer-less fields as explicit no-producer markers.
+ * Returns null for an unknown run id → the caller's 404.
+ */
+function renderContext(dbPath: string, runId: string): string | null {
+  const db = openReadOnly(dbPath)
+  try {
+    const run = db.prepare(
+      'SELECT run_id, report_path FROM runs WHERE run_id = ?',
+    ).get(runId) as Record<string, unknown> | undefined
+    if (run === undefined) return null
+    const reportPath = (run.report_path as string | null) ?? null
+
+    const attempts = (db.prepare(
+      `SELECT job_id, attempt_number, state, started_at, input_context_hash
+       FROM attempts WHERE run_id = ? ORDER BY job_id, attempt_number`,
+    ).all(runId) as Record<string, unknown>[]).map((a): ContextAttemptRow => ({
+      jobId: a.job_id as string,
+      attemptNumber: a.attempt_number as number,
+      state: a.state as string,
+      startedAt: (a.started_at as string | null) ?? null,
+      inputContextHash: a.input_context_hash as string,
+    }))
+
+    // Group per job; the store order (job_id, attempt_number) is the render order.
+    const byJob = new Map<string, ContextAttemptRow[]>()
+    for (const a of attempts) {
+      const rows = byJob.get(a.jobId) ?? []
+      rows.push(a)
+      byJob.set(a.jobId, rows)
+    }
+
+    const parts: string[] = [
+      `<p><a href="/run/${esc(runId)}">&larr; back to run ${esc(runId)}</a></p>`,
+      `<p>${INGESTED_LABEL}</p>`,
+      `<h2>store-backed face &mdash; per-attempt input provenance</h2>`,
+      `<p>${ATTEMPT_HASH_LABEL}</p>`,
+      `<p>These hashes and the report&rsquo;s packet fingerprint below are two DISJOINT kinds of provenance (never conflated on this page): the worker-attempt input hash answers &ldquo;what was this attempt composed from&rdquo;, the packet fingerprint answers &ldquo;what context was the composed round&rsquo;s planner seeded with&rdquo;. Neither is ever a verdict input (decisions.md 2026-10-10 &mdash; gates decide survival).</p>`,
+    ]
+    if (attempts.length === 0) {
+      parts.push('<p>attempts rows: (none recorded) &mdash; this run predates the attempts table or carried no attempts; nothing fabricated.</p>')
+    } else {
+      for (const [jobId, rows] of byJob) {
+        parts.push(
+          `<h3>job <a href="/run/${esc(runId)}/job/${esc(jobId)}">${esc(jobId)}</a> (${rows.length} attempt${rows.length === 1 ? '' : 's'})</h3>`,
+          '<table><tr><th>attempt</th><th>state</th><th>started_at</th><th>input_context_hash</th></tr>',
+          ...rows.map((a) =>
+            `<tr><td>${a.attemptNumber}</td><td>${esc(a.state)}</td>` +
+            `<td>${a.startedAt === null ? 'missing' : esc(a.startedAt)}</td>` +
+            `<td>${esc(a.inputContextHash)}</td></tr>`),
+          '</table>',
+        )
+      }
+    }
+
+    parts.push(renderRoundsSection(readRunReport(reportPath)))
+
+    parts.push(
+      `<h2>spec &sect;26.4 fields with no producer</h2>`,
+      `<p>Spec &sect;26.4&rsquo;s context inspector names these fields; NOTHING in the engine produces any of them ` +
+      'today: the ingest upsert binds <code>jobs.context_plan_json</code> literal null among the &sect;6.4 policy columns, ' +
+      'no <code>context_plans</code>/<code>context_packets</code>/<code>artifact_lineage</code> table exists (the store persists verdicts only), ' +
+      'the round composer is pure and zero-I/O, and <code>context inspect</code> reads plan/packet files, never the store. ' +
+      'They render as markers instead of fabricated structure (AGENTS.md #7). Persisting them is the producer-first successor ticket.</p>',
+      '<table><tr><th>spec &sect;26.4 field</th><th>state</th></tr>',
+      ...NO_PRODUCER_FIELDS.map(([spec, field]) =>
+        `<tr><td>${esc(spec)}</td><td class="refusal" data-field="${esc(field)}">no producer</td></tr>`),
       '</table>',
       '',
     )
@@ -750,6 +986,17 @@ async function handle(req: IncomingMessage, res: ServerResponse, dbPath: string)
     if (url.pathname.startsWith('/run/')) {
       if (method !== 'GET') return methodNotAllowed(res)
       const rest = url.pathname.slice('/run/'.length)
+      if (rest.endsWith('/context')) {
+        // T-037: the per-run context page — store-backed attempt provenance
+        // plus the report's rounds block (honestly labeled), and §26.4's
+        // producer-less fields as markers. Same 404 face as the run page:
+        // an unknown run id carries the refusal message.
+        const runId = decodeURIComponent(rest.slice(0, -'/context'.length))
+        if (runId.length === 0) return notFound(res, 'missing run id')
+        const body = renderContext(dbPath, runId)
+        if (body === null) return notFound(res, `no recorded run '${runId}' in ${dbPath}`)
+        return send(res, 200, page(`run ${runId} — context`, body))
+      }
       const jobSep = rest.indexOf('/job/')
       if (jobSep !== -1) {
         // T-035: the per-job drill-down route. An id with no jobs row at
