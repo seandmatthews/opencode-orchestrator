@@ -57,6 +57,13 @@ ever reaps a lock automatically.
    Known issues, not in tribal memory.
 10. **Kill spawned dev processes when work concludes** (opencode sessions, verify runs,
     fixtures left running). Stale processes poison the next session's measurements.
+11. **Findings promote via tickets — human-owned, never same-run, never auto-promoted.**
+    A verifier finding (or any real failure) becomes a permanent gate only through a
+    ticket-owned change-set that adds the check to the gate set or fixture suite
+    (spec §32's ratchet). No engine code reads a findings block and edits a gate,
+    fixture, or spec; a model-authored check never decides survival in the run that
+    produced it (decisions.md, the T-039 entry). The ratchet crosses runs: finding in
+    run N → promotion change-set → gate in run N+1.
 
 ## Layout
 
