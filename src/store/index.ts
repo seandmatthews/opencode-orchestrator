@@ -1151,8 +1151,13 @@ function upsertRun(db: DatabaseSync, report: RunReport): void {
 /** One row per phase. Flat derivation: `main`, no dependencies, §6.3 policy
  *  columns null. Schedule derivation (T-009): the real phases, with the
  *  declared dependencies and the completion policy — `completion`'s first
- *  producer. `earlyStop`/`approvalGate` stay null (no producer; refused in
- *  the --jobs spec until their successor tickets land). */
+ *  producer. `earlyStop` HAS a producer since T-031 (the `--jobs` spec
+ *  parses `EarlyStopPolicy`), but its record lives in the report's additive
+ *  `earlyStops` block, not in this column — the store keeps persisting
+ *  verdicts only (the rounds store-invisible precedent), so
+ *  `early_stop_json` stays null this slice and its producer is a later
+ *  ticket. `approvalGate` still has no producer (refused in the --jobs
+ *  spec). */
 function upsertPhase(db: DatabaseSync, runId: string, p: DagPhase): void {
   db.prepare(
     `INSERT INTO phases (run_id, phase_id, dependencies_json, completion, early_stop_json, approval_gate_json)

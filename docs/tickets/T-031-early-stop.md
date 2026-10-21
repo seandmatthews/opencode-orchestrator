@@ -1,6 +1,6 @@
 # T-031 — Phase-level early stop: `EarlyStopPolicy.minSurvivors` on the `--jobs` spec — stop dispatching, never kill, record the stop (spec §20, §34 M8)
 
-**Status:** proposed
+**Status:** done 2026-10-20
 **Category:** engine
 **Value (1-5):** 3 · **Risk (1-5):** 3
 **Depends on:** T-009, T-030 (both done; T-006's reserved `early_stop_json` column is carved, not populated)
@@ -238,6 +238,107 @@ runner end-to-end.
       status + the index row updated in the same change. If implementation
       discovers an additional existing fixture must flip: red-before/
       green-after per AGENTS.md #8.
+
+## Landed
+
+2026-10-20, one change-set on `ticket/T-031-early-stop` (lane worktree, base
+cd6a61a). Files: `src/scheduler.ts`, `src/types.ts`, `src/runner.ts`,
+`src/store/index.ts` (the `upsertPhase` comment only — no store behavior
+change), `scripts/check-scheduler.mjs` (Gate 1.10: the recorded flip + the
+new early-stop faces), `scripts/check-store.mjs` (Gate 1.6 tolerance
+fixture), VERIFICATION.md, ROADMAP.md (the stage-6 remaining list and the
+stage-8 disposition row — early stop now `done`), this ticket, and the
+index row. No CLI change
+(item 7 stated, not shipped: no flag that cannot bind), no adapter change
+(Gate 3 n/a), no new npm dependency, no new store table or event.
+
+- `src/scheduler.ts` — `EarlyStopPolicy` (exactly ONE machine-computed
+  condition: `minSurvivors`, required positive integer), chosen and
+  documented in the module header beside the ready-function contract (the
+  stop DECISION is a pure function of terminal states; which jobs it leaves
+  undispatched is interleaving-sensitive, exactly like dispatch order
+  beyond the ready list); `PhaseSpec.earlyStop?` with strict sub-field
+  parsing (plain object, unknown sub-fields refused naming the offense;
+  `approvalGate` stays refused — the phase comment now says exactly that);
+  the pure `earlyStopMet(policy, phaseJobs, terminal)`; `buildSchedule`
+  derives the fourth `PhaseStatus` value `concluded-early` (declared policy
+  MET + ≥ 1 never-dispatched job; precedence failed > concluded-early >
+  completed > blocked; declared-but-unmet changes no status) with NO new
+  inputs; `buildEarlyStops` derives the report block from exactly the
+  schedule block's inputs.
+- `src/types.ts` — `PhaseStatus` gains `'concluded-early'` (doc comment
+  carries the precedence rule); additive `EarlyStopRecord` and
+  `RunReport.earlyStops?` (present only when a `--jobs` phase declared a
+  policy; default mode AND policy-less `--jobs` reports unchanged).
+- `src/runner.ts` — `driveJobs` reads policies from `opts.scheduled.phases`
+  only (default mode: no policies, the loop untouched), evaluates
+  `earlyStopMet` per iteration (monotone — once met it stays met), and
+  filters the met phases' ready-but-undispatched jobs out of the dispatch
+  pass; the stop only suppresses DISPATCH (in-flight jobs run to
+  completion; no cancellation path added); suppressed jobs record
+  `dispatchIndex: null` with no candidate report and no lease; dependents
+  stay never-dispatched for free (a never-dispatched dependency never
+  reaches terminal success); termination unchanged (the `inFlight.size ===
+  0` break fires exactly as before). `runSkeleton` attaches the
+  `earlyStops` block when non-empty.
+- `src/store/index.ts` — only the `upsertPhase` docblock updated (earlyStop
+  now HAS a producer; the record lives in the report block, not
+  `early_stop_json`, which stays null; `approval_gate_json` stays null
+  exactly as before). The `PHASE_COMPLETED` filter is untouched — a
+  concluded-early phase gets no event. No row shape change: the store reads
+  only `id`/`dependencies`/`completion` off schedule phases.
+- `scripts/check-scheduler.mjs` (Gate 1.10) — the recorded flip, this
+  change-set's only intentional invalidations of existing assertions: the
+  G2 face "approvalGate and earlyStop are refused until their successor
+  tickets land" became approvalGate-only refusal PLUS the earlyStop
+  positive face (`{ minSurvivors: 2 }` parses and is preserved verbatim on
+  PhaseSpec) and negative faces (non-object, missing/non-integer/`< 1`
+  minSurvivors, unknown sub-field — each naming the offense); the S7
+  fixture-table entry `['phase earlyStop', …, "unknown field 'earlyStop'"]`
+  was replaced by the five earlyStop refusal cases. Net strictness
+  increases (the T-018/T-019 precedent); no other existing check weakened.
+  New legs, all green: the pure `earlyStopMet` direct-call faces; ES1 (met
+  end-to-end, cap 1 < N 3, k 1: the remaining ready jobs never dispatched —
+  `dispatchIndex: null`, no candidate, no branch/worktree; executions ==
+  dispatches; `concluded-early`; the block agreeing with the schedule on
+  disk); ES2 (multi-phase: dependents never-dispatched while the
+  independent phase completes); ES3 (in-flight survival: both pre-stop
+  dispatches complete with full verdict ladders); ES4 (declared-but-unfired
+  policies recorded met:false — a failing phase keeps `failed` precedence,
+  a starved phase keeps `blocked`); ES5 (met + zero never-dispatched ⇒
+  `completed`); ES6 (policy-less `--jobs` carries no block); the S6
+  default-mode face extended with the no-earlyStops pin.
+- `scripts/check-store.mjs` (Gate 1.6) — the earlyStops-carrying tolerance
+  variant (the rounds-variant pattern): policy columns stay null, verdict
+  rows identical to the same report minus the block, no new table, a
+  concluded-early status deriving no `PHASE_COMPLETED` event, re-ingest
+  idempotent.
+
+Gates measured in the lane (every number from this change-set's runs):
+
+- Gate 0 `tsc --noEmit`: exit 0.
+- Gate 1.10 standalone
+  (`node node_modules/tsx/dist/cli.mjs scripts/check-scheduler.mjs`):
+  ALL GREEN — the new ES legs 19/19 ok plus every pre-existing face
+  unchanged and green (the G2/S7 flips ride green with the new messages).
+- Gate 1.6 standalone (`… scripts/check-store.mjs`): ALL GREEN — the 7 new
+  earlyStops-variant assertions ok, every pre-existing fixture unchanged.
+- Full fast tier `node scripts/verify.mjs fast` (Gate 0+0.5+1+1.5+1.6+
+  1.7-1.22): ALL GREEN, 0 failures.
+- **Gate 2 (`npm run verify:full`) NOT run by this lane** — mandated by
+  VERIFICATION.md ("Required when touching `src/runner.ts` … or anything
+  that changes report shape") and delegated to the driving wrapper per the
+  wrapper-budget note (VERIFICATION.md Gate 2 section): it spends real
+  model tokens and minutes. The driving run must record it here if it
+  lands after this commit.
+
+Deviations from the ticket text: none of substance. `buildEarlyStops` lives
+in `src/scheduler.ts` beside `buildSchedule` (the ticket named only
+`earlyStopMet` as the exported pure function; the record builder is
+schedule-derived evidence and belongs beside the schedule builder it must
+agree with — pinned through Gate 1.10's report faces). The acceptance
+checkboxes above are left unchecked per the T-030 convention; the Landed
+section records what pinned them.
 
 ## Verification
 
