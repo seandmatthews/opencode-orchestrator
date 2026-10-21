@@ -1,6 +1,7 @@
-// Run dashboard, first slice (T-034) — a local, read-only HTTP view over the
-// recorded store (spec §26.1 run overview, §26.2 DAG view, §26.6 approval
-// queue; ROADMAP stage 7, spec §34 Milestone 7).
+// Run dashboard (T-034 first slice; T-035 per-job drill-down) — a local,
+// read-only HTTP view over the recorded store (spec §26.1 run overview,
+// §26.2 DAG view plus its node-click drill-down's store-backed text/table
+// slice, §26.6 approval queue; ROADMAP stage 7, spec §34 Milestone 7).
 //
 //   npm run dashboard -- [--port <port>] [--db <path>]
 //
@@ -26,9 +27,18 @@
 // - No dispatch order: `dispatchIndex` lives only in report.json's schedule
 //   block; the store tables carry no dispatch-index column.
 // - No artifact contents — pointers only (path / size_bytes / content_hash;
-//   a NULL renders as "missing", never fabricated — AGENTS.md #7).
-// - No interactive graph — the DAG renders as text/table; §26.2's node-click
-//   JS stays carved.
+//   a NULL renders as "missing", never fabricated — AGENTS.md #7). The
+//   drill-down keeps that posture: no per-job artifact filtering, no
+//   artifact contents (§26.5 stays carved); the run page keeps its full
+//   artifacts table.
+// - No context-inspector page (§26.4): carved, and BLOCKED ON A PRODUCER —
+//   nothing persists ContextPlan/Packet into the store (the ingest upsert
+//   binds jobs.context_plan_json literal null), so there is literally
+//   nothing store-backed to render; persisting it is the producer-first
+//   successor ticket and owns its own Gate 2.
+// - No interactive graph — the DAG renders as text/table; the drill-down
+//   links are plain <a href> (zero client-side JS). Dispatch order and
+//   phase/job-status rendering stay carved (report.json-only).
 // - Nothing rendered can influence a verdict. The only mutation is the
 //   human POST /approvals/decide through the store's `decideApproval`
 //   writer — the documented T-008 wall-clock scoping case; every store
@@ -51,7 +61,7 @@ import { decideApproval, listPendingApprovals, type ApprovalDecision, type Appro
 
 const DEFAULT_DB = 'C:\\swarm\\refinery.db'
 
-const usage = `Run dashboard: a local, read-only HTTP view over the recorded store (T-034).
+const usage = `Run dashboard: a local, read-only HTTP view over the recorded store (T-034, T-035).
 
 Usage:
   npm run dashboard -- [--port <port>] [--db <path>]
@@ -66,6 +76,10 @@ Routes:
   GET  /                    the run list (ingested post-hoc state — never live)
   GET  /run/<id>            one run's candidates, gate results, evidence
                             pointers, probe runs, and recorded DAG
+  GET  /run/<id>/job/<jobId>
+                            one job's drill-down: the job row, the machine
+                            verdict, its gate results, attempt history, and
+                            probe runs (never-dispatched jobs say so)
   GET  /approvals           the pending-approval queue (read-only)
   POST /approvals/decide    record an operator decision (form fields: run,
                             job, decision, optional by/note) — the ONLY write
@@ -240,11 +254,13 @@ interface DagSection {
   edges: { jobId: string; dependsOnJobId: string }[]
 }
 
-function renderDag(dag: DagSection): string {
+function renderDag(runId: string, dag: DagSection): string {
   const phases = dag.phases.map((p) =>
     `<li>${esc(p.phaseId)} &mdash; dependencies: ${p.dependencies.length === 0 ? '(none)' : esc(p.dependencies.join(', '))}</li>`)
+  // T-035: each job id links to its drill-down page — a plain <a href>, no
+  // client-side JS (the zero-JS posture holds).
   const jobs = dag.jobs.map((j) =>
-    `<li>${esc(j.jobId)} (phase ${esc(j.phaseId)}, worker ${esc(j.workerId)}, model ${esc(j.model)}) &mdash; dependencies: ${j.dependencies.length === 0 ? '(none)' : esc(j.dependencies.join(', '))}</li>`)
+    `<li><a href="/run/${esc(runId)}/job/${esc(j.jobId)}">${esc(j.jobId)}</a> (phase ${esc(j.phaseId)}, worker ${esc(j.workerId)}, model ${esc(j.model)}) &mdash; dependencies: ${j.dependencies.length === 0 ? '(none)' : esc(j.dependencies.join(', '))}</li>`)
   const edges = dag.edges.length === 0
     ? ['<li>(none)</li>']
     : dag.edges.map((e) => `<li>${esc(e.jobId)} -&gt; ${esc(e.dependsOnJobId)}</li>`)
@@ -398,9 +414,200 @@ function renderRun(dbPath: string, runId: string): string | null {
       '<table><tr><th>job</th><th>probe</th><th>scenario</th><th>outcome</th><th>duration</th><th>bundle path</th></tr>',
       ...probeRows,
       '</table>',
-      renderDag(dag),
+      renderDag(runId, dag),
       '',
     ].join('\n')
+  } finally {
+    db.close()
+  }
+}
+
+// ---------- T-035: the per-job drill-down page ----------
+
+interface JobPageJob {
+  jobId: string
+  phaseId: string
+  workerId: string
+  model: string
+  brief: string
+  dependencies: string[]
+}
+
+interface AttemptRow {
+  attemptNumber: number
+  state: string
+  startedAt: string | null
+  endedAt: string | null
+  inputContextHash: string
+  promptVersion: string | null
+  processIdentityJson: string | null
+  workerSessionId: string | null
+  outputArtifactsJson: string
+  failureJson: string | null
+}
+
+/**
+ * One job's drill-down page. Every value is a direct SELECT on the
+ * schema-v5 store tables through the same readOnly open — nothing is
+ * recomputed and nothing comes from report.json. The verdict is the
+ * candidates.passed_all_gates row (job_id IS the candidate id in the
+ * derived DAG), rendered as survivor/eliminated — the machine verdict,
+ * rendered, never produced. NULLs render as "missing", never fabricated
+ * (AGENTS.md #7). The never-dispatched face — a jobs row with empty
+ * worker/model/brief and NO candidate row (the T-009/T-031 derivation for
+ * a declared-but-never-dispatched job) — renders as never-dispatched with
+ * no verdict, no gates, no attempts, nothing fabricated. An id with no
+ * jobs row at all returns null → the caller's 404.
+ */
+function renderJob(dbPath: string, runId: string, jobId: string): string | null {
+  const db = openReadOnly(dbPath)
+  try {
+    const job = db.prepare(
+      'SELECT job_id, phase_id, worker_id, model, brief, dependencies_json FROM jobs WHERE run_id = ? AND job_id = ?',
+    ).get(runId, jobId) as Record<string, unknown> | undefined
+    if (job === undefined) return null
+    const jobRow: JobPageJob = {
+      jobId: job.job_id as string,
+      phaseId: job.phase_id as string,
+      workerId: job.worker_id as string,
+      model: job.model as string,
+      brief: job.brief as string,
+      dependencies: JSON.parse((job.dependencies_json as string | null) ?? '[]') as string[],
+    }
+
+    // The verdict: the candidates row keyed by the job id (the derived DAG's
+    // job_id IS the candidate id). No row → never-dispatched check below.
+    const candidate = db.prepare(
+      'SELECT candidate_id, passed_all_gates FROM candidates WHERE run_id = ? AND candidate_id = ?',
+    ).get(runId, jobId) as Record<string, unknown> | undefined
+
+    const gates = (db.prepare(
+      `SELECT gate_name, passed, exit_code, duration_ms, output_tail
+       FROM gate_results WHERE run_id = ? AND candidate_id = ? ORDER BY gate_name`,
+    ).all(runId, jobId) as Record<string, unknown>[]).map((g): GateRow => ({
+      candidateId: jobId,
+      gateName: g.gate_name as string,
+      passed: g.passed === 1,
+      exitCode: (g.exit_code as number | null) ?? null,
+      durationMs: g.duration_ms as number,
+      outputTail: g.output_tail as string,
+    }))
+
+    const attempts = (db.prepare(
+      `SELECT attempt_number, state, started_at, ended_at, input_context_hash,
+              prompt_version, process_identity_json, worker_session_id,
+              output_artifacts_json, failure_json
+       FROM attempts WHERE run_id = ? AND job_id = ? ORDER BY attempt_number`,
+    ).all(runId, jobId) as Record<string, unknown>[]).map((a): AttemptRow => ({
+      attemptNumber: a.attempt_number as number,
+      state: a.state as string,
+      startedAt: (a.started_at as string | null) ?? null,
+      endedAt: (a.ended_at as string | null) ?? null,
+      inputContextHash: a.input_context_hash as string,
+      promptVersion: (a.prompt_version as string | null) ?? null,
+      processIdentityJson: (a.process_identity_json as string | null) ?? null,
+      workerSessionId: (a.worker_session_id as string | null) ?? null,
+      outputArtifactsJson: a.output_artifacts_json as string,
+      failureJson: (a.failure_json as string | null) ?? null,
+    }))
+
+    const probes = (db.prepare(
+      `SELECT probe_id, scenario_id, success, duration_ms, bundle_path
+       FROM probe_runs WHERE run_id = ? AND job_id = ? ORDER BY probe_id`,
+    ).all(runId, jobId) as Record<string, unknown>[]).map((p): ProbeRunRow => ({
+      jobId,
+      probeId: p.probe_id as string,
+      scenarioId: p.scenario_id as string,
+      success: p.success === 1,
+      durationMs: p.duration_ms as number,
+      bundlePath: p.bundle_path as string,
+    }))
+
+    const deps = jobRow.dependencies.length === 0 ? '(none)' : esc(jobRow.dependencies.join(', '))
+    const parts: string[] = [
+      '<table><tr><th>job</th><th>phase</th><th>worker</th><th>model</th><th>brief</th><th>dependencies</th></tr>',
+      `<tr><td>${esc(jobRow.jobId)}</td><td>${esc(jobRow.phaseId)}</td><td>${esc(jobRow.workerId)}</td>` +
+      `<td>${esc(jobRow.model)}</td><td>${esc(jobRow.brief)}</td><td>${deps}</td></tr>`,
+      '</table>',
+      `<p>${INGESTED_LABEL}</p>`,
+      `<p><a href="/run/${esc(runId)}">&larr; back to run ${esc(runId)}</a></p>`,
+    ]
+
+    // The never-dispatched face: empty worker/model/brief AND no candidate
+    // row — nothing executed, so nothing is rendered beyond the job row
+    // itself (no verdict, no gates, no attempts, nothing fabricated).
+    const neverDispatched =
+      candidate === undefined && jobRow.workerId === '' && jobRow.model === '' && jobRow.brief === ''
+    if (neverDispatched) {
+      parts.push(
+        '<p class="refusal">never-dispatched: this job carries an empty worker/model/brief and no candidate row ' +
+        '&mdash; nothing executed, so there is no verdict, no gate results, and no attempt history ' +
+        '(nothing fabricated &mdash; AGENTS.md #7).</p>',
+        '',
+      )
+      return parts.join('\n')
+    }
+
+    if (candidate === undefined) {
+      // A jobs row with dispatch metadata but no candidate row is not a
+      // never-dispatched shape; render the absence honestly instead of a
+      // fabricated verdict.
+      parts.push('<h2>verdict</h2>', '<p>no candidate row is recorded for this job &mdash; no verdict rendered (nothing fabricated).</p>')
+    } else {
+      parts.push(
+        `<h2>verdict (candidates.passed_all_gates &mdash; the machine verdict)</h2>`,
+        '<table><tr><th>candidate</th><th>verdict</th></tr>',
+        `<tr><td>${esc(jobId)}</td><td>${candidate.passed_all_gates === 1 ? 'survivor' : 'eliminated'}</td></tr>`,
+        '</table>',
+      )
+    }
+
+    const gateRows = gates.length === 0
+      ? ['<tr><td colspan="5">(none recorded)</td></tr>']
+      : gates.map((g) =>
+        `<tr><td>${esc(g.gateName)}</td><td>${g.passed ? 'pass' : 'FAIL'}</td>` +
+        `<td>${g.exitCode === null ? 'missing' : String(g.exitCode)}</td><td>${g.durationMs} ms</td>` +
+        `<td>${esc(g.outputTail)}</td></tr>`)
+    parts.push(
+      `<h2>gate results (${gates.length})</h2>`,
+      '<table><tr><th>gate</th><th>verdict</th><th>exit code</th><th>duration</th><th>output tail</th></tr>',
+      ...gateRows,
+      '</table>',
+    )
+
+    const attemptRows = attempts.length === 0
+      ? ['<tr><td colspan="10">(none recorded)</td></tr>']
+      : attempts.map((a) =>
+        `<tr><td>${a.attemptNumber}</td><td>${esc(a.state)}</td>` +
+        `<td>${a.startedAt === null ? 'missing' : esc(a.startedAt)}</td>` +
+        `<td>${a.endedAt === null ? 'missing' : esc(a.endedAt)}</td>` +
+        `<td>${esc(a.inputContextHash)}</td>` +
+        `<td>${a.promptVersion === null ? 'missing' : esc(a.promptVersion)}</td>` +
+        `<td>${a.processIdentityJson === null ? 'missing' : esc(a.processIdentityJson)}</td>` +
+        `<td>${a.workerSessionId === null ? 'missing' : esc(a.workerSessionId)}</td>` +
+        `<td>${esc(a.outputArtifactsJson)}</td>` +
+        `<td>${a.failureJson === null ? 'missing' : esc(a.failureJson)}</td></tr>`)
+    parts.push(
+      `<h2>attempts (${attempts.length})</h2>`,
+      '<p>as recorded &mdash; output_artifacts_json/failure_json verbatim; producer-less columns (process_identity_json, worker_session_id) render as missing.</p>',
+      '<table><tr><th>attempt</th><th>state</th><th>started_at</th><th>ended_at</th><th>input_context_hash</th><th>prompt_version</th><th>process_identity_json</th><th>worker_session_id</th><th>output_artifacts_json</th><th>failure_json</th></tr>',
+      ...attemptRows,
+      '</table>',
+    )
+
+    const probeRows = probes.length === 0
+      ? ['<tr><td colspan="5">(none recorded)</td></tr>']
+      : probes.map((p) =>
+        `<tr><td>${esc(p.probeId)}</td><td>${esc(p.scenarioId)}</td>` +
+        `<td>${p.success ? 'success' : 'failure'}</td><td>${p.durationMs} ms</td><td>${esc(p.bundlePath)}</td></tr>`)
+    parts.push(
+      `<h2>probe runs (${probes.length})</h2>`,
+      '<table><tr><th>probe</th><th>scenario</th><th>outcome</th><th>duration</th><th>bundle path</th></tr>',
+      ...probeRows,
+      '</table>',
+      '',
+    )
+    return parts.join('\n')
   } finally {
     db.close()
   }
@@ -542,7 +749,22 @@ async function handle(req: IncomingMessage, res: ServerResponse, dbPath: string)
     }
     if (url.pathname.startsWith('/run/')) {
       if (method !== 'GET') return methodNotAllowed(res)
-      const runId = decodeURIComponent(url.pathname.slice('/run/'.length))
+      const rest = url.pathname.slice('/run/'.length)
+      const jobSep = rest.indexOf('/job/')
+      if (jobSep !== -1) {
+        // T-035: the per-job drill-down route. An id with no jobs row at
+        // all (unknown job OR unknown run — either way the store holds no
+        // such row) is a 404 carrying the refusal message.
+        const runId = decodeURIComponent(rest.slice(0, jobSep))
+        const jobId = decodeURIComponent(rest.slice(jobSep + '/job/'.length))
+        if (jobId.length === 0) return notFound(res, 'missing job id')
+        const body = renderJob(dbPath, runId, jobId)
+        if (body === null) {
+          return notFound(res, `no recorded job '${jobId}' in run '${runId}' in ${dbPath}`)
+        }
+        return send(res, 200, page(`job ${jobId} (run ${runId})`, body))
+      }
+      const runId = decodeURIComponent(rest)
       if (runId.length === 0) return notFound(res, 'missing run id')
       const body = renderRun(dbPath, runId)
       if (body === null) return notFound(res, `no recorded run '${runId}' in ${dbPath}`)

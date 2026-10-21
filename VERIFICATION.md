@@ -2619,15 +2619,17 @@ list): `verify:full` runs a real 2-round loop — see Gate 2's section; the
 run itself is the driving run, recorded in T-030's Landed section. Gate 3
 n/a (no adapter change, no new harness to probe).
 
-## Gate 1.23 — run dashboard first slice (seconds, fast tier)
+## Gate 1.23 — run dashboard (seconds, fast tier)
 
 ```bash
 node node_modules/tsx/dist/cli.mjs scripts/check-dashboard.mjs
 ```
 
 Pins T-034 (the first Milestone-7 slice, spec §26.1:1686-1701 run overview,
-§26.2:1703-1715 DAG view, §26.6:1770-1772 approval queue; ROADMAP stage 7):
-the standalone `npm run dashboard -- [--port <port>] [--db <path>]`
+§26.2:1703-1715 DAG view, §26.6:1770-1772 approval queue; ROADMAP stage 7)
+and — since T-035 — the per-job drill-down over the recorded store (spec
+§26.2:1703-1715's node-click drill-down, its store-backed text/table
+no-JS slice): the standalone `npm run dashboard -- [--port <port>] [--db <path>]`
 (`src/dashboard.ts`, the clean/integrate/dag/approvals standalone-entry
 pattern) serving a localhost-only, read-only HTML view over the schema-v5
 store. **Zero new npm dependencies** — plain `node:http` serving plus
@@ -2648,7 +2650,8 @@ an ephemeral localhost port (the T-024 WebProbe client precedent) —
 token-free. It asserts:
 
 - **the CLI faces**: `--help` documents `--port` and `--db` with its
-  `C:\swarm\refinery.db` default; a missing DB file refuses with exit
+  `C:\swarm\refinery.db` default, and (T-035) the drill-down route
+  `/run/<id>/job/<jobId>`; a missing DB file refuses with exit
   non-zero naming the path, nothing on stdout, and no DB file created;
   `--port` with a non-integer or an out-of-range value refuses naming the
   flag; an explicit `--port` is honored; the server's bound address is
@@ -2671,8 +2674,55 @@ token-free. It asserts:
   against `npm run dag -- --json` (the Gate 1.7 surface) over the flat
   fixture AND the hand-built schedule variant (two real phases
   foundation → app with the expanded edge c02 -> c01, the check-store
-  construction); an unknown run id renders 404 carrying
+  construction); every DAG job id is (T-035) a plain `<a href>` link to
+  its drill-down page (zero client-side JS — the expected markup carries
+  the anchor); an unknown run id renders 404 carrying
   `no recorded run '<id>'`;
+- **`GET /run/<id>/job/<jobId>`** (T-035) — every value a direct SELECT on
+  the same temp DB, opened `readOnly`; nothing recomputed, nothing from
+  report.json, no verdict produced. Pinned per face:
+  the **jobs row** (phase, worker, model, brief, expanded dependencies —
+  equal to the DB row) on the flat fixture AND the hand-built schedule
+  variant (the gate keeps exercising it: no scheduled `--jobs` run has
+  ever been ingested — every `phases` row in the live
+  `C:\swarm\refinery.db` is the flat 'main' derivation, queried at T-035
+  authoring), where the row carries the REAL phase id and expanded
+  dependencies;
+  the **verdict** — the `candidates.passed_all_gates` row (`job_id` IS the
+  candidate id in the derived DAG), rendered survivor/eliminated equal to
+  the machine verdict, including the eliminated face on the elim variant
+  (its failed gate renders FAIL with the recorded exit code);
+  the job's **`gate_results` rows** (gate name, pass/FAIL, exit code,
+  duration, output tail — equal to the DB rows, a NULL exit code rendering
+  "missing", never fabricated);
+  the job's **full `attempts` history** on a hand-built retried variant
+  (the check-store retried construction: two attempts, attempt 2 mirroring
+  the real final values, c02 keeping the pre-T-007 zero-row shape) — one
+  row per attempt with state/started_at/ended_at/input_context_hash equal
+  to the DB row, `prompt_version` rendering verbatim where recorded
+  (64-hex on attempt 2) and "missing" where null (attempt 1), the
+  producer-less columns (`process_identity_json`/`worker_session_id`)
+  rendering "missing", and `output_artifacts_json`/`failure_json` as
+  recorded (verbatim JSON, HTML-escaped);
+  the job's **`probe_runs` rows** (probe, scenario, outcome, duration,
+  bundle_path, equal to the DB row) — pinned only on the hand-built
+  probes variant: the live store currently holds 0 `probe_runs` rows
+  (stated, not smoothed);
+  the flat fixture (which predates attempts and probes) renders
+  "(none recorded)" rows — zero rows, nothing fabricated;
+  the **never-dispatched face**: a job recorded with empty
+  worker/model/brief and NO candidate row (the T-009/T-031 derivation, on
+  a hand-built variant adding a `dispatchIndex: null` job) renders
+  never-dispatched — no verdict, no gates, no attempts, no probe runs
+  rendered, nothing fabricated (AGENTS.md #7) — while its dispatched
+  siblings keep rendering their full pages; and an id with **no `jobs` row
+  at all** (unknown job, or unknown run) renders 404 carrying
+  `no recorded job '<jobId>' in run '<runId>'`. Two standing pins ride the
+  same fetch log: **zero client-side JS** — every page the gate drives
+  (drill-downs included) is swept for `<script>` tags, zero allowed — and
+  **POSTing a drill-down route is refused 405** with the DB byte-identical
+  after (the route is a read; `POST /approvals/decide` stays the ONLY
+  write);
 - **`GET /approvals`** renders exactly `listPendingApprovals`'s rows —
   every pending row's run/phase/job/state/requested_at/requested_by equal
   to a direct store call on the same temp DB (seeded via the real
@@ -2695,12 +2745,14 @@ token-free. It asserts:
   (400, the vocabulary named), missing form field (400) — row/event
   snapshots identical before and after the refusal block;
 - **read-only proof, not assertion** (AGENTS.md #9): the DB file's sha256
-  is byte-identical across ALL GET routes (/, /run/<id>, /approvals, the
-  404 face, / again — on the main fixture, the schedule variant, and the
-  probes variant alike); the decide POST is expected to mutate and is not
-  in the byte-identity set; and a write against a `readOnly`-opened handle
-  throws — the Known issues #7 node:sqlite churn guard, same as Gates
-  1.7/1.9;
+  is byte-identical across ALL GET routes (/, /run/<id>,
+  /run/<id>/job/<jobId>, the drill-down 404 faces, the refused drill-down
+  POST, /approvals, the run 404
+  face, / again — on the main fixture, the schedule variant, the retried
+  variant, the never-dispatched variant, and the probes variant alike);
+  the decide POST is expected to mutate and is not in the byte-identity
+  set; and a write against a `readOnly`-opened handle throws — the Known
+  issues #7 node:sqlite churn guard, same as Gates 1.7/1.9;
 - **importing starts no server**: the module is imported dynamically under
   a wrapped `console.log`, and no startup banner appears — a module-level
   `main()` (observed once at authoring, red, and fixed with the entry-
@@ -2715,15 +2767,26 @@ token-free. It asserts:
   requires its own decisions entry (the node:sqlite fallback posture
   below).
 
-Not pinned here and carved by the ticket: §26.4 context-inspector page
-(T-012:149's carve stands — the CLI is the precursor); §26.5 artifact
-viewer serving contents (pointers only); §26.3 candidate comparison;
+Not pinned here and carved by the ticket: §26.4 context-inspector page —
+carved, and BLOCKED ON A PRODUCER, not merely unpaged: nothing persists
+ContextPlan/Packet into the store (the ingest upsert binds
+`jobs.context_plan_json` literal null among the §6.4 policy columns; the
+only plan/packet JSON writer anywhere is the gate sandbox), so there is
+literally nothing store-backed to render; persisting it is an
+engine/report-shape change owning its own Gate 2, and the inspector page
+is that producer ticket's consumer successor (T-012:149's CLI-precursor
+carve stands for this sharper reason); §26.5 artifact viewer serving
+contents (pointers only; per-job artifact filtering also stays carved —
+the run page keeps its full artifacts table); §26.3 candidate comparison;
 §26.7 retention/disk view (T-021:124's carve stands); §26.8 prompt
-registry (T-029's carve stands); §26.2's interactive graph JS; live
-status/auto-refresh (no producer — ingest stays post-hoc and derived);
-§26.1's producerless fields (token usage, disk usage, worktree count);
-dispatchIndex rendering from report.json; §34:2131's Sol screenshot-based
-UI verification (needs the stage-5 Codex/Sol adapter, ROADMAP.md:17,
+registry (T-029's carve stands); §26.2's interactive graph JS (the
+drill-down links are plain `<a href>`); live status/auto-refresh (no
+producer — ingest stays post-hoc and derived); §26.1's producerless
+fields (token usage, disk usage, worktree count); dispatch order and
+phase/job-status rendering (they live only in report.json's schedule
+block — a later ticket may render them, honestly labeled as report.json
+reads via `runs.report_path`); §34:2131's Sol screenshot-based UI
+verification (needs the stage-5 Codex/Sol adapter, ROADMAP.md:17,
 unlanded); auth or binding beyond 127.0.0.1; any engine/store write beyond
 the existing `decideApproval`. The dashboard rides the store's engine —
 `node:sqlite` is experimental on Node 22 (Known issue #7, benign
@@ -2731,9 +2794,9 @@ stderr warning); the named fallback (`better-sqlite3`) would be a new
 dependency and its own decisions entry, deliberately not this slice.
 Gate 2 is not triggered: the change-set touches nothing on the trigger
 list (src/runner.ts, adapters, gates, workspace handling, report shape)
-— the T-006/T-008/T-012 standalone-consumer precedent. Gate 3 n/a (no
-adapter; the dashboard spawns no harness, so there is nothing to
-PWD-probe).
+— the T-006/T-008/T-012 standalone-consumer precedent, extended to
+T-035's consumer-only drill-down. Gate 3 n/a (no adapter; the dashboard
+spawns no harness, so there is nothing to PWD-probe).
 
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
@@ -3049,6 +3112,25 @@ landing in T-017's Landed section).
     Gate 2, post-merge), so the next red of any class arrives with its
     bar attached and #10's captured-line threshold becomes enforceable
     instead of aspirational.
+    **2026-10-21 follow-up (T-035 review round 1) — the tee remedy itself
+    landed broken and never ran a single gate.** The tee wrapper's `node -e`
+    script carried `\n` inside the workflow file's double-quoted string
+    (`.zcode/workflows/ticket-implement.dwf.ts`, b4866f5); the
+    workflow-script layer consumed the escape, so `node -e` received a RAW
+    newline inside its single-quoted literal — a compile-time SyntaxError
+    (`Expected ',', got 'string literal'`) that killed EVERY wrapped gate
+    run exit 1 before spawnSync, with no output file written. First
+    surfaced as T-035's lane fast-tier red in review round 1 (the tier
+    itself never ran in that pass — nothing in the T-035 change-set was
+    implicated). Reproduced first-hand from the b4866f5 tree, then fixed by
+    double-escaping (`\\n`, so the `-e` script receives backslash-n and
+    parses its own newline): the fixed wrapper ran the lane fast tier end
+    to end — exit 0, full output teed
+    (`C:\swarm\verify-red\T-035-review1-wrapper-proof.log`, 177 KB, Gate 0
+    through ALL GREEN) — and the wrapper correctly tees a red child's
+    output and propagates its exit code too (observed on an intermediate
+    mis-argued run). Both bars are attached here, so the remedy now does
+    what its paragraph claims.
 
 ## Definition of done (per ticket)
 
