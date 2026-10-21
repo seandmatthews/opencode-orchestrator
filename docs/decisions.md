@@ -111,3 +111,43 @@ contradicts one of these must first rewrite its entry here, with a date and a re
   (c) candidate lineage lands (§34:2137; T-030:88-90's carve) — without
   generation identity beyond the `-rN` id suffix, iterated generations are
   unaccountable.
+- **2026-10-21 — The verifier's findings are advisory; a model-authored
+  check never decides survival in the run that produced it (T-039).** The
+  fourth model role (T-039, spec §10.1/§9.2) actively tests a candidate's
+  work and records findings with the commands it ran, under a distinct
+  report block. The boundary, written down in the role's landing change-set
+  because the role's entire legitimacy hangs on it: `passedAllGates` stays
+  `gates.every(...) && diffBytes > 0` (`src/runner.ts`); no ladder line, no
+  retry decision, no elimination path reads the verifier block; a
+  `blocker-advisory` finding eliminates nothing, promotes nothing, reorders
+  nothing — in the run that produced it, ever. Findings acquire teeth only
+  through spec §32's ratchet (§32:1939-1956: finding → reproduction →
+  machine probe or test → regression artifact → project quality suite),
+  which is HUMAN-OWNED and CROSSES RUNS: a finding promotes into a gate set
+  or fixture suite only when a human turns it into a deterministic check and
+  commits it (the T-041 successor work). A model-authored check that decided
+  its own run's survival would be the model grading its own homework — the
+  exact inversion of the 2026-10-10 machine-gates decision above. This entry
+  extends that decision; it does not amend it.
+  Stated tension with the spec, owned here rather than smoothed: §10.1's
+  deep verifier is "Read-only" (§10.1:768) and *receives* machine test
+  outputs as inputs — the spec's division of labor has machine workers
+  produce evidence and model verifiers interpret it. T-039 lets the
+  verifier generate machine outputs itself (bounded, in-lease, recorded as
+  observations-with-evidence). That is a documented extension, not silent
+  drift: it is consistent with §3.3's evidence-before-interpretation (the
+  verifier gathers evidence before opining) and §14's
+  mechanism-over-prompts (the posture is enforced at the adapter, whatever
+  the prompt says) — but it does go beyond §10.1's input list, and the
+  reason is: an agent that cannot run anything can only guess at runtime
+  behavior, which is exactly the failure mode §3.3 bans. The required
+  suite's results still come from the gates; the verifier's executions are
+  exploration, never the required evidence.
+  Scope notes: the execute capability rides the existing 'worktree-read'
+  posture unchanged — the T-039 step-one probe (`scripts/diag-execute.mjs`,
+  the `diag-pwd.mjs` precedent, run against the vendored opencode-ai 1.19.3)
+  found the plan agent EXECUTE-CAPABLE with its edit tools deny-listed, so
+  no fourth ExecutionPolicy value exists; re-run the probe before relying on
+  that answer after any harness upgrade. T-022 (2026-10-18) is untouched:
+  the verifier works inside the existing `WorktreeProvider` lease — the only
+  `WorkspaceProvider` — and introduces no disposable-clone provider.

@@ -75,6 +75,6 @@ Rules:
 | T-036 | Commit identity: history rewritten to matthews.sean.d@gmail.com — filter-branch over main, repo-local config, saved workflows de-hardcoded (repo meta; no engine change) | low | done 2026-10-21 |
 | T-037 | Run context page: per-run context evidence — attempts' `input_context_hash` + the report.json rounds block, producer-less §26.4 fields marked (extends T-034/T-035; spec §26.4; ROADMAP stage 7) | medium | done 2026-10-21 |
 | T-038 | Bounded gate-failure retry: `--gate-retry` — one feedback-informed attempt composed from the gates' own recorded output; blind re-rolls stay banned; decisions entry in-ticket (spec §24:1462, §30:1893) | high | proposed |
-| T-039 | Verifier role: active pre-disposition verification — `--verifier-model`, execute-capable read posture, findings cite the commands they ran, never verdicts; ratchet-boundary decisions entry in-ticket (spec §10.1, §6.6:426, §9.2) | high | proposed |
+| T-039 | Verifier role: active pre-disposition verification — `--verifier-model`, execute-capable read posture, findings cite the commands they ran, never verdicts; ratchet-boundary decisions entry in-ticket (spec §10.1, §6.6:426, §9.2) | high | done 2026-10-21 |
 | T-040 | Verifier findings ride the retry brief: the pre-retry verifier call site + the composition seam joining T-038/T-039; gates stay the only verdict input (spec §24:1462, §9.2) | medium | proposed |
 | T-041 | The ratchet: finding→gate promotion — human-owned, ticket-carried, never same-run; convention + one cross-run fixture proof (spec §32) | medium | proposed |

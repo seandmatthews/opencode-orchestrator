@@ -893,6 +893,17 @@ try {
   finish()
 }
 
+// ---------- Gate 1.25: verifier role (T-039) ----------
+// (1.24 stays free for the proposed T-038 lane, whose ticket claims it.)
+section('Gate 1.25 — verifier role (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-verifier.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'verifier self-check exit 0')
+} catch (e) {
+  fail(`verifier self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
