@@ -14,7 +14,13 @@
 //      determinism contract: the topological ready set, tie-broken by
 //      ascending job id, never wall-clock, never insertion order, never
 //      model opinion. Concurrent COMPLETION interleaving is not
-//      deterministic and is not claimed to be; dispatch ORDER is.
+//      deterministic and is not claimed to be; dispatch ORDER is. The
+//      phase-level early stop (T-031, `earlyStopMet`) makes the same kind
+//      of claim and only that kind: the stop DECISION is a pure function of
+//      terminal states — same terminal states ⇒ same stop decision — while
+//      WHICH jobs it leaves undispatched is interleaving-sensitive exactly
+//      like dispatch order beyond the ready list. The claim is never the
+//      same wall-clock behavior.
 //   3. `buildSchedule` — the recorded schedule block that makes a run's
 //      dispatch order checkable post-hoc.
 //
@@ -25,22 +31,44 @@
 import { win32 } from 'node:path'
 import { cycleRefusal, unknownDependencyRefusal } from './store/index.js'
 import type { DagJobSpec } from './store/index.js'
-import type { RunSchedule } from './types.js'
+import type { EarlyStopRecord, RunSchedule } from './types.js'
 import type { ScenarioSpec } from './probe.js'
 
 /** Phase id charset — same rule as job ids: the ids key schedule records and
  *  store rows, and an unrestricted id could collide or smuggle separators. */
 export const SPEC_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/
 
+/** Phase-level early stop (T-031, spec §20:1265-1281 "Early Stop and Bounded
+ *  Waste"; §6.3:328 names `earlyStop` on PhaseSpec — the type is used but
+ *  never defined by the spec, chosen here and documented, the T-013
+ *  `DistillationPlan` precedent). Exactly ONE machine-computed condition
+ *  this slice — `minSurvivors`, the spec §20 "stop after 20 valid
+ *  researchers" shape. The stop only suppresses DISPATCH: in-flight jobs run
+ *  to completion — never killed — verdicts are never changed, nobody is
+ *  eliminated. No model-confidence condition of any kind (spec §20:1281;
+ *  decisions.md 2026-10-10 — machine gates decide survival, models advise):
+ *  the condition is a count over terminal states, never a model opinion. */
+export interface EarlyStopPolicy {
+  /** Conclude the phase early once at least this many of its jobs have
+   *  reached terminal SUCCESS. Machine-computed: a count over terminal
+   *  states, never a model opinion. */
+  minSurvivors: number
+}
+
 /** Declared phase (§6.3:323-330 subset): only the fields with a producer.
- *  `earlyStop`/`approvalGate` (§6.3:328-329) have none until their successor
- *  tickets land and are refused as unknown fields. */
+ *  `earlyStop` (§6.3:328) has one since T-031 (EarlyStopPolicy above);
+ *  `approvalGate` (§6.3:329) still does not — its own M8 successor has not
+ *  landed — and is refused as an unknown field. */
 export interface PhaseSpec {
   id: string
   /** Declared phase-level dependencies (raw, as written in the spec). */
   dependencies: string[]
   /** The one completion policy this slice implements (§6.3:333-341). */
   completion: 'all'
+  /** Phase-level early stop (T-031, spec §20): present only when the spec
+   *  declares it — a policy-absent phase (and any default-mode run) is
+   *  untouched by the stop machinery. */
+  earlyStop?: EarlyStopPolicy
 }
 
 /** Job (§6.4:346-367 subset): only the fields with a producer. Every §6.4
@@ -149,14 +177,34 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
   const seenPhases = new Set<string>()
   for (const p of raw.phases) {
     if (!isPlainObject(p)) refuse('every phase must be a JSON object')
-    unknownField('phase', p, ['id', 'dependencies', 'completion'])
+    unknownField('phase', p, ['id', 'dependencies', 'completion', 'earlyStop'])
     const id = parseId('phase', p.id)
     if (seenPhases.has(id)) refuse(`duplicate phase id '${id}'`)
     seenPhases.add(id)
     if (p.completion !== undefined && p.completion !== 'all') {
       refuse(`phase '${id}' completion must be "all" (got ${JSON.stringify(p.completion)}) — no other completion policy is implemented this slice`)
     }
-    phases.push({ id, dependencies: parseStringArray(`phase '${id}'`, p.dependencies, 'dependencies'), completion: 'all' })
+    // T-031: the one early-stop policy, parsed strictly (the T-009
+    // unknown-field posture) — a plain object with a required positive
+    // integer `minSurvivors`; unknown sub-fields are refused naming the
+    // offense. `approvalGate` stays refused (see unknownField above).
+    let earlyStop: EarlyStopPolicy | undefined
+    if (p.earlyStop !== undefined) {
+      if (!isPlainObject(p.earlyStop)) {
+        refuse(`phase '${id}' earlyStop must be an object with a "minSurvivors" field (got ${JSON.stringify(p.earlyStop)})`)
+      }
+      unknownField(`phase '${id}' earlyStop`, p.earlyStop, ['minSurvivors'])
+      if (typeof p.earlyStop.minSurvivors !== 'number' || !Number.isInteger(p.earlyStop.minSurvivors) || p.earlyStop.minSurvivors < 1) {
+        refuse(`phase '${id}' earlyStop.minSurvivors must be a positive integer (got ${JSON.stringify(p.earlyStop.minSurvivors)})`)
+      }
+      earlyStop = { minSurvivors: p.earlyStop.minSurvivors }
+    }
+    phases.push({
+      id,
+      dependencies: parseStringArray(`phase '${id}'`, p.dependencies, 'dependencies'),
+      completion: 'all',
+      ...(earlyStop !== undefined ? { earlyStop } : {}),
+    })
   }
 
   const jobs: JobSpec[] = []
@@ -392,12 +440,38 @@ export function readyJobs(
 }
 
 /**
+ * The phase-level early-stop decision (T-031, spec §20:1265-1281): the
+ * phase's count of terminal-SUCCEEDED jobs ≥ `policy.minSurvivors`. Pure:
+ * identical terminal states ⇒ identical decision, no input mutated, no
+ * model opinion (decisions.md 2026-10-10 — the condition is a machine
+ * count over terminal states, never model confidence, spec §20:1281).
+ * Per the module header's determinism contract: which jobs the stop leaves
+ * undispatched is interleaving-sensitive; only the DECISION is pinned.
+ */
+export function earlyStopMet(
+  policy: EarlyStopPolicy,
+  phaseJobs: readonly SchedulerJobNode[],
+  terminal: ReadonlyMap<string, TerminalJobState>,
+): boolean {
+  let survivors = 0
+  for (const j of phaseJobs) {
+    if (terminal.get(j.id) === 'succeeded') survivors++
+  }
+  return survivors >= policy.minSurvivors
+}
+
+/**
  * The recorded schedule block (T-009): every phase with its status under
  * `all` (completed = every job terminal-success; failed = some job
  * terminal-failed; blocked = jobs never dispatched because an upstream phase
- * failed), and every job with its 0-based dispatch index — null for jobs
- * that were never dispatched, which are recorded as not-dispatched, never
- * fabricated as terminal. Pure.
+ * failed; concluded-early = T-031: the phase DECLARED an EarlyStopPolicy,
+ * the policy is MET, and at least one of its jobs was never dispatched
+ * because the stop suppressed it — precedence
+ * failed > concluded-early > completed > blocked, purely derived from the
+ * declared policy + terminal states + dispatch indices; a declared-but-unmet
+ * policy changes no status), and every job with its 0-based dispatch index —
+ * null for jobs that were never dispatched, which are recorded as
+ * not-dispatched, never fabricated as terminal. Pure.
  */
 export function buildSchedule(
   phases: readonly PhaseSpec[],
@@ -410,11 +484,14 @@ export function buildSchedule(
       const phaseJobs = jobs.filter((j) => j.phaseId === p.id)
       const failed = phaseJobs.some((j) => terminal.get(j.id) === 'failed')
       const completed = phaseJobs.every((j) => terminal.get(j.id) === 'succeeded')
+      const concludedEarly = p.earlyStop !== undefined
+        && earlyStopMet(p.earlyStop, phaseJobs, terminal)
+        && phaseJobs.some((j) => !dispatchIndexOf.has(j.id))
       return {
         id: p.id,
         dependencies: [...p.dependencies],
         completion: p.completion,
-        status: failed ? 'failed' : completed ? 'completed' : 'blocked',
+        status: failed ? 'failed' : concludedEarly ? 'concluded-early' : completed ? 'completed' : 'blocked',
       }
     }),
     jobs: jobs.map((j) => ({
@@ -424,4 +501,39 @@ export function buildSchedule(
       dispatchIndex: dispatchIndexOf.has(j.id) ? dispatchIndexOf.get(j.id)! : null,
     })),
   }
+}
+
+/**
+ * The early-stop evidence block (T-031): one `EarlyStopRecord` per phase
+ * that DECLARED a policy, in spec phase order. `met: true` entries are the
+ * stop evidence — which condition fired, who survived (report order, which
+ * for a `--jobs` wave is the jobs' spec order), who was never dispatched
+ * (spec order); `met: false` entries record that a declared policy was
+ * evaluated and never fired (the `RoundRecord.executed: false` posture — a
+ * policy that silently vanished would be indistinguishable from a bug).
+ * Pure; derived from exactly the inputs `buildSchedule` sees, so the
+ * records cannot disagree with the schedule block's `dispatchIndex: null`
+ * entries. An empty return means no phase declared a policy — the caller
+ * omits the block and the report is unchanged.
+ */
+export function buildEarlyStops(
+  phases: readonly PhaseSpec[],
+  jobs: readonly SchedulerJobNode[],
+  terminal: ReadonlyMap<string, TerminalJobState>,
+  dispatchIndexOf: ReadonlyMap<string, number>,
+): EarlyStopRecord[] {
+  const records: EarlyStopRecord[] = []
+  for (const p of phases) {
+    if (p.earlyStop === undefined) continue
+    const phaseJobs = jobs.filter((j) => j.phaseId === p.id)
+    records.push({
+      phaseId: p.id,
+      condition: 'minSurvivors',
+      threshold: p.earlyStop.minSurvivors,
+      met: earlyStopMet(p.earlyStop, phaseJobs, terminal),
+      survivorIds: phaseJobs.filter((j) => terminal.get(j.id) === 'succeeded').map((j) => j.id),
+      neverDispatchedIds: phaseJobs.filter((j) => !dispatchIndexOf.has(j.id)).map((j) => j.id),
+    })
+  }
+  return records
 }

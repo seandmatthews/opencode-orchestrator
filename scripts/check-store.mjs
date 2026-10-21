@@ -30,7 +30,12 @@
 // only as null). T-030 extends it with a rounds-carrying variant: the
 // additive `rounds` block is verdict-neutral — ingest accepts it, persists
 // verdicts only (rows identical to the same report without the block),
-// materializes no new table, and re-ingests idempotently.
+// materializes no new table, and re-ingests idempotently. T-031 extends it
+// with an earlyStops-carrying variant (the rounds-variant pattern): ingest
+// accepts the block, persists verdicts only — rows identical to the same
+// report without it, `early_stop_json`/`approval_gate_json` staying null —
+// and a `concluded-early` phase status derives no PHASE_COMPLETED event
+// (the unchanged filter).
 import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -541,6 +546,87 @@ try {
       dagEventsBefore.map((e) => [e.type, e.at, e.payload])))
   t('scheduled re-ingest: integrity_check ok', dagDb2.prepare('PRAGMA integrity_check').get()['integrity_check'] === 'ok')
   dagDb2.close()
+
+  // ---------- T-031: the additive earlyStops block is store-invisible ----------
+  // A hand-built earlyStops-carrying variant of the fixture (the
+  // rounds-variant pattern): foundation concludes early (c01 dispatched and
+  // passing, c02 declared-then-suppressed with dispatchIndex null and NO
+  // candidate row), app stays blocked behind it, and the report carries the
+  // `earlyStops` block with a met:true record. The store keeps persisting
+  // VERDICTS only — pinned three ways: the policy columns stay null (the
+  // pin above does NOT flip), the same report minus the block ingesting to
+  // identical runs/candidates/phases/jobs rows, and no new table.
+  const early = structuredClone(report)
+  early.candidates = [structuredClone(report.candidates[0])]
+  early.schedule = {
+    phases: [
+      { id: 'foundation', dependencies: [], completion: 'all', status: 'concluded-early' },
+      { id: 'app', dependencies: ['foundation'], completion: 'all', status: 'blocked' },
+    ],
+    jobs: [
+      { id: 'c01', phaseId: 'foundation', dependencies: [], dispatchIndex: 0 },
+      { id: 'c02', phaseId: 'foundation', dependencies: [], dispatchIndex: null },
+      { id: 'c03', phaseId: 'app', dependencies: ['c01', 'c02'], dispatchIndex: null },
+    ],
+  }
+  early.earlyStops = [
+    { phaseId: 'foundation', condition: 'minSurvivors', threshold: 1, met: true, survivorIds: ['c01'], neverDispatchedIds: ['c02'] },
+  ]
+  const earlyDbPath = join(sandbox, 'earlystop.db')
+  ingest(early, earlyDbPath)
+  const earlyDb = new DatabaseSync(earlyDbPath)
+  const earlyPhases = earlyDb.prepare('SELECT * FROM phases WHERE run_id = ? ORDER BY phase_id').all(early.runId)
+  t('earlyStops variant: ingest accepts the block — two phase rows, and the policy columns stay NULL (the null-column pin does not flip)',
+    earlyPhases.length === 2
+    && earlyPhases.every((p) => p.early_stop_json == null && p.approval_gate_json == null)
+    && earlyPhases[0]?.completion === 'all')
+  t('earlyStops variant: verdicts only — one candidates row (c01; the suppressed job has no candidate row) and its gate_results',
+    earlyDb.prepare('SELECT COUNT(*) AS n FROM candidates').get().n === 1
+    && earlyDb.prepare('SELECT COUNT(*) AS n FROM gate_results').get().n === early.candidates[0].gates.length)
+  t('earlyStops variant: never-dispatched jobs derive job rows with empty worker/model/brief (nothing fabricated)',
+    (() => {
+      const rows = earlyDb.prepare('SELECT * FROM jobs WHERE run_id = ? ORDER BY job_id').all(early.runId)
+      return rows.length === 3 && rows.every((r) => r.job_id === 'c01' || (r.worker_id === '' && r.model === '' && r.brief === ''))
+    })())
+  t('earlyStops variant: no new table materialized for the block (the census stays the 11 schema-v5 tables)',
+    (() => {
+      const names = earlyDb.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all().map((r) => r.name)
+      return names.length === 11 && !names.some((n) => n.toLowerCase().includes('early'))
+    })())
+  t('earlyStops variant: a concluded-early phase derives NO PHASE_COMPLETED event (the unchanged filter), and JOB_* events cover the dispatched job only',
+    (() => {
+      const evs = earlyDb.prepare('SELECT type, payload FROM events ORDER BY seq').all()
+      return !evs.some((e) => e.type === 'PHASE_COMPLETED')
+        && evs.filter((e) => e.type === 'JOB_READY' || e.type === 'JOB_SUCCEEDED').length === 2
+        && evs.some((e) => e.type === 'JOB_SUCCEEDED' && JSON.parse(e.payload).jobId === 'c01')
+    })())
+  const earlyCandidates = earlyDb.prepare('SELECT * FROM candidates ORDER BY candidate_id').all()
+  const earlyGates = earlyDb.prepare('SELECT * FROM gate_results ORDER BY candidate_id, gate_name').all()
+  const earlyRuns = earlyDb.prepare('SELECT * FROM runs').get()
+  const earlyPhasesAll = earlyDb.prepare('SELECT * FROM phases ORDER BY phase_id').all()
+  const earlyJobs = earlyDb.prepare('SELECT * FROM jobs ORDER BY job_id').all()
+  earlyDb.close()
+  // The store-invisibility counterfactual: the SAME report minus the block
+  // ingests to byte-identical rows — the block is never read.
+  const earlyBare = structuredClone(early)
+  delete earlyBare.earlyStops
+  const earlyBareDbPath = join(sandbox, 'earlystop-bare.db')
+  ingest(earlyBare, earlyBareDbPath)
+  const earlyBareDb = new DatabaseSync(earlyBareDbPath)
+  t('earlyStops variant: store-invisibility — the same report WITHOUT the block ingests to identical runs/candidates/phases/jobs/gate_results rows',
+    eq(earlyBareDb.prepare('SELECT * FROM candidates ORDER BY candidate_id').all(), earlyCandidates)
+    && eq(earlyBareDb.prepare('SELECT * FROM gate_results ORDER BY candidate_id, gate_name').all(), earlyGates)
+    && eq(earlyBareDb.prepare('SELECT * FROM runs').get(), earlyRuns)
+    && eq(earlyBareDb.prepare('SELECT * FROM phases ORDER BY phase_id').all(), earlyPhasesAll)
+    && eq(earlyBareDb.prepare('SELECT * FROM jobs ORDER BY job_id').all(), earlyJobs))
+  earlyBareDb.close()
+  ingest(early, earlyDbPath)
+  const earlyDb2 = new DatabaseSync(earlyDbPath)
+  t('earlyStops re-ingest: state rows idempotent (the block stays unread), integrity ok',
+    eq(earlyDb2.prepare('SELECT * FROM candidates ORDER BY candidate_id').all(), earlyCandidates)
+    && eq(earlyDb2.prepare('SELECT * FROM phases ORDER BY phase_id').all(), earlyPhasesAll)
+    && earlyDb2.prepare('PRAGMA integrity_check').get()['integrity_check'] === 'ok')
+  earlyDb2.close()
 
   // ---------- T-016: probes variant — probe_runs rows + bundle artifacts ----------
   // Hand-built (the elim-variant pattern): c01 gains a one-attempt history

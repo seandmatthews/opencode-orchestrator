@@ -15,12 +15,19 @@
 // independent phases still run, default mode staying exactly today's
 // behavior (no schedule block), and the --jobs spec refusals exiting 1 with
 // nothing written, before the checkout lock, repo validation, or any
-// artifacts dir exists.
+// artifacts dir exists. T-031 extends it with the phase-level early stop:
+// `EarlyStopPolicy.minSurvivors` parses strictly and is preserved on
+// PhaseSpec (the approvalGate/earlyStop refusal flip recorded below), the
+// pure `earlyStopMet` decision, and the end-to-end stop semantics with the
+// fake adapter — dispatch-only suppression (never killed, full verdict
+// ladder for in-flight survivors), not-dispatched recording, dependent
+// phases starved while independents complete, `concluded-early` phase
+// status precedence, and the additive `earlyStops` report block.
 import { execFileSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parseJobsSpec, readyJobs } from '../src/scheduler.ts'
+import { earlyStopMet, parseJobsSpec, readyJobs } from '../src/scheduler.ts'
 import { runSkeleton } from '../src/runner.ts'
 import { WorktreeProvider } from '../src/workspace/worktree.ts'
 
@@ -247,9 +254,19 @@ async function main() {
     }
     t('G2: unknown fields are refused, naming the field (job policy field)',
       throwsWith({ phases: [{ id: 'p' }], jobs: [{ id: 'j', phase: 'p', brief: 'b', retryPolicy: { maxAttempts: 2 } }] }, "unknown field 'retryPolicy'"))
-    t('G2: approvalGate and earlyStop are refused until their successor tickets land',
-      throwsWith({ phases: [{ id: 'p', approvalGate: {} }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, "unknown field 'approvalGate'")
-      && throwsWith({ phases: [{ id: 'p', earlyStop: {} }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, "unknown field 'earlyStop'"))
+    t('G2: approvalGate is still refused as an unknown field (no producer — its own M8 successor has not landed)',
+      throwsWith({ phases: [{ id: 'p', approvalGate: {} }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, "unknown field 'approvalGate'"))
+    t('G2: earlyStop parses (T-031) and is preserved verbatim on PhaseSpec',
+      (() => {
+        const s = parseJobsSpec({ phases: [{ id: 'p', earlyStop: { minSurvivors: 2 } }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] })
+        return eq(s.phases[0]?.earlyStop, { minSurvivors: 2 })
+      })())
+    t('G2: earlyStop strict shapes — non-object, missing/non-integer/<1 minSurvivors, unknown sub-field, each naming the offense',
+      throwsWith({ phases: [{ id: 'p', earlyStop: 'after-2' }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, "earlyStop must be an object")
+      && throwsWith({ phases: [{ id: 'p', earlyStop: {} }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, 'minSurvivors must be a positive integer')
+      && throwsWith({ phases: [{ id: 'p', earlyStop: { minSurvivors: 1.5 } }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, 'minSurvivors must be a positive integer')
+      && throwsWith({ phases: [{ id: 'p', earlyStop: { minSurvivors: 0 } }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, 'minSurvivors must be a positive integer')
+      && throwsWith({ phases: [{ id: 'p', earlyStop: { minSurvivors: 2, stopWhen: 'bored' } }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, "unknown field 'stopWhen'"))
     t('G2: non-all completion is refused',
       throwsWith({ phases: [{ id: 'p', completion: 'quorum' }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, 'must be "all"'))
     t('G2: the empty job set, duplicate ids, and bad charset are refused',
@@ -464,6 +481,223 @@ async function main() {
       eq(branchesOf(git).sort(), ['swarm/wt-a1', 'swarm/wt-a2', 'swarm/wt-c1']))
   }
 
+  // ---------- S5b: phase-level early stop (T-031, spec §20) ----------
+  // ES — the pure stop decision (direct calls), then the end-to-end stop
+  // semantics with the fake adapter: dispatch-only suppression (in-flight
+  // jobs run to completion — the fake adapter counts executions ==
+  // dispatches), not-dispatched recording (no candidate, no lease/branch/
+  // worktree), dependents starved while independents complete, the
+  // `concluded-early` status precedence, and the additive `earlyStops`
+  // report block agreeing with the schedule block.
+  {
+    const policy = { minSurvivors: 2 }
+    const phaseJobs = [
+      { id: 'a', phaseId: 'p', dependencies: [] },
+      { id: 'b', phaseId: 'p', dependencies: [] },
+      { id: 'c', phaseId: 'p', dependencies: [] },
+    ]
+    const T = (entries) => new Map(entries)
+    t('ES: earlyStopMet is pure — identical terminal maps give identical decisions',
+      earlyStopMet(policy, phaseJobs, T([['a', 'succeeded'], ['b', 'succeeded']])) === true
+      && earlyStopMet(policy, phaseJobs, T([['a', 'succeeded'], ['b', 'succeeded']])) === true)
+    t('ES: the threshold is exact — terminal failures never count as survivors, no input is mutated',
+      earlyStopMet(policy, phaseJobs, T([['a', 'succeeded'], ['b', 'failed']])) === false
+      && earlyStopMet(policy, phaseJobs, T([])) === false
+      && earlyStopMet({ minSurvivors: 1 }, phaseJobs, T([['a', 'succeeded'], ['b', 'failed']])) === true
+      && earlyStopMet({ minSurvivors: 1 }, phaseJobs, T([['a', 'failed']])) === false
+      && phaseJobs.every((j) => Array.isArray(j.dependencies)))
+  }
+  {
+    // ES1 — met condition end-to-end: one phase, 3 jobs, minSurvivors 1,
+    // cap 1 (staggered). After the 1st success the remaining ready jobs are
+    // never dispatched; the one dispatched job ran to completion exactly
+    // once with its full verdict ladder; the phase is concluded-early.
+    const spec = {
+      phases: [{ id: 'es', completion: 'all', earlyStop: { minSurvivors: 1 } }],
+      jobs: [
+        { id: 'es-1', phase: 'es', brief: 'es brief 1' },
+        { id: 'es-2', phase: 'es', brief: 'es brief 2' },
+        { id: 'es-3', phase: 'es', brief: 'es brief 3' },
+      ],
+    }
+    const worker = okWorker(5)
+    const { report, artifactsDir, git } = await drive('early-stop-met', { scheduled: buildScheduled(spec, { worker, gates: [passGate] }), worker, concurrency: 1 })
+    const byId = new Map(report.schedule.jobs.map((j) => [j.id, j]))
+    t('ES1: after the k-th success the remaining ready jobs are never dispatched — dispatchIndex null, no candidate report, one execution only',
+      byId.get('es-1')?.dispatchIndex === 0 && byId.get('es-2')?.dispatchIndex === null && byId.get('es-3')?.dispatchIndex === null
+      && !report.candidates.some((c) => c.id === 'es-2') && !report.candidates.some((c) => c.id === 'es-3')
+      && worker.calls.length === 1 && worker.briefsSeen().length === 1)
+    t('ES1: the dispatched survivor carries its full verdict ladder (gates ran and passed)',
+      report.candidates.length === 1 && report.candidates[0]?.id === 'es-1'
+      && report.candidates[0]?.passedAllGates === true && report.candidates[0]?.gates.length === 1
+      && report.candidates[0]?.gates[0]?.passed === true)
+    t('ES1: the suppressed jobs created no lease, branch, or worktree',
+      eq(branchesOf(git).sort(), ['swarm/wt-es-1']) && existsSync(join(artifactsDir, 'wt', 'es-1'))
+      && !existsSync(join(artifactsDir, 'wt', 'es-2')) && !existsSync(join(artifactsDir, 'wt', 'es-3')))
+    t('ES1: the phase status is concluded-early',
+      report.schedule.phases.length === 1 && report.schedule.phases[0]?.id === 'es'
+      && report.schedule.phases[0]?.status === 'concluded-early')
+    t('ES1: the earlyStops block records the fired policy and agrees exactly with the schedule block (neverDispatchedIds == the dispatchIndex:null entries)',
+      eq(report.earlyStops, [{ phaseId: 'es', condition: 'minSurvivors', threshold: 1, met: true, survivorIds: ['es-1'], neverDispatchedIds: ['es-2', 'es-3'] }])
+      && eq(report.earlyStops[0]?.neverDispatchedIds, report.schedule.jobs.filter((j) => j.dispatchIndex === null).map((j) => j.id)))
+    t('ES1: the earlyStops block rides report.json on disk',
+      eq(JSON.parse(read(join(artifactsDir, 'report.json'))).earlyStops, report.earlyStops))
+  }
+  {
+    // ES2 — multi-phase: dependents of a concluded-early phase stay
+    // never-dispatched (no candidate, no branch) while an independent phase
+    // still runs to completion. Cap 1 staggers everything; ready-order
+    // ascending puts i1 before s1.
+    const spec = {
+      phases: [
+        { id: 'stopper', completion: 'all', earlyStop: { minSurvivors: 1 } },
+        { id: 'dependent', dependencies: ['stopper'], completion: 'all' },
+        { id: 'independent', completion: 'all' },
+      ],
+      jobs: [
+        { id: 's1', phase: 'stopper', brief: 'stopper brief 1' },
+        { id: 's2', phase: 'stopper', brief: 'stopper brief 2' },
+        { id: 'd1', phase: 'dependent', brief: 'dependent brief 1' },
+        { id: 'i1', phase: 'independent', brief: 'independent brief 1' },
+      ],
+    }
+    const worker = okWorker(5)
+    const { report, git } = await drive('early-stop-multiphase', { scheduled: buildScheduled(spec, { worker, gates: [passGate] }), worker, concurrency: 1 })
+    const byId = new Map(report.schedule.jobs.map((j) => [j.id, j]))
+    t('ES2: statuses — stopper concluded-early, dependent blocked, independent completed',
+      eq(report.schedule.phases.map((p) => [p.id, p.status]),
+        [['stopper', 'concluded-early'], ['dependent', 'blocked'], ['independent', 'completed']]))
+    t('ES2: the dependent job stayed never-dispatched — no candidate report, no branch, never executed',
+      byId.get('d1')?.dispatchIndex === null && !report.candidates.some((c) => c.id === 'd1')
+      && !worker.briefsSeen().includes('dependent brief 1')
+      && eq(branchesOf(git).sort(), ['swarm/wt-i1', 'swarm/wt-s1']))
+    t('ES2: the independent phase still ran to completion',
+      report.candidates.some((c) => c.id === 'i1' && c.passedAllGates) && byId.get('i1')?.dispatchIndex !== null)
+    t('ES2: the earlyStops block carries one record for the declaring phase only',
+      eq(report.earlyStops?.map((r) => r.phaseId), ['stopper'])
+      && report.earlyStops?.[0]?.met === true && eq(report.earlyStops?.[0]?.neverDispatchedIds, ['s2']))
+  }
+  {
+    // ES3 — in-flight survival: both jobs dispatch in the first iteration
+    // (cap 2, BEFORE any success can fire the stop), so both were dispatched
+    // before the stop; when the first succeeds the stop fires and the third
+    // is suppressed while the second is still in flight — it must complete
+    // with its full verdict ladder, never killed.
+    const spec = {
+      phases: [{ id: 'es', completion: 'all', earlyStop: { minSurvivors: 1 } }],
+      jobs: [
+        { id: 'f1', phase: 'es', brief: 'flight brief 1' },
+        { id: 'f2', phase: 'es', brief: 'flight brief 2' },
+        { id: 'f3', phase: 'es', brief: 'flight brief 3' },
+      ],
+    }
+    const worker = okWorker(30)
+    const { report } = await drive('early-stop-inflight', { scheduled: buildScheduled(spec, { worker, gates: [passGate] }), worker, concurrency: 2 })
+    t('ES3: both pre-stop dispatches ran to completion exactly once (executions == dispatches — never killed)',
+      worker.calls.length === 2 && report.candidates.length === 2
+      && worker.briefsSeen().length === 2)
+    t('ES3: each in-flight survivor carries its full verdict ladder (gates ran, candidate report written)',
+      report.candidates.every((c) => c.passedAllGates === true && c.gates.length === 1
+        && c.gates[0]?.passed === true && c.attempts.length === 1))
+    t('ES3: the third job was suppressed and the phase concluded early with both survivors recorded',
+      report.schedule.jobs.find((j) => j.id === 'f3')?.dispatchIndex === null
+      && report.schedule.phases[0]?.status === 'concluded-early'
+      && report.earlyStops?.[0]?.met === true && eq(report.earlyStops?.[0]?.survivorIds, ['f1', 'f2'])
+      && eq(report.earlyStops?.[0]?.neverDispatchedIds, ['f3']))
+  }
+  {
+    // ES4a — a declared-but-unfired policy on a phase that RAN: 2 jobs,
+    // minSurvivors 2, one fails ⇒ 1 survivor < 2 ⇒ met:false, phase failed
+    // (precedence: failed > concluded-early > completed > blocked).
+    const spec = {
+      phases: [{ id: 'unfired', completion: 'all', earlyStop: { minSurvivors: 2 } }],
+      jobs: [
+        { id: 'u1', phase: 'unfired', brief: 'unfired brief 1' },
+        { id: 'u2', phase: 'unfired', brief: 'unfired brief 2' },
+      ],
+    }
+    const worker = fakeWorker(new Map([['unfired brief 2', [{ ok: false, exitCode: 1 }]]]))
+    const { report } = await drive('early-stop-unfired', { scheduled: buildScheduled(spec, { worker, gates: [passGate] }), worker, concurrency: 2 })
+    t('ES4: a declared-but-unfired policy is recorded met:false (survivorIds = the terminal-succeeded), and failure keeps status precedence',
+      eq(report.earlyStops, [{ phaseId: 'unfired', condition: 'minSurvivors', threshold: 2, met: false, survivorIds: ['u1'], neverDispatchedIds: [] }])
+      && report.schedule.phases[0]?.status === 'failed')
+  }
+  {
+    // ES4b — a declared policy on a phase starved by an upstream failure:
+    // evaluated, never fired, and the phase keeps its blocked status
+    // (declared-but-unmet policies change no status).
+    const spec = {
+      phases: [
+        { id: 'doomed', completion: 'all' },
+        { id: 'hopeful', dependencies: ['doomed'], completion: 'all', earlyStop: { minSurvivors: 1 } },
+      ],
+      jobs: [
+        { id: 'x1', phase: 'doomed', brief: 'doomed brief 1' },
+        { id: 'h1', phase: 'hopeful', brief: 'hopeful brief 1' },
+      ],
+    }
+    const worker = fakeWorker(new Map([['doomed brief 1', [{ ok: false, exitCode: 1 }]]]))
+    const { report } = await drive('early-stop-starved', { scheduled: buildScheduled(spec, { worker, gates: [passGate] }), worker, concurrency: 2 })
+    t('ES4: a policy on a starved phase records met:false with the starved job neverDispatched, and the phase stays blocked (no status change)',
+      eq(report.earlyStops, [{ phaseId: 'hopeful', condition: 'minSurvivors', threshold: 1, met: false, survivorIds: [], neverDispatchedIds: ['h1'] }])
+      && report.schedule.phases[1]?.status === 'blocked')
+  }
+  {
+    // ES5 — a met policy with ZERO never-dispatched jobs (cap ≥ N): the
+    // whole phase ran, so the status stays completed (concluded-early needs
+    // ≥ 1 never-dispatched job) while the block still records met:true.
+    const spec = {
+      phases: [{ id: 'allrun', completion: 'all', earlyStop: { minSurvivors: 1 } }],
+      jobs: [
+        { id: 'w1', phase: 'allrun', brief: 'allrun brief 1' },
+        { id: 'w2', phase: 'allrun', brief: 'allrun brief 2' },
+      ],
+    }
+    const { report } = await drive('early-stop-all-dispatched', { scheduled: buildScheduled(spec, { worker: okWorker(), gates: [passGate] }), worker: okWorker(), concurrency: 2 })
+    t('ES5: a met policy with zero never-dispatched jobs leaves the phase completed (precedence), block records met:true',
+      report.schedule.phases[0]?.status === 'completed'
+      && eq(report.earlyStops, [{ phaseId: 'allrun', condition: 'minSurvivors', threshold: 1, met: true, survivorIds: ['w1', 'w2'], neverDispatchedIds: [] }]))
+  }
+  {
+    // ES6 — a policy-less --jobs spec carries NO earlyStops block.
+    const spec = { phases: [{ id: 'plain', completion: 'all' }], jobs: [{ id: 'p1', phase: 'plain', brief: 'plain brief' }] }
+    const { report, artifactsDir } = await drive('early-stop-absent', { scheduled: buildScheduled(spec, { worker: okWorker(), gates: [passGate] }), worker: okWorker() })
+    t('ES6: a policy-less --jobs report carries NO earlyStops block (in memory or on disk)',
+      !('earlyStops' in report) && JSON.parse(read(join(artifactsDir, 'report.json'))).earlyStops === undefined)
+  }
+  {
+    // ES7 — review round 1 (red-before/green-after, AGENTS.md #8): a
+    // suppressed job must never consume another phase's dispatch capacity.
+    // Here the suppressed job sorts BEFORE the independent job (a2 < z1):
+    // under cap 1 a filter applied AFTER the ready call's cap slice would
+    // hand the whole slice to the suppressed job every iteration, strand z1
+    // for the rest of the run (a free dispatch slot wasted), and record
+    // 'zz' as 'blocked' — starved-by-upstream-failure, active misinformation.
+    // The stop may only skip the declared phase's own undispatched work.
+    const spec = {
+      phases: [
+        { id: 'aa', completion: 'all', earlyStop: { minSurvivors: 1 } },
+        { id: 'zz', completion: 'all' },
+      ],
+      jobs: [
+        { id: 'a1', phase: 'aa', brief: 'strand brief a1' },
+        { id: 'a2', phase: 'aa', brief: 'strand brief a2' },
+        { id: 'z1', phase: 'zz', brief: 'strand brief z1' },
+      ],
+    }
+    const worker = okWorker(5)
+    const { report } = await drive('early-stop-no-strand', { scheduled: buildScheduled(spec, { worker, gates: [passGate] }), worker, concurrency: 1 })
+    const byId = new Map(report.schedule.jobs.map((j) => [j.id, j]))
+    t('ES7: the independent job still dispatches under the same cap although the suppressed job sorts ahead of it',
+      byId.get('z1')?.dispatchIndex !== null && report.candidates.some((c) => c.id === 'z1' && c.passedAllGates)
+      && worker.briefsSeen().includes('strand brief z1'))
+    t('ES7: the independent phase records completed and the stopped phase concluded-early (never a false blocked)',
+      eq(report.schedule.phases.map((p) => [p.id, p.status]), [['aa', 'concluded-early'], ['zz', 'completed']]))
+    t('ES7: the stop still suppressed exactly the stopped phase remaining undispatched job',
+      byId.get('a1')?.dispatchIndex === 0 && byId.get('a2')?.dispatchIndex === null
+      && eq(report.earlyStops, [{ phaseId: 'aa', condition: 'minSurvivors', threshold: 1, met: true, survivorIds: ['a1'], neverDispatchedIds: ['a2'] }]))
+  }
+
   // ---------- S6: default mode is today's behavior (no --jobs) ----------
   {
     const worker = okWorker()
@@ -484,6 +718,8 @@ async function main() {
       && worker.calls.length === 2 && new Set(worker.calls.map((c) => c.cwd)).size === 2)
     t('S6: no schedule block in the report (in memory or on disk)',
       !('schedule' in report) && JSON.parse(read(join(artifactsDir, 'report.json'))).schedule === undefined)
+    t('S6: no earlyStops block either — default mode has no stop input (in memory or on disk)',
+      !('earlyStops' in report) && JSON.parse(read(join(artifactsDir, 'report.json'))).earlyStops === undefined)
     t("S6: today's lease ids, branches, and evidence paths",
       existsSync(join(artifactsDir, 'wt', 'c01')) && existsSync(join(artifactsDir, 'wt', 'c02'))
       && eq(branchesOf(git).sort(), ['swarm/wt-c01', 'swarm/wt-c02'])
@@ -509,7 +745,11 @@ async function main() {
       ['job unknown field', 'jobfield.json', { phases: [{ id: 'p' }], jobs: [{ id: 'j', phase: 'p', brief: 'b', workspace: {} }] }, "unknown field 'workspace'"],
       ['job policy field', 'policy.json', { phases: [{ id: 'p' }], jobs: [{ id: 'j', phase: 'p', brief: 'b', contextPlan: {} }] }, "unknown field 'contextPlan'"],
       ['phase approvalGate', 'approval.json', { phases: [{ id: 'p', approvalGate: {} }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, "unknown field 'approvalGate'"],
-      ['phase earlyStop', 'earlystop.json', { phases: [{ id: 'p', earlyStop: {} }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, "unknown field 'earlyStop'"],
+      ['phase earlyStop non-object', 'es-shape.json', { phases: [{ id: 'p', earlyStop: 'after-2' }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, 'earlyStop must be an object'],
+      ['phase earlyStop missing minSurvivors', 'es-missing.json', { phases: [{ id: 'p', earlyStop: {} }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, 'minSurvivors must be a positive integer'],
+      ['phase earlyStop non-integer minSurvivors', 'es-frac.json', { phases: [{ id: 'p', earlyStop: { minSurvivors: 1.5 } }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, 'minSurvivors must be a positive integer'],
+      ['phase earlyStop zero minSurvivors', 'es-zero.json', { phases: [{ id: 'p', earlyStop: { minSurvivors: 0 } }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, 'minSurvivors must be a positive integer'],
+      ['phase earlyStop unknown sub-field', 'es-unknown.json', { phases: [{ id: 'p', earlyStop: { minSurvivors: 2, stopWhen: 'bored' } }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, "unknown field 'stopWhen'"],
       ['top-level unknown', 'top.json', { phases: [{ id: 'p' }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }], concurrencyPolicy: {} }, "unknown field 'concurrencyPolicy'"],
       ['non-all completion', 'quorum.json', { phases: [{ id: 'p', completion: 'quorum' }], jobs: [{ id: 'j', phase: 'p', brief: 'b' }] }, 'must be "all"'],
       ['unknown dependency', 'ghost.json', { phases: [{ id: 'p' }], jobs: [{ id: 'j', phase: 'p', brief: 'b', dependencies: ['ghost'] }] }, "'ghost', which is not in the job set"],

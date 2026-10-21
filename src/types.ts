@@ -335,8 +335,13 @@ export interface ProbeRunSummary {
  * Phase status under the `all` completion policy (§6.3). 'blocked' = the
  * phase's jobs were never dispatched because an upstream phase failed —
  * recorded as not-dispatched, never fabricated as terminal.
+ * 'concluded-early' (T-031, spec §20) = the phase DECLARED an
+ * `EarlyStopPolicy`, the policy was MET, and at least one of its jobs was
+ * never dispatched because the stop suppressed dispatch — precedence
+ * `failed` > `concluded-early` > `completed` > `blocked`; a
+ * declared-but-unmet policy changes no status.
  */
-export type PhaseStatus = 'completed' | 'failed' | 'blocked'
+export type PhaseStatus = 'completed' | 'failed' | 'blocked' | 'concluded-early'
 
 export interface SchedulePhase {
   id: string
@@ -403,6 +408,42 @@ export interface RoundRecord {
   renderedBlockPath?: string
 }
 
+/**
+ * One phase-level early-stop record (T-031, spec §20:1265-1281 "Early Stop
+ * and Bounded Waste"), in the additive `RunReport.earlyStops` block —
+ * present only when a `--jobs` phase DECLARED an `EarlyStopPolicy`; default
+ * mode AND policy-less `--jobs` reports carry no block (the
+ * `CandidateReport.probes` / `RunReport.rounds` pattern: optional fields
+ * present only when they have a producer). One record per declaring phase,
+ * in spec phase order. `met: true` entries are the stop's evidence — which
+ * condition fired, who survived, who was never dispatched — recorded as
+ * evidence rather than silently truncating; `met: false` entries record
+ * that a declared policy was evaluated and never fired (the
+ * `RoundRecord.executed: false` posture — a policy that silently vanished
+ * would be indistinguishable from a bug). Recorded evidence only: the stop
+ * suppresses dispatch, never a verdict (decisions.md 2026-10-10 — machine
+ * gates decide survival; models advise).
+ */
+export interface EarlyStopRecord {
+  /** The declaring phase's id. */
+  phaseId: string
+  /** The one machine-computed condition this slice implements; the literal
+   *  keeps future conditions additive. */
+  condition: 'minSurvivors'
+  /** The declared threshold (`EarlyStopPolicy.minSurvivors`), verbatim. */
+  threshold: number
+  /** True = the condition fired (terminal survivors ≥ threshold) and the
+   *  phase's ready-but-undispatched jobs were suppressed from dispatch.
+   *  False = declared, evaluated, never fired. */
+  met: boolean
+  /** The phase's terminal-SUCCEEDED jobs, in report order. */
+  survivorIds: string[]
+  /** The phase's never-dispatched jobs (`dispatchIndex: null`), in spec
+   *  order — suppressed by the stop when met, starved by an upstream
+   *  failure when not. Agrees exactly with the schedule block. */
+  neverDispatchedIds: string[]
+}
+
 export interface RunReport {
   runId: string
   repo: string
@@ -419,4 +460,10 @@ export interface RunReport {
    *  per-round record. Absent otherwise — default-mode report.json is
    *  unchanged byte-for-byte in shape. */
   rounds?: RoundRecord[]
+  /** Present only when a `--jobs` phase declared an `EarlyStopPolicy`
+   *  (T-031): one record per declaring phase, in spec phase order. Absent
+   *  otherwise — default-mode AND policy-less `--jobs` reports are
+   *  unchanged. The store never reads it (verdicts only; the rounds
+   *  store-invisible precedent). */
+  earlyStops?: EarlyStopRecord[]
 }

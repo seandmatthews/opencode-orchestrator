@@ -285,8 +285,9 @@ node node_modules/tsx/dist/cli.mjs scripts/check-store.mjs
 Pins the durable run records (T-003), the derived job DAG (T-006), the
 attempt records (T-007), the recorded schedule (T-009), the filesystem
 artifact store (T-016), the store-backed integrate pieces (T-028), the
-promptVersion end-to-end copy (T-029), and the verdict-neutral additive
-rounds block (T-030):
+promptVersion end-to-end copy (T-029), the verdict-neutral additive
+rounds block (T-030), and the store-invisible additive `earlyStops` block
+(T-031):
 `src/store/index.ts` ingests a finished `RunReport`
 into SQLite (`node:sqlite`, schema v5: `runs`, `candidates`, `gate_results`,
 `events`, T-006's `phases`/`jobs`/`job_dependencies`, T-007's `attempts`,
@@ -353,6 +354,21 @@ a verbatim copy of run 20261011022419) into a fresh temp DB and asserts:
   (the block is invisible to the store — never read, never a verdict); no
   new table materializes for it (the census stays the 11 schema-v5
   tables), and re-ingest stays idempotent over state rows,
+- the additive `earlyStops` block (T-031), on a hand-built
+  earlyStops-carrying variant of the fixture (the rounds-variant pattern:
+  foundation concludes early — c01 dispatched and passing, c02
+  declared-then-suppressed with `dispatchIndex: null` and NO candidate row
+  — app stays blocked behind it, and the block carries one met:true
+  record): ingest accepts the block and keeps persisting VERDICTS only —
+  `early_stop_json`/`approval_gate_json` stay null on every phases row
+  (the T-009 null pin above does NOT flip; the record lives in the report
+  block, the column's producer is a later ticket), never-dispatched jobs
+  derive job rows with empty worker/model/brief (nothing fabricated), the
+  `concluded-early` status derives NO `PHASE_COMPLETED` event (the
+  unchanged `p.status !== 'completed'` filter), no new table materializes,
+  the SAME report minus the block ingests to identical
+  runs/candidates/phases/jobs/gate_results rows, and re-ingest stays
+  idempotent,
 - re-ingest of the same report leaves `runs`/`candidates`/`gate_results` —
   the DAG tables (`phases`/`jobs` upsert by natural key, `job_dependencies`
   re-derived delete+insert) — and the `attempts` rows (upsert by natural
@@ -664,7 +680,11 @@ only fields with a producer; `completion` accepts only `"all"`; job ids are
 in `src/runner.ts` under the existing concurrency cap, the T-007 retry rule
 verbatim with attempt-scoped `wt/<jobId>-a<n>` leases, phase completion
 `all`, lazy leasing at the run's `baseSha`, and the recorded
-`RunReport.schedule` block. No existing gate can pin scheduler behavior —
+`RunReport.schedule` block — plus, since T-031, the phase-level early stop:
+the `EarlyStopPolicy` spec field, the pure `earlyStopMet` decision, the
+stop's dispatch-only semantics in the runner loop, the `concluded-early`
+phase status, and the additive `earlyStops` report block. No existing gate
+can pin scheduler behavior —
 the fast tier never runs the pipeline and Gate 2 spends model tokens and
 cannot assert determinism — so this gate drives the exported pure function
 directly and the runner end-to-end with a **fake `WorkerAdapter`** (the
@@ -683,12 +703,13 @@ directly and the runner end-to-end with a **fake `WorkerAdapter`** (the
   phase depends on every job of each phase it depends on), defaults apply
   (`completion: "all"`, empty dependencies), optional per-job
   `model`/`worker`/`timeoutMs`/`gates` are preserved, and every refusal
-  names its offense: unknown fields (including `approvalGate`,
-  `earlyStop`, and the §6.4 policy fields), non-`all` completion, empty job
-  set, duplicate ids, id charset violations, unknown phase references,
-  job-less phases, unknown dependencies (T-006's validator message), and a
-  cycle — job-level or surfacing through expanded phase edges — whose
-  refusal names the cycle (T-006's `cycleRefusal`),
+  names its offense: unknown fields (including `approvalGate` and the §6.4
+  policy fields — `earlyStop` is a known field since T-031, pinned
+  positively below), non-`all` completion, empty job set, duplicate ids, id
+  charset violations, unknown phase references, job-less phases, unknown
+  dependencies (T-006's validator message), and a cycle — job-level or
+  surfacing through expanded phase edges — whose refusal names the cycle
+  (T-006's `cycleRefusal`),
 - determinism end-to-end: two runs over the same `--jobs` spec with the same
   fake-worker outcomes produce identical recorded schedule blocks (per-job
   `dispatchIndex` equal across the reports), under a cap-1 two-phase DAG and
@@ -714,6 +735,42 @@ directly and the runner end-to-end with a **fake `WorkerAdapter`** (the
   (`dispatchIndex: null`, no candidate report, no branch/worktree ever
   created), never fabricated as terminal — and the independent phase still
   runs to completion (`completed`),
+- phase-level early stop (T-031, spec §20:1265-1281, spec §34 M8):
+  `earlyStop: { minSurvivors: <positive integer> }` parses and is preserved
+  on PhaseSpec, while a non-object `earlyStop`, a missing/non-integer/`< 1`
+  `minSurvivors`, and any unknown sub-field refuse naming the offense
+  (`approvalGate` stays refused; the flip is recorded below); the pure
+  `earlyStopMet` is pinned by direct-call faces — identical terminal maps
+  give identical decisions, no input mutated, terminal failures never count
+  as survivors; end-to-end with the fake adapter, `minSurvivors: k` with
+  `k < N` and cap < N means: after the k-th success the remaining ready
+  jobs are never dispatched (`dispatchIndex: null`, no candidate report, no
+  lease/branch/worktree ever created), every ALREADY-dispatched job runs to
+  completion exactly once (executions == dispatches — the stop never
+  kills), and each in-flight survivor carries its full verdict ladder
+  (gates ran, candidate report written); dependents of a concluded-early
+  phase stay never-dispatched while an independent phase still completes;
+  the phase status is `concluded-early` exactly when the declared policy is
+  MET and ≥ 1 job was never dispatched (precedence
+  failed > concluded-early > completed > blocked: a met policy with zero
+  never-dispatched jobs leaves `completed`; failure keeps `failed`; a
+  declared-but-unfired policy changes no status — a starved phase stays
+  `blocked`); a suppressed job never consumes another phase's dispatch
+  capacity — with a suppressed-but-ready job sorting AHEAD of it under cap
+  1 (suppressed `a2` before independent `z1`), the independent phase's job
+  still dispatches and its phase records `completed`, never a false
+  `blocked` (review round 1 red, recorded in T-031's Landed: the pre-fix
+  filter sat AFTER the ready call's cap slice and could strand another
+  phase's ready work for the rest of the run — red-before/green-after per
+  AGENTS.md #8); and the additive `earlyStops` report block — present only
+  when a phase DECLARED a policy (default mode AND policy-less `--jobs`
+  reports carry no block, in memory or on disk), one record per declaring
+  phase in spec order with
+  `{ phaseId, condition: 'minSurvivors', threshold, met, survivorIds,
+  neverDispatchedIds }`, `met: true` entries agreeing exactly with the
+  schedule block's `dispatchIndex: null` entries for that phase, and
+  `met: false` entries recording a declared-but-unfired policy (survivorIds
+  = all terminal-succeeded, neverDispatchedIds = the starved jobs),
 - default mode is today's behavior: without `--jobs`, candidate ids in
   order, one dispatch per candidate, today's lease ids/branches and evidence
   paths (`wt/<id>`, `swarm/wt-<id>`, `<id>/worker.log`, `<id>/diff.patch`),
@@ -728,10 +785,39 @@ directly and the runner end-to-end with a **fake `WorkerAdapter`** (the
   run root stays empty (no artifacts dir, no `locks/` directory) across all
   refusal cases; `--help` documents `--jobs <path>`.
 
+T-031's flip, recorded — this change-set's only intentional invalidations
+of existing assertions: Gate 1.10's G2 leg actively pinned `earlyStop` as
+refused ("approvalGate and earlyStop are refused until their successor
+tickets land"), and the S7 fixture table carried the
+`['phase earlyStop', …, "unknown field 'earlyStop'"]` entry. The early-stop
+policy now exists (this IS the successor ticket T-009:127-129 and
+T-030:83-86 carved for), so both were flipped explicitly in T-031's
+change-set: the refusal face became approvalGate-only PLUS the new
+earlyStop positive/negative coverage (the parse face preserving
+`{ minSurvivors }` verbatim plus the strict shape refusals), and the
+fixture-table entry was replaced by the five earlyStop refusal cases
+(non-object, missing/non-integer/zero `minSurvivors`, unknown sub-field).
+Net strictness increases (a refusal loosened in one dimension, that
+dimension now positively exercised — the T-018/T-019 precedent); no other
+existing check was weakened. VERIFICATION.md's own Gate 1.10 prose (the
+unknown-fields bullet and the carve paragraph below) updated in the same
+change.
+
 Not pinned here and carved by the ticket: completion policies beyond `all`
 (quorum, all-machine-gates, at-least-n — no requeue/elimination semantics
-defined), `earlyStop`/`approvalGate` in the spec (refused until their
-successor tickets land), in-run approval pause and restart reconciliation
+defined), `approvalGate` in the spec (still refused as an unknown field —
+its own M8 successor has not landed), run-level and generation-loop stop
+conditions (spec §20's token/wall-clock ceilings and
+consecutive-generations-no-new-survivor — T-031 ships exactly ONE
+condition, the phase-level `minSurvivors`; the rounds structure is the
+generation-loop extension point), no `--stop`/`--min-survivors` CLI flag
+(in default `--goal` mode nothing could bind: the synthesized degenerate
+spec carries no policy and `--concurrency` defaults to the candidate count,
+so the whole wave dispatches in the loop's first iteration — the lever
+exists only where dispatch is staggered), `phases.early_stop_json`'s
+producer (the record rides the report block — the rounds store-invisible
+precedent; the column's producer is a later ticket), in-run approval pause
+and restart reconciliation
 (§29, the T-007/T-008 carves stand), live in-run event emission (ingest
 stays post-hoc and derived), and any adapter change (`src/worker/opencode.ts`
 untouched; Gate 3 n/a). The real-harness face of the rewritten loop is

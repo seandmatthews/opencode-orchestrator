@@ -5,8 +5,8 @@ import { parseBriefs, parseReview } from './parse.js'
 import { evidenceBundlePath, failedBundle, writeEvidenceBundle } from './probe.js'
 import type { Probe } from './probe.js'
 import { composeRoundPacket } from './rounds.js'
-import { buildSchedule, readyJobs } from './scheduler.js'
-import type { PhaseSpec } from './scheduler.js'
+import { buildEarlyStops, buildSchedule, earlyStopMet, readyJobs } from './scheduler.js'
+import type { EarlyStopPolicy, PhaseSpec } from './scheduler.js'
 import { DERIVED_PHASE_ID } from './store/index.js'
 import type { Attempt, CandidateReport, FailureRecord, Gate, GateResult, PlannerReport, ProbeRunSummary, ReviewReport, RoundRecord, RunReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
 
@@ -192,6 +192,13 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
   const schedule = opts.scheduled
     ? buildSchedule(opts.scheduled.phases, round1.nodes, round1.terminal, round1.dispatchIndexOf)
     : undefined
+  // T-031: the early-stop evidence block — one record per phase that
+  // DECLARED a policy, derived from the same inputs as the schedule block.
+  // Present only when a `--jobs` phase declared one; default mode AND
+  // policy-less `--jobs` runs carry no block (the report is unchanged).
+  const earlyStops = opts.scheduled
+    ? buildEarlyStops(opts.scheduled.phases, round1.nodes, round1.terminal, round1.dispatchIndexOf)
+    : undefined
 
   // The bounded R&D loop (T-030): round 1's survivors are planning evidence
   // for one more round. The composer (src/rounds.ts) is pure and renders a
@@ -279,11 +286,32 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
   if (schedule) {
     report.schedule = schedule
   }
+  if (earlyStops !== undefined && earlyStops.length > 0) {
+    report.earlyStops = earlyStops
+  }
   if (rounds !== undefined) {
     report.rounds = rounds
   }
   writeFileSync(join(opts.artifactsDir, 'report.json'), JSON.stringify(report, null, 2))
   return report
+}
+
+/** The dispatch-eligible nodes: the job DAG minus the early-stop-suppressed
+ *  jobs (T-031). This filtering MUST happen BEFORE `readyJobs` applies its
+ *  concurrency-cap slice, not after it: a suppressed-but-ready job sorting
+ *  ahead of another phase's ready job would otherwise occupy the whole cap
+ *  slice every iteration, strand that phase's dispatchable work for the rest
+ *  of the run, and record a false 'blocked' (review round 1 red — ES7 pins
+ *  exactly that adversarial ordering). A stopped phase may only skip its OWN
+ *  undispatched work; it never consumes another phase's dispatch capacity.
+ *  Suppression is monotone (a met policy stays met), so recomputing the
+ *  filter per iteration is stable. No policies ⇒ no suppression ⇒ the
+ *  caller passes the input through unchanged. */
+function eligibleForDispatch(
+  nodes: { id: string; phaseId: string; dependencies: string[] }[],
+  suppressed: ReadonlySet<string>,
+): { id: string; phaseId: string; dependencies: string[] }[] {
+  return suppressed.size === 0 ? nodes : nodes.filter((n) => !suppressed.has(n.id))
 }
 
 /** The scheduler loop (T-009): repeatedly take the deterministic ready list
@@ -293,7 +321,23 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
  *  failure) is simply never dispatched — recorded, not fabricated. Each
  *  round of the bounded loop (T-030) drives its own job wave through this
  *  one loop with fresh state — the round-2 wave shares no terminal/dispatch
- *  bookkeeping with round 1's. */
+ *  bookkeeping with round 1's.
+ *
+ *  T-031 phase-level early stop (spec §20): policies come ONLY from the
+ *  --jobs spec's phases (`opts.scheduled`); default mode has none and the
+ *  loop is untouched. Per iteration, a phase whose policy is MET (the pure
+ *  `earlyStopMet` — monotone, since terminal success never un-happens) has
+ *  its not-yet-dispatched jobs filtered out of the dispatch-eligible input
+ *  BEFORE the ready call's concurrency-cap slice (`eligibleForDispatch`) —
+ *  a stopped phase never occupies another phase's dispatch capacity. The
+ *  stop ONLY suppresses dispatch: an in-flight job runs to completion —
+ *  never killed, no cancellation path; a suppressed job stays non-terminal,
+ *  records `dispatchIndex: null` (not-dispatched, never fabricated as
+ *  terminal), and its dependents are never ready (readyJobs requires
+ *  dependencies at terminal success). Termination is unchanged: suppressed
+ *  jobs never dispatch, `inFlight` drains, the `inFlight.size === 0` break
+ *  fires exactly as before. A dispatched job's verdict ladder below dispatch
+ *  is untouched by the stop. */
 async function driveJobs(jobs: ResolvedJob[], opts: SkeletonOptions): Promise<{
   reports: Map<string, CandidateReport>
   terminal: Map<string, 'succeeded' | 'failed'>
@@ -308,8 +352,24 @@ async function driveJobs(jobs: ResolvedJob[], opts: SkeletonOptions): Promise<{
   const dispatchIndexOf = new Map<string, number>()
   const reports = new Map<string, CandidateReport>()
   let dispatched = 0
+  // T-031: the declaring phases' policies, by phase id (default mode: empty
+  // ⇒ no stop input anywhere). Once met, a policy stays met.
+  const stopPolicies = new Map<string, EarlyStopPolicy>()
+  for (const p of opts.scheduled?.phases ?? []) {
+    if (p.earlyStop !== undefined) stopPolicies.set(p.id, p.earlyStop)
+  }
+  const suppressed = new Set<string>()
   for (;;) {
-    for (const id of readyJobs(nodes, terminal, running, opts.concurrency)) {
+    if (stopPolicies.size > 0) {
+      for (const [phaseId, policy] of stopPolicies) {
+        if (earlyStopMet(policy, nodes.filter((n) => n.phaseId === phaseId), terminal)) {
+          for (const n of nodes) {
+            if (n.phaseId === phaseId) suppressed.add(n.id)
+          }
+        }
+      }
+    }
+    for (const id of readyJobs(eligibleForDispatch(nodes, suppressed), terminal, running, opts.concurrency)) {
       const job = byId.get(id)!
       dispatchIndexOf.set(id, dispatched++)
       running.add(id)
