@@ -463,3 +463,19 @@ no probe code), :1487-1491 (the T-024 write-and-run fixture pattern), :2402
 :760-762, :823-852 · src/store/index.ts:212-221, :1016-1023, :1403-1415 ·
 src/types.ts:324-330 · scripts/check-probe.mjs:440-441, :492, :893, :975-995,
 :1013, :1055 · scripts/demo-target.mjs:15-35 · README.md:153-189.
+
+## Re-land record (2026-10-21, post-batch)
+
+The batch merge `d530fb0` was auto-reverted the same day (`e73d9a2`) — the
+project's first auto-revert: the lane's fast tier was green, the driving
+workflow's post-merge fast tier on main went red, and the red's output was
+not captured anywhere durable (VERIFICATION.md Known issue #13). Diagnosis
+the same day: the exact merged tree `d530fb0` re-run detached at main's own
+checkout path came back ALL GREEN. The content re-landed by reverting the
+revert; its post-merge fast tier ran ALL GREEN with full output captured
+(`C:\swarm\verify-red\T-032-reland-post-merge-fast.log`). Two green runs of
+the content, zero reproduced reds; the red's class stays unidentified
+(output lost, gate name unknown — not countable toward any threshold), and
+the remedy is structural: the driving workflow now tees every gate run's
+full output to `C:\swarm\verify-red\`, so the next red of any class arrives
+with its bar attached.

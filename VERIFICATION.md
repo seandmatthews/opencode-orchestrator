@@ -3025,6 +3025,30 @@ landing in T-017's Landed section).
     `main` in `worktree list`, no `swarm/*` branches, clean status;
     evidence kept — dispatch.jsonl, both diff.patch, worker/reviewer logs,
     c02's review.json).
+13. **The first auto-revert: a post-merge fast-tier red that never
+    reproduced, with the red output lost (observed once, 2026-10-21,
+    T-032 lane, driving run `dwfrun-b35d1c1a`).** T-032 (adversarial
+    probe) merged as `d530fb0` with its lane fast tier green; the driving
+    workflow's post-merge fast tier on main went RED and the designed
+    auto-revert fired for the first time in the project's history
+    (`e73d9a2`), restoring main green and keeping the lane. The red's
+    failing gate and output were NOT captured: the driving script sliced
+    tails into its journal only and wrote no gate output to disk — the
+    same capture gap Known issue #11 named for the reviewer side, hit
+    where it costs a landing. Classification therefore UNKNOWN (any gate
+    could have failed); it must not be counted toward Known issue #10's
+    Gate 1.12 threshold because no gate name was captured. Disposition:
+    the exact merged tree `d530fb0` re-run detached at main's own path
+    came back ALL GREEN the same day (`node scripts/verify.mjs fast`);
+    the content was re-landed by reverting the revert, and its post-merge
+    fast tier ran ALL GREEN with full output captured
+    (`C:\swarm\verify-red\T-032-reland-post-merge-fast.log`) — two green
+    runs of the content, zero reproduced reds. Remedy landed in the same
+    window, outside any ticket: the driving workflow now tees EVERY gate
+    run's full output to `C:\swarm\verify-red\` (post-chore, lane fast,
+    Gate 2, post-merge), so the next red of any class arrives with its
+    bar attached and #10's captured-line threshold becomes enforceable
+    instead of aspirational.
 
 ## Definition of done (per ticket)
 
