@@ -151,7 +151,7 @@ nothing, or the gates failed, running it again would just produce the same
 result.
 
 Each job may also carry a `probes` array: named commands
-(`{"id", "type": "command"|"test"|"benchmark"|"screenshot"|"web"|"adversarial", "command": {"exe", "args"}, "timeoutMs"?, "repeats"?, "capture"?, "url"?, "seed"?}`)
+(`{"id", "type": "command"|"test"|"benchmark"|"screenshot"|"web", "command": {"exe", "args"}, "timeoutMs"?, "repeats"?, "capture"?, "url"?}`)
 that run on the final attempt no matter how the gates went, and write a JSON
 record of what happened to `probes/<candidateId>/<probeId>.json` in the run
 folder. A `command` probe records the exit code, how long it took, and the
@@ -183,26 +183,7 @@ failure, and at the deadline; nothing is left running. The probe succeeds
 only when the server launched, answered within the deadline with a 2xx
 status, and sent a non-empty body. The port in `url` is machine-global and
 chosen by you: two probes pointed at the same port at the same time
-collide. An `adversarial` probe actively tries to break the candidate:
-from its `seed` (required, a positive integer — an unseeded fuzz run is
-not replayable and is refused) it deterministically generates a fixed list
-of 20 replayable input cases — a fixed edge-case corpus (the empty input,
-control characters, non-ASCII text, numeric edges such as `NaN` and
-`Infinity`, malformed-JSON-looking strings) plus seeded random soup — and
-feeds each case to the command as its last argument, one at a time, each
-with its own full `timeoutMs` budget. It records which cases the target
-survived (clean spawn, exit 0) and which it crashed on (non-zero exit or
-timeout), one duration per case that ran plus `cases-run`/`cases-crashed`
-counts, and a machine-readable
-`probes/<candidateId>/<probeId>.results.json` table (the seed and every
-case's input and outcome) beside the record — same seed, byte-identical
-case list, on every platform, so a recorded crash list is a reproducible
-bug report anyone can recompute from the seed. A case that could not
-spawn at all is recorded as neither survived nor crashed. Generated cases
-are capped at 8192 characters because they ride the command line and
-Windows bounds its length — keep the command itself short. The probe
-succeeds only when every case spawned and every case survived; a crash is
-evidence, not a failure of the run. A probe carries no
+collide. A probe carries no
 threshold of any kind: it records performance, never judges it. A probe's
 result, even a failing one, never affects whether a
 candidate passes; probes only record.

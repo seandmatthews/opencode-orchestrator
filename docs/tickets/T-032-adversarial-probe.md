@@ -1,6 +1,6 @@
 # T-032 — Adversarial probe: seeded fuzz cases fed over argv → crash/survival EvidenceBundle (spec §34:2139 M8, §24 Phase 9; fills T-030:95's carve)
 
-**Status:** done 2026-10-21
+**Status:** proposed
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 2
 **Depends on:** T-015 (done 2026-10-17 — the Probe seam + EvidenceBundle contract this extends). T-018/T-019/T-024 (all done) are the change-set **template** (new type + per-type field rule + one explicit Gate 1.15 flip), not dependencies. T-030 (done 2026-10-20) is a **composition note, not a build dependency**: its round composer already renders any probe summary into the round-2 planner evidence (src/rounds.ts:126-131), so adversarial summaries compose with zero composer edits.
@@ -230,7 +230,7 @@ round-2 planner can act on.
 
 ## Acceptance criteria
 
-- [x] `ProbeType` includes `'adversarial'`; `AdversarialProbe` exists behind the
+- [ ] `ProbeType` includes `'adversarial'`; `AdversarialProbe` exists behind the
       landed Probe seam with the documented contract above (required
       positive-integer `seed` on adversarial and refused elsewhere; the exported
       pure `generateAdversarialCases(seed)` — same seed → byte-identical list,
@@ -243,36 +243,36 @@ round-2 planner can act on.
       bound; no threshold or verdict input of any kind); zero model/harness
       knowledge in the module (decisions.md:11-15) — pinned by **Gate 0**
       (`tsc --noEmit`) plus the **Gate 1.15 P3** contract legs.
-- [x] The parser accepts an adversarial probe with `seed` verbatim and refuses:
+- [ ] The parser accepts an adversarial probe with `seed` verbatim and refuses:
       a genuinely-unknown type with the updated message; missing/zero/negative/
       non-integer/non-number `seed` on adversarial; `seed` on a
       `command`/`test`/`benchmark`/`screenshot`/`web` probe — pinned by
       **Gate 1.15 P2** (contract fixtures over `parseJobsSpec`, token-free).
-- [x] **The scripts/check-probe.mjs:440-441 five-type-refusal pin is explicitly
+- [ ] **The scripts/check-probe.mjs:440-441 five-type-refusal pin is explicitly
       flipped** — the expected message gains `"adversarial"`, `'godot'` stays
       the genuinely-unknown example — recorded here and in VERIFICATION.md as
       the change-set's one intentional invalidation of an existing assertion;
       no other existing check is weakened — pinned by the full fast tier,
       **`npm run verify` ALL GREEN** with the flipped Gate 1.15.
-- [x] Determinism/replayability, token-free: `generateAdversarialCases(seed)`
+- [ ] Determinism/replayability, token-free: `generateAdversarialCases(seed)`
       invoked twice with the same seed returns byte-identical case lists; a
       probe run against a fixture records a per-case table whose inputs match
       the independently recomputed list case-for-case; two same-seed runs
       against the same fixture agree case-for-case on outcome — pinned by
       **Gate 1.15 P3**.
-- [x] Crash faces on a generated known-weak-spot fixture (the T-024
+- [ ] Crash faces on a generated known-weak-spot fixture (the T-024
       write-and-run pattern): a target crashing on an independently-known
       subset of the recomputed cases → success false, exactly that subset
       recorded as failed `'<id>#case-<i>'` rows, `cases-crashed` == the subset
       size, `error` names the first breaking case; a no-crash target → success
       true with `cases-crashed` 0; a non-existent exe → success false with zero
       `case-<i>` durations, never a pass — pinned by **Gate 1.15 P3**.
-- [x] Timeout face (the P4 sleeper pattern): a timing-out case → that case's
+- [ ] Timeout face (the P4 sleeper pattern): a timing-out case → that case's
       GateResult exitCode null, durationMs ≥ timeoutMs with the duration still
       recorded, the spawned tree verified dead on the real process table, kill
       evidence on that case's entry — pinned by **Gate 1.15 P3** (the P4
       process-table pattern).
-- [x] Evidence emission in a real pipeline: a `--jobs` run carrying an
+- [ ] Evidence emission in a real pipeline: a `--jobs` run carrying an
       adversarial probe writes its bundle under `<artifactsDir>/probes/<candidateId>/`
       (decisions.md:25-26 — run root `C:\swarm\`; never the worktree as the
       durable copy), the report's `probes[]` names its `bundlePath` and agrees
@@ -282,7 +282,7 @@ round-2 planner can act on.
       adversarial outcome (a passing-gates/failing-adversarial job still
       passes) — pinned by **Gate 1.15 P5** (the fake-WorkerAdapter `runSkeleton`
       drive).
-- [x] Zero runner/CLI/report/store drift: no `src/runner.ts`, `src/cli.ts`,
+- [ ] Zero runner/CLI/report/store drift: no `src/runner.ts`, `src/cli.ts`,
       `src/types.ts`, or `src/store/` edits (the pipeline is type-agnostic:
       src/runner.ts:750, :823-852; src/store/index.ts:1016-1023; src/types.ts:324-330);
       the verdict ladder byte-identical; adversarial summaries persist through
@@ -292,16 +292,16 @@ round-2 planner can act on.
       `VERIFICATION.md`, `docs/ROADMAP.md`, `README.md`, the ticket file + the
       index; package.json/package-lock.json diff-free — **Gate 1.6** rides
       green unchanged inside the tier).
-- [x] No new npm dependencies (decisions.md:6-10 — the PRNG is ~6 stdlib lines)
+- [ ] No new npm dependencies (decisions.md:6-10 — the PRNG is ~6 stdlib lines)
       and zero model knowledge in the probe module (decisions.md:11-15) —
       pinned by **Gate 0** and the package.json/package-lock.json diff-free
       change-set.
-- [x] Docs extended in the same change-set (AGENTS.md #6): VERIFICATION.md's
+- [ ] Docs extended in the same change-set (AGENTS.md #6): VERIFICATION.md's
       Gate 1.15 section (the recorded T-032 flip paragraph; adversarial moves
       from the carve list to pinned; the new legs named), docs/ROADMAP.md:20's
       stage-8 row, README's `--jobs` probes doc — pinned by **`npm run verify`
       ALL GREEN** with the updated sections present.
-- [x] **Gate 2 NOT owed — recorded, not silently skipped** (the T-018:223-228
+- [ ] **Gate 2 NOT owed — recorded, not silently skipped** (the T-018:223-228
       trigger-analysis precedent): the change-set touches no `src/runner.ts`,
       no adapter, no gate code, no workspace handling, and no report shape —
       none of Gate 2's triggers (VERIFICATION.md:2474-2475); Gate 2 is
@@ -309,119 +309,6 @@ round-2 planner can act on.
       emission rides `--jobs` runs (VERIFICATION.md:1381-1383) — so it could
       not pin an adversarial criterion anyway. **Gate 3 n/a** (no adapter
       touched, no new harness).
-
-## Landed
-
-**2026-10-21.** The change-set is exactly `src/probe.ts`, `src/scheduler.ts`,
-`scripts/check-probe.mjs`, `VERIFICATION.md`, `docs/ROADMAP.md`, `README.md`,
-this ticket + the index — verified `git status --porcelain`;
-`package.json`/`package-lock.json` diff-free (`git diff --stat` empty).
-
-- **`src/probe.ts`** — `ProbeType` gains `'adversarial'`; `ScenarioSpec`
-  gains `seed?: number` (docblock: required positive integer ≥ 1 on
-  adversarial, refused elsewhere — the repeats/capture/url precedent); the
-  module docblock gains the adversarial-semantics section (the
-  choose-and-document precedent). The exported, pure
-  `generateAdversarialCases(seed)` documents and uses **mulberry32** — the
-  chosen ~6-line 32-bit PRNG, integer math only (`Math.imul`), zero new
-  deps (decisions.md 2026-10-10) — over the documented mix: the
-  seed-independent 12-entry `ADVERSARIAL_EDGE_CORPUS` (empty string;
-  control characters; non-ASCII; numeric edges
-  `'NaN'`/`'Infinity'`/`'1e308'`/`'-0'`/`'0x10'`/`'1,000'`;
-  malformed-JSON-looking strings) in corpus order, + 4 PRNG-driven
-  ASCII-soup strings + 4 corpus permutations (seeded Fisher-Yates, first
-  two entries space-joined) = `ADVERSARIAL_PROBE_CASE_COUNT` (20); every
-  emitted case sliced to `ADVERSARIAL_PROBE_MAX_CASE_CHARS` (8192 — the
-  CreateProcess ~32k argv bound with margin). `AdversarialProbe` feeds each
-  case as the LAST argv element through the unchanged `executeProbeCommand`
-  core (no second spawn path forked, no stdin), full per-case `timeoutMs`;
-  the survived/crashed-exit/crashed-timeout/spawn-refused vocabulary; one
-  `'<probeId>#case-<i>'` GateResult per case in case order; `case-<i>
-  duration` + `cases-run`/`cases-crashed` measurements recorded regardless
-  of success; the `=== case <i> ===` combined `.log` plus the
-  'report'-kind `<probeId>.results.json` per-case table (the kind's THIRD
-  producer; inputs truncated to the bound); success = non-empty list AND
-  every case spawned cleanly AND every case survived (zero completed
-  cases never a pass); `error` names the FIRST breaking case with counts;
-  the class holds the seed contract for directly constructed scenarios
-  (the screenshot/web precedent). `createProbe` gains the adversarial
-  branch. Zero edits to `src/runner.ts`, `src/cli.ts`, `src/types.ts`,
-  `src/store/` — the verdict ladder byte-identical.
-- **`src/scheduler.ts`** — `seed` joins the allowed probe fields; the type
-  refusal becomes `type must be "command", "test", "benchmark",
-  "screenshot", "web", or "adversarial"` (`'godot'` stays the example);
-  `seed` required positive integer ≥ 1 on adversarial (missing/0/-1/1.5/
-  non-number refused naming the offense) and refused on the other five
-  types; the parsed spec carries `seed` only on adversarial probes.
-- **`scripts/check-probe.mjs`** — Gate 1.15 extended in place, no new gate
-  number: the P2 five-type-refusal pin explicitly FLIPPED (the change-set's
-  one intentional invalidation, recorded in VERIFICATION.md beside
-  T-018's/T-019's/T-024's; `'godot'` stays the example, only the message
-  string changed) plus the adversarial positive-parse face and the seed
-  shape-refusal faces; P3 direct-execution legs on a generated
-  known-weak-spot fuzzee fixture (the T-024 write-and-run pattern; the
-  fuzzee exits non-zero exactly on inputs failing
-  `Number.isFinite(Number(arg))` — the demo target's `add()` weak-spot
-  class, scripts/demo-target.mjs:15-35), with the expected crash subset
-  derived INDEPENDENTLY from the recomputed case list: generator
-  determinism (byte-identical same-seed lists), the length bound over 5
-  seeds, recorded table inputs == recomputed list case-for-case, two
-  same-seed runs agreeing case-for-case on outcome, the crash face (exactly
-  the derived subset as failed rows, counts, `error` naming case 1, the
-  results artifact parsing to outcomes matching the derivation), the
-  no-crash face, the spawn-refusal/zero-completed face, the P4-pattern
-  timeout face (exitCode null, durationMs ≥ budget, duration still
-  recorded, tree verified dead on the real process table, kill evidence on
-  the case's entry), and the class-level seed-contract throw; P5: the
-  `--jobs` drive gains a FAILING adversarial probe on job-a (5→6 probes,
-  the T-024 drive-extension precedent) with bundle/artifact/count pins
-  against the independently recomputed seed-7 list, the results artifact
-  under the artifacts dir never inside the worktree, and survival
-  untouched (a passing-gates/failing-adversarial job still passes).
-- **Docs in the same change-set** (AGENTS.md #6): VERIFICATION.md Gate
-  1.15 (the probe narrative gains `AdversarialProbe`; the T-032 semantics
-  paragraph; the recorded T-032 flip paragraph; P2/P3/P5 bullet
-  extensions) and Gate 1.22's carve paragraph (adversarial moves from
-  carved to pinned — "no adversarial probes" dropped with a pointer);
-  docs/ROADMAP.md:20's stage-8 row (partial: early stop done — T-031;
-  adversarial probes done — T-032; generations deferred);
-  README.md:153-189's probes doc (the type list gains `"adversarial"`,
-  `seed` documented, the crash/survival recording posture, the 8192-char
-  argv bound, evidence-not-verdict).
-
-**Implementation notes (honest):**
-
-- The P5 e2e adversarial target is the fixture repo's own `adv-fuzzee.js`
-  (script-file form), not an inline `-e` source: node's CLI parses an
-  appended leading-`-` case as an OPTION in `-e` mode — observed
-  first-hand while debugging this change-set (`node -e <src> -0` →
-  `bad option: -0`, exit 9; the probe recorded it honestly as a crash,
-  which IS correct fuzz evidence about such a target, but useless as a
-  predictable fixture). Script-file mode passes the case through as
-  `argv[2]`, keeping the crash subset independently derivable.
-- The timeout-face fixture embeds the exact first case (the corpus leads
-  with the empty string) as its hang trigger, so exactly one case burns
-  the 1200ms budget and the face stays fast.
-- Carved, unchanged from the ticket: stdin feeding, the workflow-level
-  `adversarial` phase (`foreach: candidate`), inline failure detail in the
-  round-2 planner prompt (the composer carries the failure fact + bundle
-  path only — a report-shape change, a successor's Gate 2),
-  measurement→verdict bridges, coverage-guided/corpus fuzzing,
-  Godot/§24-Phase-9 domain scenarios.
-
-**Gates (measured on the lane, this change-set):** baseline re-confirmed
-first at HEAD c02ee4b before edits — Gate 0 exit 0; `check-probe` ALL
-GREEN with **104 `ok:` lines** (the ticket's stated baseline). After the
-change: **Gate 0** (`tsc --noEmit`) exit 0; `node
-node_modules/tsx/dist/cli.mjs scripts/check-probe.mjs` → `check-probe: ALL
-GREEN`, exit 0, **124 `ok:` assertion lines** (104 baseline + 20 new
-adversarial assertions, the flipped pin included); full fast tier `node
-scripts/verify.mjs fast` → `=== verify (fast) complete: ALL GREEN ===`,
-exit 0 (~1m37s wall), Gate 1 and Gate 1.6 riding green unchanged inside
-the tier. **Gate 2 NOT owed** — the change-set touches no `src/runner.ts`,
-no adapter, no gate code, no workspace handling, no report shape (none of
-VERIFICATION.md's Gate 2 triggers), and Gate 2 is a `--goal`-mode run that
-executes no probe code. **Gate 3 n/a** (no adapter touched).
 
 ## Verification
 

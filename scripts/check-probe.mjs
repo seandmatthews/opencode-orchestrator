@@ -1,33 +1,28 @@
 // Probe-layer self-check (Gate 1.15, fast tier, T-015; extended in place by
-// T-018 — the benchmark probe — T-019 — the screenshot probe — T-024 —
-// the web/server probe — and T-032 — the adversarial probe) — run under tsx:
+// T-018 — the benchmark probe — T-019 — the screenshot probe — and T-024 —
+// the web/server probe) — run under tsx:
 //   node node_modules/tsx/dist/cli.mjs scripts/check-probe.mjs
 // Three legs, zero model tokens (the tickets' Verification sections):
 //   1. contract fixtures — the EvidenceBundle validator's accept/refuse faces
 //      and parseJobsSpec's probes wiring, including the benchmark `repeats`,
-//      screenshot `capture`, web `url`, and adversarial `seed` validation
-//      (the Gate 0.5 hand-built-input pattern: no pipeline, no subprocess),
+//      screenshot `capture`, and web `url` validation (the Gate 0.5
+//      hand-built-input pattern: no pipeline, no subprocess),
 //   2. direct token-free CommandProbe/TestProbe/BenchmarkProbe/
-//      ScreenshotProbe/WebProbe/AdversarialProbe executions against a fresh
-//      demo-target fixture (scripts/demo-target.mjs, Gate 1) and temp
-//      TAP/screenshot/web/adversarial fixtures in the verify sandbox — real
-//      list-form spawns, real process-table assertions on the timeout tree
-//      kill (the Gate 1.12 style), and for the benchmark probe the
-//      quantitative measurement invariants (exactly N run-* durations,
-//      nearest-rank min/median/p95 recomputed in this check and compared
-//      exactly, the 'report'-kind results artifact); the screenshot probe's
-//      capture target is the checked-in tiny valid PNG under
-//      scripts/fixtures/ (each leg's capture command copies it into the
-//      workspace — list-form — so no capture technology is a dependency of
-//      any pin); the web probe's legs run against zero-dependency node:http
-//      fixture servers generated in the sandbox per leg (write-and-run, the
-//      demo-target pattern — no server exists in any checked-in fixture),
-//      each bound to a free port this check picks (ports are machine-global
-//      — the documented limitation); the adversarial probe's legs run
-//      against a generated known-weak-spot fuzzee fixture (the T-024
-//      write-and-run pattern) whose crash subset this check derives
-//      INDEPENDENTLY from the recomputed case list, pinning determinism,
-//      replayability, and the crash/no-crash/spawn-refusal/timeout faces,
+//      ScreenshotProbe/WebProbe executions against a fresh demo-target
+//      fixture (scripts/demo-target.mjs, Gate 1) and temp TAP/screenshot/web
+//      fixtures in the verify sandbox — real list-form spawns, real
+//      process-table assertions on the timeout tree kill (the Gate 1.12
+//      style), and for the benchmark probe the quantitative measurement
+//      invariants (exactly N run-* durations, nearest-rank min/median/p95
+//      recomputed in this check and compared exactly, the 'report'-kind
+//      results artifact); the screenshot probe's capture target is the
+//      checked-in tiny valid PNG under scripts/fixtures/ (each leg's capture
+//      command copies it into the workspace — list-form — so no capture
+//      technology is a dependency of any pin); the web probe's legs run
+//      against zero-dependency node:http fixture servers generated in the
+//      sandbox per leg (write-and-run, the demo-target pattern — no server
+//      exists in any checked-in fixture), each bound to a free port this
+//      check picks (ports are machine-global — the documented limitation),
 //   3. a token-free end-to-end --jobs drive of runSkeleton with a FAKE
 //      WorkerAdapter and fake gates (the Gate 1.8/1.10 pattern,
 //      scripts/check-scheduler.mjs) against throwaway fixture repos,
@@ -41,15 +36,12 @@ import { createServer as netCreateServer } from 'node:net'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  ADVERSARIAL_PROBE_CASE_COUNT,
-  ADVERSARIAL_PROBE_MAX_CASE_CHARS,
   MIN_PNG_BYTES,
   PNG_MAGIC,
   WEB_PROBE_MAX_BODY_BYTES,
   WEB_PROBE_SNIPPET_BYTES,
   createProbe,
   evidenceBundlePath,
-  generateAdversarialCases,
   parseTapSummary,
   validateEvidenceBundle,
 } from '../src/probe.ts'
@@ -92,25 +84,6 @@ const copyCapture = (id, dst) => ({
   },
 })
 const IDENTITY = ['-c', 'user.name=check-probe', '-c', 'user.email=probe@local']
-
-// T-032's known-weak-spot fuzzee source — the SAME source drives the P3
-// direct-execution fixture and the P5 e2e fixture repos: it exits non-zero
-// exactly on inputs failing Number.isFinite(Number(arg)) (the weak-spot
-// class of the real demo target's add(): mixed-type concat and numeric
-// overflow, scripts/demo-target.mjs:15-35). The case arrives as the LAST
-// argv entry; the probe appends it after the script filename, so node's own
-// option parsing never sees it (an inline `-e` source would — a case like
-// the corpus's '-0' is parsed as a node option there, recorded honestly as
-// a crash, but useless as a predictable fixture target).
-const ADV_FUZZEE_SOURCE = [
-  "const arg = process.argv[2] ?? ''",
-  "console.log('fuzzee got ' + JSON.stringify(arg))",
-  'if (!Number.isFinite(Number(arg))) {',
-  "  console.log('weak spot: non-finite Number(input)')",
-  '  process.exit(1)',
-  '}',
-  "console.log('survived')",
-].join('\n') + '\n'
 
 rmSync(sandbox, { recursive: true, force: true })
 mkdirSync(sandbox, { recursive: true })
@@ -200,9 +173,6 @@ function makeRepo(name) {
   const git = (...args) => run('git', ['-C', repo, ...args])
   git('init', '-b', 'main')
   writeFileSync(join(repo, 'build.js'), "console.log('build ok')\n")
-  // T-032: the known-weak-spot fuzzee, present in every fixture repo so a
-  // job's adversarial probe has its target inside the candidate worktree.
-  writeFileSync(join(repo, 'adv-fuzzee.js'), ADV_FUZZEE_SOURCE)
   // Exit 0 with a failing TAP record — the probe failure is purely in the
   // parsed report, independent of the exit code.
   writeFileSync(join(repo, 'tap-pass.js'), [
@@ -467,42 +437,8 @@ async function main() {
       }).jobs[0]?.probes, [
         { id: 'web-check', type: 'web', command: { exe: 'node', args: ['serve.js'] }, url: 'http://127.0.0.1:8080/' },
       ]))
-    // T-032 flip (recorded in the ticket as this change-set's only
-    // intentional invalidation of an existing assertion): Gate 1.15's P2 leg
-    // actively pinned the unknown-type refusal message (`type must be
-    // "command", "test", "benchmark", "screenshot", or "web"` — the message
-    // T-024's landing left behind, with 'godot' as the unknown-type example
-    // since T-019). The adversarial probe now EXISTS, so that one assertion
-    // was flipped explicitly in T-032's change-set: the expected message
-    // gained "adversarial" and 'godot' stays genuinely unknown and remains
-    // the example (only the message string changed — exactly T-024's flip
-    // shape). Net strictness increases (the T-013 flip precedent); no other
-    // existing assertion is weakened.
-    t('P2: a genuinely-unknown probe type is refused with the updated message (the example stays a type still unknown at this landing — the T-018/T-019/T-024/T-032 coordination chain)',
-      throwsWith(base([{ id: 'x', type: 'godot', command: { exe: 'node', args: [] } }]), 'type must be "command", "test", "benchmark", "screenshot", "web", or "adversarial"'))
-    // T-032: the adversarial probe's positive parse face — seed preserved
-    // verbatim (the same-extension shape as the T-018/T-019/T-024 flips).
-    t('P2: an adversarial probe with seed validates and is preserved verbatim (the T-032 flip: adversarial moved from unknown-type territory to pinned type)',
-      eq(parseJobsSpec({
-        phases: [{ id: 'p' }],
-        jobs: [{ id: 'j1', phase: 'p', brief: 'b', probes: [
-          { id: 'adv-check', type: 'adversarial', command: { exe: 'node', args: ['fuzzee.js'] }, seed: 42 },
-        ] }],
-      }).jobs[0]?.probes, [
-        { id: 'adv-check', type: 'adversarial', command: { exe: 'node', args: ['fuzzee.js'] }, seed: 42 },
-      ]))
-    t('P2: seed validation on an adversarial probe — missing, 0, -1, 1.5, non-string "seven" all refused naming the offense',
-      throwsWith(base([{ id: 'x', type: 'adversarial', command: { exe: 'node', args: [] } }]), 'seed must be a positive integer >= 1')
-      && throwsWith(base([{ id: 'x', type: 'adversarial', command: { exe: 'node', args: [] }, seed: 0 }]), 'seed must be a positive integer >= 1')
-      && throwsWith(base([{ id: 'x', type: 'adversarial', command: { exe: 'node', args: [] }, seed: -1 }]), 'seed must be a positive integer >= 1')
-      && throwsWith(base([{ id: 'x', type: 'adversarial', command: { exe: 'node', args: [] }, seed: 1.5 }]), 'seed must be a positive integer >= 1')
-      && throwsWith(base([{ id: 'x', type: 'adversarial', command: { exe: 'node', args: [] }, seed: 'seven' }]), 'seed must be a positive integer >= 1'))
-    t('P2: seed on a command/test/benchmark/screenshot/web probe is refused — the field exists only where it means something',
-      throwsWith(base([{ id: 'x', type: 'command', command: { exe: 'node', args: [] }, seed: 7 }]), 'seed is only valid on an adversarial probe')
-      && throwsWith(base([{ id: 'x', type: 'test', command: { exe: 'node', args: [] }, seed: 7 }]), 'seed is only valid on an adversarial probe')
-      && throwsWith(base([{ id: 'x', type: 'benchmark', command: { exe: 'node', args: [] }, seed: 7, repeats: 2 }]), 'seed is only valid on an adversarial probe')
-      && throwsWith(base([{ id: 'x', type: 'screenshot', command: { exe: 'node', args: [] }, seed: 7, capture: 'a.png' }]), 'seed is only valid on an adversarial probe')
-      && throwsWith(base([{ id: 'x', type: 'web', command: { exe: 'node', args: [] }, seed: 7, url: 'http://host/' }]), 'seed is only valid on an adversarial probe'))
+    t('P2: a genuinely-unknown probe type is refused with the updated message (the example stays a type still unknown at this landing — the T-018/T-019 coordination chain)',
+      throwsWith(base([{ id: 'x', type: 'godot', command: { exe: 'node', args: [] } }]), 'type must be "command", "test", "benchmark", "screenshot", or "web"'))
     t('P2: url validation on a web probe — missing, empty, non-string, non-http(s) scheme, and URL junk all refused naming the offense',
       throwsWith(base([{ id: 'x', type: 'web', command: { exe: 'node', args: [] } }]), 'url must be a non-empty http(s) URL')
       && throwsWith(base([{ id: 'x', type: 'web', command: { exe: 'node', args: [] }, url: '' }]), 'url must be a non-empty http(s) URL')
@@ -952,176 +888,6 @@ async function main() {
         webNever.gateResults[0]?.cleanupFailures === undefined
         || (Array.isArray(webNever.gateResults[0]?.cleanupFailures) && webNever.gateResults[0]?.cleanupFailures.every((l) => l.startsWith('CLEANUP FAIL'))))
     }
-
-    // T-032: the adversarial probe — direct token-free executions against a
-    // generated known-weak-spot fuzzee fixture (the T-024 write-and-run
-    // pattern: zero-dep scripts generated per leg in the verify sandbox, no
-    // checked-in fixture). The weak spot is independently known: the fuzzee
-    // exits non-zero exactly on inputs failing Number.isFinite(Number(arg))
-    // — the same weak-spot class as the real demo target's add(): mixed-type
-    // concat and numeric overflow (scripts/demo-target.mjs:15-35). This
-    // check recomputes the case list from the scenario's seed via the
-    // exported generateAdversarialCases and derives the expected crash
-    // subset from the strings themselves, so every face pins the probe
-    // against an independently-computed expectation.
-    const advFx = join(sandbox, 'adv-fx')
-    mkdirSync(advFx, { recursive: true })
-    const advArtifacts = join(advFx, 'artifacts')
-    const advEnv = directEnv(advArtifacts)
-    const advWs = directLease(advFx)
-    const advCrashesOn = (c) => !Number.isFinite(Number(c))
-    const crashIndicesOf = (cases) => cases
-      .map((c, i) => (advCrashesOn(c) ? i + 1 : 0))
-      .filter((i) => i > 0)
-
-    // Determinism of the generator itself, token-free (the exported pure
-    // function recomputed here, never trusted from the bundle).
-    const advSeedCases = generateAdversarialCases(42)
-    t(`P3 (T-032): generateAdversarialCases determinism — two invocations with the same seed produce byte-identical lists of exactly ADVERSARIAL_PROBE_CASE_COUNT (${ADVERSARIAL_PROBE_CASE_COUNT})`,
-      eq(advSeedCases, generateAdversarialCases(42)) && advSeedCases.length === ADVERSARIAL_PROBE_CASE_COUNT)
-    t(`P3 (T-032): the length bound — over several seeds, every generated case's length is <= ADVERSARIAL_PROBE_MAX_CASE_CHARS (${ADVERSARIAL_PROBE_MAX_CASE_CHARS})`,
-      [7, 42, 43, 2026, 999331].every((s) => generateAdversarialCases(s).every((c) => c.length <= ADVERSARIAL_PROBE_MAX_CASE_CHARS)))
-
-    // The known-weak-spot fuzzee fixture (generated per run of this check;
-    // the same source the P5 e2e fixture repos carry).
-    writeFileSync(join(advFx, 'adv-fuzzee.js'), ADV_FUZZEE_SOURCE)
-    const advScenario = (id, seed) => ({ id, type: 'adversarial', command: { exe: process.execPath, args: ['adv-fuzzee.js'] }, seed })
-
-    // Crash face — the weak-spot fixture crashes on the known subset.
-    const advCrash = await runDirect(advScenario('adv-crash', 42), advWs, advEnv)
-    const advExpectedCrashIdx = crashIndicesOf(advSeedCases)
-    const advExpectedSurviveIdx = advSeedCases.map((_, i) => i + 1).filter((i) => !advExpectedCrashIdx.includes(i))
-    const advCrashResultsRef = advCrash.artifacts.find((a) => a.kind === 'report')
-    const advCrashResults = advCrashResultsRef !== undefined && existsSync(advCrashResultsRef.path)
-      ? JSON.parse(read(advCrashResultsRef.path))
-      : null
-    t('P3 (T-032): crash face — the weak-spot fuzzee crashes on the independently-known subset: success false, error names the FIRST breaking case with counts',
-      advCrash.success === false
-      && advExpectedCrashIdx.length > 0 && advExpectedCrashIdx.length < ADVERSARIAL_PROBE_CASE_COUNT
-      && advCrash.error === `case ${advExpectedCrashIdx[0]}/${ADVERSARIAL_PROBE_CASE_COUNT} exited with code 1`)
-    t('P3 (T-032): crash face — exactly that subset recorded as failed <id>#case-<i> rows (in case order), every other row passed',
-      advCrash.gateResults.length === ADVERSARIAL_PROBE_CASE_COUNT
-      && eq(advCrash.gateResults.filter((g) => !g.passed).map((g) => g.name), advExpectedCrashIdx.map((i) => `adv-crash#case-${i}`))
-      && eq(advCrash.gateResults.filter((g) => g.passed).map((g) => g.name), advExpectedSurviveIdx.map((i) => `adv-crash#case-${i}`)))
-    t('P3 (T-032): crash face — cases-crashed equals the subset size, cases-run the full count, one duration per ran case (all ran), durations unit ms',
-      advCrash.measurements.some((m) => m.name === 'cases-crashed' && m.unit === 'cases' && m.value === advExpectedCrashIdx.length)
-      && advCrash.measurements.some((m) => m.name === 'cases-run' && m.unit === 'cases' && m.value === ADVERSARIAL_PROBE_CASE_COUNT)
-      && advCrash.measurements.filter((m) => /^case-\d+ duration$/.test(m.name)).length === ADVERSARIAL_PROBE_CASE_COUNT
-      && advCrash.measurements.every((m) => m.unit === (m.name === 'cases-run' || m.name === 'cases-crashed' ? 'cases' : 'ms')))
-    t('P3 (T-032): crash face — the report-kind results artifact parses; its recorded inputs match the recomputed list case-for-case (every input bounded); outcomes match the independently-derived subset',
-      advCrashResultsRef !== undefined && advCrashResultsRef.kind === 'report' && advCrashResultsRef.sizeBytes > 0
-      && advCrashResultsRef.name === 'adv-crash.results.json'
-      && advCrashResultsRef.path === join(advArtifacts, 'probes', 'direct', 'adv-crash.results.json')
-      && advCrashResults !== null
-      && advCrashResults.probeId === 'adv-crash' && advCrashResults.scenarioId === 'adv-crash' && advCrashResults.seed === 42
-      && advCrashResults.casesRun === ADVERSARIAL_PROBE_CASE_COUNT && advCrashResults.casesCrashed === advExpectedCrashIdx.length
-      && advCrashResults.cases.length === ADVERSARIAL_PROBE_CASE_COUNT
-      && advCrashResults.cases.every((r, i) => r.index === i + 1 && r.input === advSeedCases[i])
-      && advCrashResults.cases.every((r) => r.input.length <= ADVERSARIAL_PROBE_MAX_CASE_CHARS)
-      && advCrashResults.cases.every((r) => r.outcome === (advCrashesOn(r.input) ? 'crashed-exit' : 'survived'))
-      && advCrashResults.cases.every((r) => typeof r.durationMs === 'number'))
-    t('P3 (T-032): the crash bundle passes the validator and its combined .log carries the === case <i> === separators',
-      validateEvidenceBundle(JSON.parse(JSON.stringify(advCrash))).success === false
-      && advCrash.artifacts[0]?.kind === 'log' && advCrash.artifacts[0]?.sizeBytes > 0
-      && read(advCrash.artifacts[0]?.path).includes('=== case 1 ===')
-      && read(advCrash.artifacts[0]?.path).includes(`=== case ${ADVERSARIAL_PROBE_CASE_COUNT} ===`))
-
-    // Replayability — two same-seed runs against the same fixture agree
-    // case-for-case on outcome (a replayable crash list). Names are
-    // normalized to their case index: each run's rows are self-named with
-    // that run's own probe id, so the comparison is case-index + outcome.
-    const advReplay = await runDirect(advScenario('adv-replay', 42), advWs, advEnv)
-    const outcomeShape = (bundle) => bundle.gateResults.map((g) => [g.name.split('#case-')[1], g.passed])
-    t('P3 (T-032): replayability — two same-seed probe runs against the same fixture agree case-for-case on outcome',
-      advReplay.success === false
-      && eq(outcomeShape(advReplay), outcomeShape(advCrash))
-      && advReplay.error === advCrash.error)
-
-    // No-crash face — a robust target: success true with cases-crashed 0.
-    writeFileSync(join(advFx, 'adv-robust.js'), [
-      "console.log('robust got ' + JSON.stringify(process.argv[2] ?? ''))",
-      "console.log('survived')",
-    ].join('\n') + '\n')
-    const advRobust = await runDirect({ id: 'adv-robust', type: 'adversarial', command: { exe: process.execPath, args: ['adv-robust.js'] }, seed: 7 }, advWs, advEnv)
-    t('P3 (T-032): no-crash face — a robust target: success true, cases-crashed 0, cases-run the full count, every <id>#case-<i> row passed',
-      advRobust.success === true && advRobust.error === undefined
-      && advRobust.gateResults.length === ADVERSARIAL_PROBE_CASE_COUNT
-      && advRobust.gateResults.every((g, i) => g.name === `adv-robust#case-${i + 1}` && g.passed && g.exitCode === 0)
-      && advRobust.measurements.some((m) => m.name === 'cases-run' && m.value === ADVERSARIAL_PROBE_CASE_COUNT)
-      && advRobust.measurements.some((m) => m.name === 'cases-crashed' && m.value === 0)
-      && advRobust.measurements.filter((m) => /^case-\d+ duration$/.test(m.name)).length === ADVERSARIAL_PROBE_CASE_COUNT
-      && validateEvidenceBundle(JSON.parse(JSON.stringify(advRobust))).success === true)
-
-    // Spawn-refusal / zero-completed face — a non-existent exe: success
-    // false with ZERO case durations, never a pass (AGENTS.md #7).
-    const advRefused = await runDirect({ id: 'adv-refused', type: 'adversarial', command: { exe: 'definitely-not-a-real-exe-4f8a2b', args: [] }, seed: 42 }, advWs, advEnv)
-    t(`P3 (T-032): spawn-refusal / zero-completed face — a non-existent exe: success false, zero case-<i> durations, cases-run 0, every row spawn-refused, error names case 1, never a pass`,
-      advRefused.success === false
-      && advRefused.measurements.filter((m) => /^case-\d+ duration$/.test(m.name)).length === 0
-      && advRefused.measurements.some((m) => m.name === 'cases-run' && m.value === 0)
-      && advRefused.measurements.some((m) => m.name === 'cases-crashed' && m.value === 0)
-      && advRefused.gateResults.length === ADVERSARIAL_PROBE_CASE_COUNT
-      && advRefused.gateResults.every((g, i) => g.name === `adv-refused#case-${i + 1}` && !g.passed && g.exitCode === null)
-      && typeof advRefused.error === 'string'
-      && advRefused.error.startsWith(`case 1/${ADVERSARIAL_PROBE_CASE_COUNT} could not be spawned: `)
-      && advRefused.error.length > `case 1/${ADVERSARIAL_PROBE_CASE_COUNT} could not be spawned: `.length)
-
-    // A directly constructed adversarial scenario without seed is refused by
-    // the class itself (the parseJobsSpec contract held at the class too —
-    // the screenshot/web precedent; never a silent unseeded fuzz).
-    let advContractThrow = ''
-    try {
-      await runDirect({ id: 'adv-noseed', type: 'adversarial', command: { exe: process.execPath, args: [] } }, advWs, advEnv)
-    } catch (e) {
-      advContractThrow = e instanceof Error ? e.message : String(e)
-    }
-    t('P3 (T-032): a directly constructed adversarial scenario without seed is refused by the class itself (never silently run)',
-      advContractThrow.includes('seed must be a positive integer >= 1'))
-
-    // Timeout face — the P4 sleeper pattern with its process-table
-    // assertions: the generated target sleeps past timeoutMs on exactly the
-    // first case (the corpus leads with the empty string — the trigger is
-    // embedded exactly) and exits 0 on every other case, so one short
-    // budget covers the face. The spawned tree (parent + child) is what the
-    // tree kill must reap; kill evidence rides that case's entry.
-    writeFileSync(join(advFx, 'adv-timeout-target.js'), [
-      "const { spawn } = require('node:child_process')",
-      `const trigger = ${JSON.stringify(advSeedCases[0])}`,
-      "const arg = process.argv[2] ?? ''",
-      'if (arg === trigger) {',
-      "  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { windowsHide: true })",
-      "  console.log('PARENT_PID=' + process.pid)",
-      "  console.log('CHILD_PID=' + child.pid)",
-      '  setInterval(() => {}, 1000)',
-      '} else {',
-      "  console.log('survived')",
-      '}',
-    ].join('\n') + '\n')
-    const advTimeoutMs = 1200
-    const advTimedOut = await runDirect({ id: 'adv-slow', type: 'adversarial', command: { exe: process.execPath, args: ['adv-timeout-target.js'] }, seed: 42, timeoutMs: advTimeoutMs }, advWs, advEnv)
-    const advSlowLog = advTimedOut.artifacts.find((a) => a.kind === 'log')
-    const advPids = (advSlowLog !== undefined && existsSync(advSlowLog.path))
-      ? [...read(advSlowLog.path).matchAll(/(?:PARENT|CHILD)_PID=(\d+)/g)].map((m) => Number(m[1]))
-      : []
-    const advParentDead = advPids[0] !== undefined && await untilDead(advPids[0])
-    const advChildDead = advPids[1] !== undefined && await untilDead(advPids[1])
-    if (advPids[0] !== undefined && !advParentDead) sweep(advPids[0])
-    if (advPids[1] !== undefined && !advChildDead) sweep(advPids[1])
-    t('P3 (T-032): timeout face — a case that sleeps past timeoutMs: success false, error names the timing-out case, that case\'s GateResult exitCode null with durationMs >= timeoutMs and its duration still recorded',
-      advTimedOut.success === false
-      && advTimedOut.error === `case 1/${ADVERSARIAL_PROBE_CASE_COUNT} timed out after ${advTimeoutMs}ms`
-      && advTimedOut.gateResults.length === ADVERSARIAL_PROBE_CASE_COUNT
-      && advTimedOut.gateResults[0]?.name === 'adv-slow#case-1'
-      && advTimedOut.gateResults[0]?.exitCode === null
-      && advTimedOut.gateResults[0]?.durationMs >= advTimeoutMs
-      && advTimedOut.measurements.some((m) => m.name === 'case-1 duration' && m.value >= advTimeoutMs)
-      && advTimedOut.measurements.some((m) => m.name === 'cases-crashed' && m.value === 1)
-      && advTimedOut.measurements.some((m) => m.name === 'cases-run' && m.value === ADVERSARIAL_PROBE_CASE_COUNT))
-    t('P3 (T-032): timeout face — the whole spawned tree is verified dead on the real process table',
-      advPids.length === 2 && advParentDead && advChildDead)
-    t("P3 (T-032): timeout face — kill evidence is on that case's GateResult entry: a verified kill leaves cleanupFailures absent, an unproven one records loud CLEANUP FAIL lines",
-      advTimedOut.gateResults[0]?.cleanupFailures === undefined
-      || (Array.isArray(advTimedOut.gateResults[0]?.cleanupFailures) && advTimedOut.gateResults[0]?.cleanupFailures.every((l) => l.startsWith('CLEANUP FAIL'))))
   }
 
   // ---------- P4: TestProbe TAP contract on temp TAP fixtures ----------
@@ -1248,10 +1014,9 @@ async function main() {
   {
     // Scenario A: passing gates; one job with a PASSING and a FAILING probe,
     // a PASSING benchmark probe (T-018), a PASSING screenshot probe
-    // (T-019), a PASSING web probe (T-024), and a FAILING adversarial probe
-    // (T-032 — a passing-gates/failing-adversarial job still passes); its
-    // sibling job carries a FAILING benchmark, a FAILING screenshot, and a
-    // FAILING web probe — survival must stay untouched by probe outcomes.
+    // (T-019), and a PASSING web probe (T-024); its sibling job carries a
+    // FAILING benchmark, a FAILING screenshot, and a FAILING web probe —
+    // survival must stay untouched by probe outcomes.
     const a = makeRepo('e2e')
     // T-024 e2e servers: inline `node -e` sources traveling as argv
     // (token-free), each bound to a free port this check picks.
@@ -1259,12 +1024,6 @@ async function main() {
     const e2ePortB = await freePort()
     const e2eWebServer = (port, status, body) =>
       `require('node:http').createServer((q,s)=>{s.writeHead(${status},{'content-type':'text/plain'});s.end('${body}')}).listen(${port},'127.0.0.1',()=>console.log('SERVER_PID='+process.pid))`
-    // T-032 e2e fuzzee: the fixture repo's own adv-fuzzee.js (makeRepo writes
-    // ADV_FUZZEE_SOURCE into every fixture repo) — script-file mode, so the
-    // appended case is the script's argv[2] and node's option parsing never
-    // sees leading-'-' cases. Same weak-spot class as the P3 fixture, so the
-    // crash subset is independently derivable from the recomputed seed-7
-    // list.
     const specA = {
       phases: [{ id: 'p' }],
       jobs: [
@@ -1276,7 +1035,6 @@ async function main() {
             { id: 'bench-check', type: 'benchmark', command: { exe: 'node', args: ['build.js'] }, repeats: 2 },
             copyCapture('shot-check', 'shot-e2e.png'),
             { id: 'web-check', type: 'web', command: { exe: process.execPath, args: ['-e', e2eWebServer(e2ePortA, 200, 'e2e-web-ok')] }, url: `http://127.0.0.1:${e2ePortA}/`, timeoutMs: 8000 },
-            { id: 'adv-check', type: 'adversarial', command: { exe: 'node', args: ['adv-fuzzee.js'] }, seed: 7 },
           ],
         },
         {
@@ -1295,16 +1053,15 @@ async function main() {
     const cA = rA.report.candidates.find((c) => c.id === 'job-a')
     const cB = rA.report.candidates.find((c) => c.id === 'job-b')
     t('P5: a passing-gates/failing-probe job still PASSES — probe results never enter a verdict',
-      cA?.passedAllGates === true && cA?.gates.every((g) => g.passed) === true && cA?.probes?.length === 6)
-    t('P5: the report carries per-probe summaries {probeId, scenarioId, success, durationMs, bundlePath} in spec order (benchmark + screenshot + web + adversarial included, T-018/T-019/T-024/T-032)',
+      cA?.passedAllGates === true && cA?.gates.every((g) => g.passed) === true && cA?.probes?.length === 5)
+    t('P5: the report carries per-probe summaries {probeId, scenarioId, success, durationMs, bundlePath} in spec order (benchmark + screenshot + web included, T-018/T-019/T-024)',
       eq(cA?.probes?.map((p) => [p.probeId, p.scenarioId, p.success]),
-        [['build-check', 'build-check', true], ['tap-fail-check', 'tap-fail-check', false], ['bench-check', 'bench-check', true], ['shot-check', 'shot-check', true], ['web-check', 'web-check', true], ['adv-check', 'adv-check', false]])
+        [['build-check', 'build-check', true], ['tap-fail-check', 'tap-fail-check', false], ['bench-check', 'bench-check', true], ['shot-check', 'shot-check', true], ['web-check', 'web-check', true]])
       && typeof cA?.probes?.[0]?.durationMs === 'number'
       && typeof cA?.probes?.[1]?.durationMs === 'number'
       && typeof cA?.probes?.[2]?.durationMs === 'number'
       && typeof cA?.probes?.[3]?.durationMs === 'number'
-      && typeof cA?.probes?.[4]?.durationMs === 'number'
-      && typeof cA?.probes?.[5]?.durationMs === 'number')
+      && typeof cA?.probes?.[4]?.durationMs === 'number')
     assertBundleCorrespondence('P5: every probes[] entry names an on-disk bundle that parses, passes the validator, and agrees with the summary (probes[] <-> bundlePath)', rA.report, rA.artifactsDir)
     const bundleA1 = JSON.parse(read(join(rA.artifactsDir, 'probes', 'job-a', 'build-check.json')))
     const bundleA2 = JSON.parse(read(join(rA.artifactsDir, 'probes', 'job-a', 'tap-fail-check.json')))
@@ -1322,7 +1079,7 @@ async function main() {
       && bundleB.measurements.some((m) => m.name === 'tests' && m.value === 2)
       && bundleB.measurements.some((m) => m.name === 'fail' && m.value === 0))
     t('P5: the on-disk report.json carries the probes[] arrays (the artifact the store and humans read)',
-      JSON.parse(read(join(rA.artifactsDir, 'report.json'))).candidates.find((c) => c.id === 'job-a')?.probes?.length === 6)
+      JSON.parse(read(join(rA.artifactsDir, 'report.json'))).candidates.find((c) => c.id === 'job-a')?.probes?.length === 5)
     t('P5: a passing job\'s probes[] record each outcome while survival stays untouched',
       cB?.passedAllGates === true && cB?.probes?.length === 4 && cB?.probes?.[0]?.success === true)
 
@@ -1402,41 +1159,6 @@ async function main() {
       && cB?.probes?.[3]?.success === false
       && validateEvidenceBundle(webFailBundleB).success === false
       && typeof webFailBundleB.error === 'string' && webFailBundleB.error.includes('500'))
-
-    // T-032: the adversarial probe in a real pipeline — bundle
-    // correspondence, the on-disk 'report' per-case results artifact (every
-    // recorded input bounded and matching the recomputed seed-7 list), and
-    // survival untouched by the adversarial outcome.
-    const advBundleA = JSON.parse(read(join(rA.artifactsDir, 'probes', 'job-a', 'adv-check.json')))
-    const advReportA = advBundleA.artifacts?.find((a2) => a2.kind === 'report')
-    const advE2eCases = generateAdversarialCases(7)
-    const advE2eCrashIdx = advE2eCases.findIndex((c) => !Number.isFinite(Number(c))) + 1
-    const advE2eCrashed = advE2eCases.filter((c) => !Number.isFinite(Number(c))).length
-    t('P5: the adversarial bundle is validator-clean (success false), its summary agrees, one GateResult row per case self-named <id>#case-<i>, error names the FIRST breaking case, and the counts match the independently recomputed seed-7 list',
-      validateEvidenceBundle(advBundleA).success === false
-      && cA?.probes?.[5]?.success === false && cA?.probes?.[5]?.probeId === 'adv-check'
-      && advBundleA.error === `case ${advE2eCrashIdx}/${ADVERSARIAL_PROBE_CASE_COUNT} exited with code 1`
-      && advBundleA.measurements.some((m) => m.name === 'cases-run' && m.value === ADVERSARIAL_PROBE_CASE_COUNT)
-      && advBundleA.measurements.some((m) => m.name === 'cases-crashed' && m.value === advE2eCrashed)
-      && advBundleA.gateResults.length === ADVERSARIAL_PROBE_CASE_COUNT
-      && advBundleA.gateResults.every((g, i) => g.name === `adv-check#case-${i + 1}`))
-    t('P5: the adversarial report-kind results artifact is real on disk (under the artifacts dir), parses, records the seed, and every recorded input is bounded by ADVERSARIAL_PROBE_MAX_CASE_CHARS and matches the recomputed list case-for-case',
-      advReportA !== undefined && advReportA.kind === 'report' && advReportA.name === 'adv-check.results.json'
-      && advReportA.path === join(rA.artifactsDir, 'probes', 'job-a', 'adv-check.results.json')
-      && typeof cA?.workspacePath === 'string' && cA.workspacePath.length > 0 && !advReportA.path.startsWith(cA.workspacePath)
-      && advReportA.sizeBytes > 0 && existsSync(advReportA.path)
-      && (() => {
-        const table = JSON.parse(read(advReportA.path))
-        return table.probeId === 'adv-check' && table.scenarioId === 'adv-check' && table.seed === 7
-          && table.casesRun === ADVERSARIAL_PROBE_CASE_COUNT && table.casesCrashed === advE2eCrashed
-          && table.cases.length === ADVERSARIAL_PROBE_CASE_COUNT
-          && table.cases.every((r, i) => r.index === i + 1 && r.input === advE2eCases[i])
-          && table.cases.every((r) => r.input.length <= ADVERSARIAL_PROBE_MAX_CASE_CHARS)
-      })())
-    t('P5: a passing-gates/FAILING-adversarial job still PASSES — the adversarial outcome never enters a verdict',
-      cA?.passedAllGates === true
-      && cA?.gates.every((g) => g.passed) === true
-      && advBundleA.success === false)
 
     // Scenario B: a FAILING gate; its probes must still run and record
     // (evidence about failures is evidence).
