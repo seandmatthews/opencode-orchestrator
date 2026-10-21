@@ -71,3 +71,4 @@ Rules:
 | T-032 | Adversarial probe: seeded fuzz cases fed over argv → crash/survival EvidenceBundle (spec §34:2139 M8, §24 Phase 9; fills T-030:95's carve) | high | done 2026-10-21 |
 | T-033 | Multi-generation feedback loops deferred: `--rounds` stays 1..2 (ROADMAP stage 8; spec §20, §34 M8) | medium | done 2026-10-20 |
 | T-034 | Run dashboard first slice: local read-only HTTP view over the recorded store — runs, gates, evidence pointers, DAG, approval queue + decide (spec §26.1/§26.2/§26.6, §34 M7; ROADMAP stage 7) | medium | done 2026-10-21 |
+| T-035 | Job drill-down: per-job pages over the recorded store — job row, verdict, gate results, attempt history, probe runs (extends T-034's dashboard; spec §26.2, §34 M7; ROADMAP stage 7) | medium | proposed |
