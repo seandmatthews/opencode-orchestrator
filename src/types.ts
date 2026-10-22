@@ -412,8 +412,25 @@ export interface GateRetryRecord {
    *  `<retry attempt evidence dir>/retry-brief.txt` and wrapped, verbatim,
    *  into the retry attempt's builder prompt (whose own exact-text hash is
    *  that attempt's `promptVersion`, T-029). The T-030 `packetFingerprint`
-   *  pattern. */
+   *  pattern. Since T-040 the hashed text includes the findings section when
+   *  one rode (by construction — the fingerprint hashes the full text). */
   fingerprint: string
+  /**
+   * T-040 provenance for the verifier findings that rode the composed brief
+   * (a findings section exists on the brief iff `included > 0`). `count` —
+   * the ELIGIBLE findings (severity blocker-advisory | concern) the PRE-RETRY
+   * verification returned, before the documented caps (MAX_RETRY_FINDINGS
+   * top-N, MAX_RETRY_FINDING_CHARS per string; src/runner.ts exports both).
+   * `included` — the number actually embedded in the composed text. `ok` —
+   * whether parsed, schema-valid verifier output existed at all: false when
+   * no verifier was configured on the run, the pre-retry output failed to
+   * parse after its bounded repair, or the verifier adapter crashed — the
+   * recorded degradation (the brief was gates-only either way, and the retry
+   * still fired). Findings shape what the retry TRIES; the re-run gates
+   * decide what SURVIVES — never a verdict input (decisions.md 2026-10-10,
+   * extended 2026-10-21; the T-039 boundary holds with findings present).
+   */
+  findings: { count: number; included: number; ok: boolean }
 }
 
 // ---------- Schedule (T-009, spec §22:1329 — deterministic, persisted transitions) ----------

@@ -207,7 +207,21 @@ for (const t of queue) {
       phase("Prove the lane with the full e2e gate");
       let full;
       try {
-        full = await world.run("node", [...TEE, REDLOG + "/" + t.id + "-gate2-full.log", laneDir + "/scripts/verify.mjs", "full"], { timeoutMs: 1500000 });
+        // Wrapper-budget discipline (VERIFICATION.md Gate 2 + Known issue
+        // #12): the wrapper must sit ABOVE the tier's own inner ceiling —
+        // the skeleton-run timeout inside scripts/verify.mjs (50 min since
+        // T-040: the tier carries --verifier-model, four real verifier
+        // dispatches observed 278-429s each) plus the fast tier it runs
+        // first — or it preempts the runner's stall path and produces an
+        // uninformative kill instead of a verdict. Two observed wrapper
+        // kills calibrated this (teed logs verify-red/T-040-gate2-full.log,
+        // rounds 1 and 2 of the T-040 review): both runs were HEALTHY at
+        // the 1500000ms kill. 3600000 (60 min) covers the 50-min inner
+        // ceiling + the fast tier plus margin; a genuinely stuck run still
+        // dies inside it and verify.mjs reports its own truthful failure.
+        // PAIRED VALUE: keep wrapper > inner ceiling + fast tier when
+        // editing either side.
+        full = await world.run("node", [...TEE, REDLOG + "/" + t.id + "-gate2-full.log", laneDir + "/scripts/verify.mjs", "full"], { timeoutMs: 3600000 });
       } catch (e) {
         full = { exitCode: -1, stdout: "", stderr: "gate spawn/timeout: " + String(e) };
       }

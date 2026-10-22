@@ -923,6 +923,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.27: verifier findings into the retry brief (T-040) ----------
+section('Gate 1.27 — verifier findings into the retry brief (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-gate-retry-findings.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'gate-retry-findings self-check exit 0')
+} catch (e) {
+  fail(`gate-retry-findings self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
@@ -952,6 +962,15 @@ const skeletonArgs = [
   // run produces a genuine gate-failure -> retry -> survival is the staged
   // empirical question, recorded honestly either way.
   '--gate-retry',
+  // T-040: Gate 2 is a real --goal --gate-retry --verifier-model run
+  // end-to-end (the ticket's Gate 2 shape, sequenced as its own change-set —
+  // T-038/T-039 landed separately). The verifier rides every candidate's
+  // final attempt (T-039 semantics) and every gate-failed retry-eligible leg
+  // before composition (T-040 semantics, bounded at two verifications per
+  // candidate); findings remain advisory — the assertions below stay
+  // gate-decided, and the verifier block is asserted structurally (present,
+  // honest ok flag, well-formed observations), never on content.
+  '--verifier-model', 'zai-coding-plan/glm-5.3-flash',
   '--run-root', verifyRoot.replace(/\//g, '\\'),
 ]
 console.log('$ tsx src/cli.ts', skeletonArgs.slice(3).join(' '))
@@ -959,14 +978,20 @@ console.log('$ tsx src/cli.ts', skeletonArgs.slice(3).join(' '))
 // machinery (T-023 review round 1, VERIFICATION.md Known issue #12): the
 // runner's per-worker budget is --timeout-min (default 15, src/cli.ts) per
 // attempt, resolved by the T-011 verified tree kill into a FAILED candidate
-// verdict, and the planner/gates/reviewer legs carry the same per-call budget.
-// Since T-030 the run is a real 2-round loop, so the runner's worst legitimate
-// path is TWO such legs (planner + 15-min worker + gates/review, twice — a
-// stall in each round) ⇒ ~34 min; 35 gives margin while still reaping a
-// genuinely stuck run. The historical single-pass happy path was 3–5 min; the
-// loop adds a second planner+worker+review pass over the same fixture.
+// verdict, and the planner/gates/reviewer/verifier legs carry the same
+// per-call budget. Since T-030 the run is a real 2-round loop, and since
+// T-040 the tier also carries --verifier-model (four real verifier
+// dispatches per healthy run, observed 278-429s each with a bounded repair;
+// reviews 76-150s — see the two wrapper kills recorded under Known issue
+// #12): the healthy slow-day skeleton path measured ~30+ min, so 35 min sat
+// within noise of a HEALTHY run and one stalled leg (up to 15 min before its
+// own budget reaps it into a runner verdict) would SIGTERM an informative
+// run. 50 gives the healthy path room plus one such stall while still
+// reaping a genuinely stuck run; the driving wrapper must sit ABOVE this
+// plus the fast tier (the tracked workflow carries 60 min — the pairing is
+// documented in VERIFICATION.md's Gate 2 section).
 try {
-  run(process.execPath, skeletonArgs, { cwd: root, stdio: 'inherit', timeout: 35 * 60_000 })
+  run(process.execPath, skeletonArgs, { cwd: root, stdio: 'inherit', timeout: 50 * 60_000 })
 } catch (e) {
   fail(`skeleton run failed: ${e.status ?? e.signal ?? e.message}`)
   finish()
@@ -1029,6 +1054,24 @@ for (const c of report.candidates) {
   ok(c.diffBytes > 0, `${c.id}: diff non-empty (${c.diffBytes} bytes)`)
   ok(c.gates.length >= 2 && c.gates.every((g) => g.passed), `${c.id}: all gates pass (${c.gates.map((g) => g.name).join('+')})`)
   ok(!c.error, `${c.id}: no candidate error`)
+
+  // T-040: the verifier rode this run (--verifier-model above). Structural
+  // assertions only — findings advise, the gate assertions above decided:
+  // the block is present with the model recorded verbatim, its ok flag is
+  // honest (well-formed severity vocabulary when true, an explicit false
+  // when the parse degraded), and its raw output exists on disk. On a real
+  // run a gate-failed candidate also carries the pre-retry verification
+  // (bounded at two verifications per candidate) — whether that happens is
+  // read off the run's gateRetry blocks, never asserted here.
+  ok(c.verifier !== undefined && c.verifier.model === 'zai-coding-plan/glm-5.3-flash',
+    `${c.id}: verifier block present (model recorded verbatim)`)
+  if (c.verifier?.ok === true) {
+    const verifierSeveritiesOk = (c.verifier.observations ?? []).every((o) => typeof o.finding === 'string' && ['info', 'concern', 'blocker-advisory'].includes(o.severity))
+    ok(verifierSeveritiesOk, `${c.id}: verifier observations well-formed (${c.verifier.observations.length})`)
+  } else {
+    ok(c.verifier?.ok === false, `${c.id}: verifier degradation recorded honestly (ok: false)`)
+  }
+  ok(typeof c.verifier?.rawOutputPath === 'string' && existsSync(c.verifier.rawOutputPath), `${c.id}: verifier raw output persisted`)
 
   const reviewPath = join(runDir, c.id, 'review.json')
   if (c.passedAllGates) {

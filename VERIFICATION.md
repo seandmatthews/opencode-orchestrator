@@ -20,7 +20,7 @@ node node_modules/tsx/dist/cli.mjs scripts/check-parse.mjs
 
 Pins the JSON extraction rules for planner briefs and reviewer observations
 (prose-tolerant scanning, cycling, rejection shapes) without spending model tokens.
-Since T-029's review round 1 it also pins `parseBriefs`'s LAST-RESORT separator
+Since T-029's review round 1 it also pins `parseBriefs`'s FIRST LAST-RESORT
 repair: when no `[..]` slice parses, the scan retries once over text with the
 observed LLM slip repaired — a duplicated closing quote at an element boundary
 (`"," "` where `", "` was meant; recorded verbatim from real run
@@ -34,6 +34,38 @@ content contains the slip's byte pattern parses through the plain path with
 content intact. Every input that parsed before this change parses
 byte-identically; no existing fixture changed. Required whenever `src/parse.ts`
 changes.
+
+Since the T-040 lane's review round 1 it also pins `parseBriefs`'s SECOND
+LAST-RESORT repair, the objects-shape READ (run only when BOTH the plain scan
+and the separator repair return null, so structurally inert while either
+parses): the ROUND-2 planner of real run 20261022211937 (the driving Gate 2
+red that landed it, teed at `C:\swarm\verify-red\T-040-gate2-full.log` —
+`planner (round 2): no valid output, using raw goal in 115s (2 attempts)`)
+answered the composed survivor-evidence prompt with a complete two-brief
+array of `{"brief": "<text>"}` OBJECTS instead of an array of strings and
+repeated the exact shape on its bounded repair attempt; the plain scan's
+element filter dropped every object, the array scanned empty, both planner
+attempts fell back to the raw goal, and Gate 2's two planner assertions went
+red (the engine's fallback itself behaved exactly as designed — round 2
+dispatched on raw-goal briefs and every candidate stayed green). The
+recorded bytes are vendored byte-for-byte at
+`scripts/fixtures/planner-r2-objects-raw.txt` (6543 bytes, the OpenCode
+final frame included — the T-029 fixture-faithfulness rule) and the repair
+READS the model's own labeled briefs out of them: a candidate `[..]` slice
+parses only when its EVERY element is an object carrying its own non-empty
+string `brief` (the all-or-nothing rule — one bad element sinks the slice;
+nothing is fabricated or rewritten), with `scanBriefs`'s pad/truncate
+semantics verbatim. Fixtures pin the recorded payload yielding exactly the
+model's own two briefs (each output byte found in the recorded payload),
+cycle/truncate parity with the plain scan, the never-fabricates refusals
+(missing/non-string/empty `brief`, non-object elements, empty arrays — all
+null), that a mixed object+string array still parses through the PLAIN path
+unchanged (the resort never fires), that string content embedding the
+objects pattern parses byte-identically through the plain path (the T-029
+inertness pin, second instance), and that the recorded frame's trailing
+OpenCode footer and in-brief brackets do not derail the scan. Every input
+that parsed before either repair parses byte-identically by construction;
+no existing fixture changed. Required whenever `src/parse.ts` changes.
 
 ## Gate 1 — fixture baseline (seconds)
 
@@ -3031,13 +3063,32 @@ added — the diagnostician is a template, which is why no model-verdict
 carve-out is needed); gate modification between attempts; session
 resumption (§11.1:875, `resumableSession` stays unproduced — a fresh
 session per attempt as today); verifier findings in the retry brief
-(T-040, the successor at the same composition seam); rounds beyond 2
+(T-040 — **landed since at this exact seam; see the update note below and
+Gate 1.27**); rounds beyond 2
 (decisions.md 2026-10-20, T-033); reviewer or review-ordering changes (the
 reviewer still sees only final `passedAllGates` candidates and the ORIGINAL
 brief). Gate 2 is OWED for this change-set (the runner's verdict-adjacent
 code + an optional report block are on its trigger list): the full tier's
 real run carries `--gate-retry` — see Gate 2's section. Gate 3 n/a (no
 adapter change; no new harness posture).
+
+**T-040 update (landed in its own change-set at this exact composition
+seam):** the `gateRetry` block's shape is now exactly
+`{fromAttempt, toAttempt, gates, fingerprint, findings}` — the `findings`
+provenance (`{count, included, ok}`) records what the PRE-RETRY verification
+of the retry-eligible leg contributed to the composed brief (G1's exact-shape
+pin above was extended deliberately in that change-set, the T-031 flip
+precedent: net strictness increases — the four T-038 fields stay pinned
+exactly, and the fifth is positively exercised by Gate 1.27, including its
+honest zero record `{count: 0, included: 0, ok: false}` on THIS gate's
+verifier-less drives, which is what G1 now pins). The composed brief may now
+carry a findings section AFTER the gates section under documented caps; on
+this gate's drives (no verifier configured) every pinned brief remains
+byte-identical to the T-038 gates-only composition — a property Gate 1.27
+now pins positively (F0/F3). The fingerprint continues to hash the full
+composed text, findings included by construction. Recovery, the store leg,
+and the header line are untouched: `recover` reads the dispatch header only,
+and ingest reads named fields only.
 ## Gate 1.25 — verifier role: active pre-disposition verification (seconds, fast tier)
 
 ```bash
@@ -3307,6 +3358,132 @@ surface; the change-set is documentation + fixture + gate scripts, and Gate 1
 re-runs green inside the tier against the promoted fixture. **Gate 3 n/a** (no
 adapter touched).
 
+## Gate 1.27 — verifier findings ride the retry brief (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-gate-retry-findings.mjs
+```
+
+Pins T-040 (spec §24:1462 + §9.2; the JOIN of T-038's composition seam and
+T-039's verifier role, landed after both): T-038's retry brief answers "what
+did the machines reject?" — a diagnosis of the CHECK, not of the code. This
+change-set adds the complementary diagnosis: the retry-eligible leg is
+itself VERIFIED (the pre-retry verifier call site in `runJob`, before
+composition, same 'worktree-read' posture and same schema as T-039's
+final-attempt call) and its findings ride the composed brief beside the gate
+output — "the gates failed with these outputs, and the verifier found these
+issues; fix both; the gates re-run unchanged." Boundaries, unchanged from
+their landing tickets: the composition stays mechanical string assembly (no
+model call composes or adjudicates it — decisions.md 2026-10-21); findings
+shape what the retry TRIES, the re-run gates decide what SURVIVES
+(decisions.md 2026-10-10); findings changing retry ELIGIBILITY is carved.
+Bounded by construction: the gate-retry bound is one, so a candidate is
+verified at most twice — once pre-retry, once on its final attempt per
+T-039. The check drives `runSkeleton` directly with FAKE worker + verifier
+adapters (the Gate 1.24/1.25 pattern) against throwaway fixture repos —
+zero model tokens. It asserts:
+
+- **F1 — the pre-retry call site + the both-sections brief** (a
+  gates-failed→fixed drive with a fake verifier serving one blocker-advisory,
+  one concern, one info finding): the shared dispatch-order recorder pins
+  worker → gate loop → VERIFIER → retry worker → gate loop → final verifier
+  — the pre-retry verification fires exactly when the T-038 leg is
+  retry-eligible and BEFORE composition; exactly two verifier dispatches, the
+  first at the FAILING attempt's lease (`wt/c01`), the second (T-039's own
+  call, unchanged) at the retry lease (`wt/c01-a2`), both 'worktree-read' at
+  existing worktrees; the pre-retry prompt carries the failure context (the
+  gates that already ran with names/verdicts/recorded commands, the captured
+  diff, the brief); the composed brief carries BOTH sections — every failing
+  gate's name/command/outputTail AND each eligible finding WITH its evidence,
+  the findings section AFTER the gates section — while the info finding never
+  rides (only blocker-advisory and concern are eligible); the T-038 payload
+  is intact (original brief, captured diff, worker summary, no passing-gate
+  output); `gateRetry` is exactly
+  `{fromAttempt, toAttempt, gates, fingerprint, findings: {count: 2, included: 2, ok: true}}`;
+  the fingerprint covers the FULL composed text including the findings
+  section (sha256 of the brief file bytes); the findings reached attempt 2's
+  actual prompt (its `promptVersion` hashes the brief text containing them —
+  one composition, two consumers); the two legs' verifier evidence files are
+  DISTINCT and intact (pre-retry: `verifier-pre-retry.log`/
+  `verifier-pre-retry-raw.txt` in the failing attempt's evidence dir — the
+  planner round-tag pattern; final: `verifier.log`/`verifier-raw.txt` —
+  neither clobbered); dispatch.jsonl keeps its line shapes; and the candidate
+  SURVIVES on the re-run gates with blocker-advisory findings having ridden —
+  the survive face of the immunity.
+- **F2 — degradation faces; the retry never blocks**: a twice-invalid
+  pre-retry output (each leg's `runVerifier` repairs independently — 4
+  dispatches total with the final leg's own verification) composes a
+  GATES-ONLY brief (no findings section, no verifier garbage in the worker's
+  input), records the degradation `findings {count: 0, included: 0, ok:
+  false}`, persists the raw output verbatim at the pre-retry path, and the
+  retry STILL fires; the fingerprint still covers the exact gates-only text;
+  a CRASHED verifier adapter on the pre-retry leg composes the same
+  gates-only brief and the retry still fires (the leg stays `gates-failed`,
+  never an error leg); on both faces the candidate's verdict is still the
+  re-run gates'.
+- **F3 — the zero-findings faces**: a verifier returning NO observations,
+  or only `info` findings (the eligibility filter), composes the T-038
+  gates-only brief (no findings section) with honest provenance
+  `{count: 0, included: 0, ok: true}`; retry unchanged from T-038's
+  behavior, fingerprint exact.
+- **F4 — verdict immunity, the adversarial form** (T-038's immunity leg
+  re-run with findings present): the elimination-face drive —
+  blocker-advisory findings rode the retry brief AND the re-run gates failed
+  again ⇒ eliminated with `passedAllGates: false`, no error, no new
+  elimination vocabulary, and `passedAllGates === (gates.length > 0 &&
+  gates.every(passed) && diffBytes > 0)` holds — findings are never a
+  verdict input even when they rode the brief. (The survive face is F1's.)
+- **F5 — caps hold under flood**: a fake verifier returning 12 long
+  blocker-advisory findings produces `findings {count: 12, included: 5}` —
+  the documented top-N, FIRST-N in the verifier's own order, not a sample —
+  every embedded finding/evidence string char-capped at the documented
+  constant, the brief within the documented bound, and the GATES section
+  intact (every failing gate's name/command/outputTail present, original
+  brief and diff too, fingerprint exact): the flood cannot drown the gate
+  output, which stays the primary payload.
+- **F0 — verifier absence**: a `--gate-retry` run with no verifier
+  configured composes the T-038 gates-only brief with honest zero
+  provenance `{count: 0, included: 0, ok: false}`, the retry fires, and no
+  verifier evidence files exist anywhere — verifier absence never blocks
+  the mechanical retry.
+
+**The documented constants** (src/runner.ts, exported for this gate so code
+and documentation cannot drift): `MAX_RETRY_FINDINGS = 5` (top-N) and
+`MAX_RETRY_FINDING_CHARS = 2_000` (per finding/evidence string — the
+`MAX_DIFF_CHARS` precedent narrowed to a per-string cap so one huge evidence
+blob cannot crowd out the other findings). CLI config for them is carved
+(the ticket): documented constants this slice.
+
+**Red bar (AGENTS.md #8), recorded before the engine change landed:**
+against the pre-change tree, this check ran RED with 8 reported failures —
+7 assertion failures (`the engine exports the documented caps`,
+the dispatch-order pin — no verifier entry between the gate loop and the
+retry worker, `exactly two verifier dispatches`, the pre-retry prompt
+context, the findings section, the `gateRetry` exact shape — no `findings`
+key, the findings-in-attempt-2's-prompt pin) plus the crash that ended the
+run: `ENOENT ... c01\verifier-pre-retry-raw.txt` — the engine composed the
+T-038 gates-only brief with NO pre-retry verification (T-039's final-attempt
+call the only verifier dispatch, printed after attempt 2's gates). The
+F2–F0 legs never executed in that run (the ENOENT aborted `main()`); their
+green is established on the post-change tree.
+
+Not pinned here and carved by the ticket: findings changing retry
+ELIGIBILITY (a candidate with zero findings retries exactly as one with six
+— the leg definition stays T-038's); findings in the round-2 planner packet
+(src/rounds.ts's composer renders probe summaries; verifier summaries there
+is a composer extension = a successor's report-shape change with its own
+Gate 2); severity thresholds or top-N as CLI config (documented constants
+this slice); the final attempt's verifier being skipped when a pre-retry
+verification already ran (each leg verified per its own ticket — bounded at
+two, measured, revisited only with run-history evidence); per-job verifier
+config in `--jobs` specs (the T-039 carve); review/`--jobs`-spec changes.
+**Gate 2 — OWED and carried by the full tier (see Gate 2's section):** the
+change-set touches the runner's verdict-adjacent composition and extends the
+`gateRetry` report block, so the ticket's own-Gate-2 branch applies; the
+full tier now passes `--verifier-model` so the driving run is a real
+`--goal --gate-retry --verifier-model` run end-to-end. Gate 3 n/a (no
+adapter change; the verifier's posture was settled by T-039).
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
@@ -3331,7 +3508,20 @@ genuine gate-failure → feedback retry → survival — or the retry fails to
 convert — is the staged empirical question T-038 records as open, not
 answered; both outcomes are honest Gate 2 outcomes, read off the run's
 `gateRetry` blocks and verdicts and recorded in the ticket's Landed
-section. :**Recorded 2026-10-22 (two full-tier runs of this exact tree, hand-run
+section. **And a real `--verifier-model` run since T-040** (the ticket's
+Gate 2 shape — the change-set touches the runner's verdict-adjacent
+composition seam and extends the `gateRetry` block): the full tier passes
+`--verifier-model zai-coding-plan/glm-5.3-flash`, so every candidate carries
+a T-039 verifier block on its final attempt, and every gate-failed
+retry-eligible leg additionally carries the T-040 pre-retry verification
+(bounded at two verifications per candidate; whether that fires on a given
+real run is read off the `gateRetry` blocks' `findings` provenance, never
+asserted — a passing run fires none). The verifier block is asserted
+STRUCTURALLY in the tier's assertions below — present, model recorded
+verbatim, honest ok flag (well-formed severity vocabulary when true, an
+explicit `ok: false` on a real-run parse degradation — an honest pass, not a
+red), raw output persisted on disk — never on content: findings advise, and
+every verdict assertion stays gate-decided. :**Recorded 2026-10-22 (two full-tier runs of this exact tree, hand-run
 post-review; logs `C:\swarmerify-red\T-038-hand-gate2-full{,-run2}.log`):**
 run 1 (`20261022152425`) RED on exactly one assertion — candidate c01-r2
 produced a zero-byte diff, and the engine's own rules held (NO-OP recorded
@@ -3376,15 +3566,20 @@ asserts on the artifacts:
   is correct here — the run captured the evidence before disposal) (T-002).
 
 The skeleton run's outer ceiling (scripts/verify.mjs, `execFileSync` timeout
-**35 min**, T-030) bounds CI; it deliberately exceeds the runner's OWN
-per-worker budget — `--timeout-min` default 15 (src/cli.ts), at which the
-T-011 verified tree kill resolves a stalled worker into a FAILED candidate
-verdict, plus the planner/gates/reviewer legs — so the runner, not
-the verify harness, produces the verdict when a worker stalls, and Gate 2
-fails on its `workerOk` assertion with a truthful line. Since T-030 the run
-is a 2-round loop, so the runner's worst legitimate path is TWO such legs
-(planner + 15-min worker + gates/review, twice — a stall in each round) ⇒
-~34 min; 35 gives margin while still reaping a genuinely stuck run. At the
+**50 min since T-040**; 35 min T-030–T-039) bounds CI; it deliberately exceeds
+the runner's OWN per-worker budget — `--timeout-min` default 15 (src/cli.ts),
+at which the T-011 verified tree kill resolves a stalled worker into a FAILED
+candidate verdict, plus the planner/gates/reviewer/verifier legs — so the
+runner, not the verify harness, produces the verdict when a leg stalls, and
+Gate 2 fails on its `workerOk` assertion with a truthful line. Since T-030
+the run is a 2-round loop, and since T-040 the tier carries
+`--verifier-model` (four real verifier dispatches per healthy run, observed
+278–429s each with a bounded repair; reviews 76–150s): the healthy slow-day
+skeleton path measured ~30+ min across the two wrapper kills recorded under
+Known issue #12, so 35 min sat within noise of a HEALTHY run, and one
+stalled leg (up to 15 min before its own budget reaps it into a runner
+verdict) would SIGTERM an informative run — 50 gives the healthy path room
+plus one such stall while still reaping a genuinely stuck run. At the
 previous 8-minute ceiling one silent worker SIGTERM'd the whole run before the runner
 could finish — an uninformative red that also skips report writing and
 disposal, leaving stale worktree metadata, `swarm/*` branches, and a stale
@@ -3395,6 +3590,16 @@ whoever drives this gate: the ceiling raise is the same discipline as the
 T-027 wrapper raise — a driving wrapper must sit ABOVE this inner ceiling
 plus the fast tier, or it preempting the runner's stall path is its own
 misconfiguration (Known issue #12's remedy paragraph applies verbatim).
+**Since T-040 the tracked driving workflow carries the note's number:**
+`.zcode/workflows/ticket-implement.dwf.ts` runs the full tier at
+`timeoutMs: 3600000` (60 min — the 50-min inner ceiling + the fast tier,
+plus margin; the PAIRED-VALUE comment sits on the raise itself). The two
+1500000ms kills that calibrated this (review rounds 1 and 2) came from the
+workflow's PRE-EDIT loaded script — a lane's edit to the tracked file takes
+effect only when the driving run is amended or re-created from it, so the
+wrapper value and the inner ceiling are one paired decision. The wrapper is
+repo content and lanes may raise it when their change-set legitimately grows
+the tier — never shrink the tier's own assertions to fit a wrapper.
 
 Required when touching `src/runner.ts`, any adapter, gates, workspace handling, or
 anything that changes report shape. Fast tier alone does not clear you here.
@@ -3486,7 +3691,26 @@ landing in T-017's Landed section).
      BOTH restricted postures ran headless with `--agent plan` to
      completion — the planner's briefs parsed and the reviewer's
      observations parsed (`review.json` `ok: true`) — no permission stall
-     occurred.
+     occurred. **2026-10-22 worker-class observation (run
+     20261022215556's `worker.log`s, the T-040 lane's second driving Gate 2
+     red): the same auto-reject containment, on the WORKER side, derailed
+     BOTH `worktree-write` builders to a same-run NO-OP pair.** Each worker
+     — given a properly leased, properly based worktree (the run's own
+     verifier later read `wt\c01\calc.js`, 17 lines, and `test.js` with the
+     T-041 ratchet checks, proving the lease was populated) — probed the
+     CANONICAL fixture instead of its lease (`Read
+     C:/swarm/demo-target/calc.js`, inferable from the goal text's
+     "demo-target" plus the lease path's `C:\swarm\…` prefix), hit
+     `permission requested: external_directory (C:\swarm\demo-target\*);
+     auto-rejecting` on every such read, and exited 0 in 5.3s/7.4s with
+     zero edits — the ladder's NO-OP verdicts (AGENTS.md #7) and the
+     honestly-unexecuted round 2 were the machinery working, and all nine
+     of the tier's assertion failures are that rule or its honest
+     downstream. Same disposition as every observation in this class: the
+     containment held, nothing leaked, no code change — the failing legs
+     are model-behavior variance, and the remedy is a re-run (the T-038
+     run-1 → run-2 precedent), not a weakening of the NO-OP rule or a
+     relitigation of the blind-reroll ban (decisions.md 2026-10-21).
    - Output-content threats (e.g. a planner brief containing a hostile
      path) are a *different* threat class — §14 governs execution
      capability, not output content; sanitization is carved (T-023).
@@ -3568,6 +3792,22 @@ landing in T-017's Landed section).
    snapshot/kill window vs an already-gone root) before any edit, and
    until that diagnosis the classification stays loud-by-design,
    benign, evidence-only.
+   **2026-10-22 fourth observation (T-040 lane, mid-review fast tier) —
+   recurred, and the captured-line duty was MISSED by the implementer
+   side.** One fast-tier run aborted at Gate 1.12 (`kill-tree self-check
+   failed: 1`) on a tree the T-040 change-set does not touch (its diff:
+   src/runner.ts, src/types.ts, scripts/check-gate-retry-findings.mjs,
+   scripts/check-gate-retry.mjs, scripts/verify.mjs, the tracked driving
+   workflow, docs); the implementer's output capture (`tail -3`) dropped
+   the check's own `FAIL: <name>` line — the same capture gap this ledger
+   keeps hitting, now on the implementer side of the wrapper. Disposition
+   per this issue's standing rule, a re-run not a code change: the
+   immediate full-output re-run of the identical tree was ALL GREEN
+   (teed: `C:\swarm\verify-red\T-040-lane-fast-rerun2.log`, exit 0, no
+   FAIL lines). The 4th observation therefore does NOT deliver the
+   diagnosis the threshold demands; the classification stays loud-by-design,
+   benign, evidence-only, and the next recurrence must come with the line
+   captured before any edit is considered.
 11. **A one-off Gate 1.17 red with a single failed assertion, not
    reproducible (observed once, 2026-10-18, T-021 lane review round 1).**
    One fast-tier run failed inside `scripts/check-machine-worker.mjs` — exit
@@ -3644,6 +3884,60 @@ landing in T-017's Landed section).
     `main` in `worktree list`, no `swarm/*` branches, clean status;
     evidence kept — dispatch.jsonl, both diff.patch, worker/reviewer logs,
     c02's review.json).
+    **2026-10-22 second budget kill (T-040 review round 1) — this time the
+    change-set itself legitimately grew the tier, and the remedy landed
+    in-repo.** The driving wrapper killed `npm run verify:full` at its own
+    1500000ms budget (25 min) while the run was HEALTHY — the teed log
+    (`C:\swarm\verify-red\T-040-gate2-full.log`) shows the fast tier green,
+    round 1 complete (planner 32s; workers 264s/283s; verifiers 429s/299s —
+    each with one bounded repair; reviews 89s/76s), round 2's workers done
+    (187s/51s), c02-r2's verifier done (284s), and c01-r2's verifier
+    mid-repair at the kill: no report.json, because the T-040 change-set
+    added `--verifier-model zai-coding-plan/glm-5.3-flash` to the full tier
+    (its ticketed Gate 2 shape), and four real verifier dispatches put the
+    honest path at ~30 min — above a wrapper calibrated before the tier
+    carried a verifier. Debris (4 registered worktrees, 4 `swarm/*`
+    branches, 1 stale lock) disposed through the house path (`npm run clean
+    -- --run 20261022193232 --run-root C:\swarm\verify --force --force-lock`;
+    8 removed, 0 refused, 0 failed; fixture verified pristine after: only
+    `main` in `worktree list`, no `swarm/*` branches, clean status; evidence
+    kept — dispatch.jsonl, planner logs, per-candidate diff/review/verifier
+    files). Remedy, per this issue's own T-027 record ("raise
+    `opts.timeoutMs` ... or narrow the work" — narrowing was refused there
+    and stays refused): the TRACKED driving workflow
+    (`.zcode/workflows/ticket-implement.dwf.ts`, repo content) raised its
+    Gate 2 `timeoutMs` 1500000 → **2700000 (45 min)** in the T-040 lane,
+    restoring the wrapper-budget invariant (wrapper above the inner 35-min
+    ceiling plus the fast tier, with the measured verifier overhead on
+    top). That T-027 record's closing claim — the budget "no lane
+    change-set can set" — is hereby marked obsolete: the workflow file is
+    tracked, and the T-040 lane set it under the reviewer's explicit
+    mandate. The kill was the wrapper's own misconfiguration, not a red of
+    any assertion: nothing in the change-set was implicated, and the lane's
+    fast tier was and stays green.
+    **2026-10-22 third budget kill (T-040 review round 2) — the SAME
+    1500000ms signature, and the diagnosis this one settles: the budget is
+    driven by the workflow's LOADED script, not the tracked file.** The
+    round-2 rerun carried the lane's raised value in the tracked file
+    (committed, `2700000` at the lane's
+    `.zcode/workflows/ticket-implement.dwf.ts`) and was killed at
+    1500000ms anyway (teed log `C:\swarm\verify-red\T-040-gate2-full.log`,
+    3146 lines, again HEALTHY at the kill — round 1's verifiers 410s/278s
+    and reviews 143s/150s complete, the round-2 planner in flight; slower
+    model day than round 1). The main checkout's copy of the workflow —
+    what a driving run loads before the lane merges — still read
+    1500000ms. Debris (run `20261022201344`: 2 worktrees, 2 `swarm/*`
+    branches, 1 stale lock) disposed through the house path (`npm run
+    clean -- --run 20261022201344 --run-root C:\swarm\verify --force
+    --force-lock`; 4 removed, 0 refused, 0 failed; fixture pristine;
+    evidence kept). Consequence, recorded so the pairing is never
+    half-applied: the lane now carries the PAIRED raise — the inner
+    skeleton ceiling 35 → **50 min** (scripts/verify.mjs; the healthy
+    slow-day path measured ~30+ min, within noise of 35, so one stalled
+    leg would have been an inner SIGTERM) and the workflow's Gate 2
+    `timeoutMs` 2700000 → **3600000 (60 min)** — and the driving run must
+    be AMENDED or re-created from the updated file before its next Gate 2
+    attempt, since no lane commit can change an already-loaded script.
 13. **The first auto-revert: a post-merge fast-tier red that never
     reproduced, with the red output lost (observed once, 2026-10-21,
     T-032 lane, driving run `dwfrun-b35d1c1a`).** T-032 (adversarial
