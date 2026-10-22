@@ -176,6 +176,35 @@ a dated Known issue #12 follow-up marking T-027's "no lane change-set
 can set it" obsolete — the workflow file is tracked). The lane fast tier
 was re-run green after these edits.
 
+**Review round 2 (2026-10-22), addressed in this change-set:** Gate 2
+came back with the SAME `1500000ms` timeout signature — and this second
+kill settles the diagnosis the first one left open: the budget is driven
+by the workflow's **loaded script**, not the tracked file. The lane
+carried the raised value in the tracked file (round 1's commit) and the
+rerun was killed at 1500000ms anyway; the main checkout's copy — what a
+driving run loads before the lane merges — still reads 1500000. The teed
+log (3146 lines) again shows a HEALTHY run at the kill (round 1's
+verifiers 410s/278s, reviews 143s/150s complete; round-2 planner in
+flight; a slower model day than round 1). Fixes in this change-set:
+(1) the killed run's debris (run `20261022201344`) disposed through the
+house path (`npm run clean -- --run 20261022201344 --run-root
+C:\swarm\verify --force --force-lock`; 4 removed, 0 refused, 0 failed;
+fixture pristine; evidence kept); (2) the raise is now PAIRED across both
+sides of the invariant, calibrated by the two kills' timing data — the
+inner skeleton ceiling 35 → **50 min** (scripts/verify.mjs: the healthy
+slow-day path measured ~30+ min, within noise of 35, so one stalled leg
+— up to 15 min before its own budget reaps it into a runner verdict —
+would have been an uninformative inner SIGTERM, the exact Known issue
+#12 misconfiguration at the inner level) and the tracked workflow's
+Gate 2 `timeoutMs` 2700000 → **3600000 (60 min)**, with the
+PAIRED-VALUE comment on the raise and the pairing documented in
+VERIFICATION.md's Gate 2 section and Known issue #12's dated follow-up.
+**The remaining blocker is outside the lane's reach, escalated:** no
+lane commit can change an already-loaded workflow script — the driving
+run must be amended (or re-created from the updated tracked file) so its
+Gate 2 `world.run` carries `timeoutMs: 3600000` before the next attempt.
+The lane fast tier was re-run green after these edits.
+
 ## Verification
 
 Gate 0 throughout. **Gate 1.27** — token-free fake-adapter drives, wired

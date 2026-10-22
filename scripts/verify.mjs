@@ -978,14 +978,20 @@ console.log('$ tsx src/cli.ts', skeletonArgs.slice(3).join(' '))
 // machinery (T-023 review round 1, VERIFICATION.md Known issue #12): the
 // runner's per-worker budget is --timeout-min (default 15, src/cli.ts) per
 // attempt, resolved by the T-011 verified tree kill into a FAILED candidate
-// verdict, and the planner/gates/reviewer legs carry the same per-call budget.
-// Since T-030 the run is a real 2-round loop, so the runner's worst legitimate
-// path is TWO such legs (planner + 15-min worker + gates/review, twice — a
-// stall in each round) ⇒ ~34 min; 35 gives margin while still reaping a
-// genuinely stuck run. The historical single-pass happy path was 3–5 min; the
-// loop adds a second planner+worker+review pass over the same fixture.
+// verdict, and the planner/gates/reviewer/verifier legs carry the same
+// per-call budget. Since T-030 the run is a real 2-round loop, and since
+// T-040 the tier also carries --verifier-model (four real verifier
+// dispatches per healthy run, observed 278-429s each with a bounded repair;
+// reviews 76-150s — see the two wrapper kills recorded under Known issue
+// #12): the healthy slow-day skeleton path measured ~30+ min, so 35 min sat
+// within noise of a HEALTHY run and one stalled leg (up to 15 min before its
+// own budget reaps it into a runner verdict) would SIGTERM an informative
+// run. 50 gives the healthy path room plus one such stall while still
+// reaping a genuinely stuck run; the driving wrapper must sit ABOVE this
+// plus the fast tier (the tracked workflow carries 60 min — the pairing is
+// documented in VERIFICATION.md's Gate 2 section).
 try {
-  run(process.execPath, skeletonArgs, { cwd: root, stdio: 'inherit', timeout: 35 * 60_000 })
+  run(process.execPath, skeletonArgs, { cwd: root, stdio: 'inherit', timeout: 50 * 60_000 })
 } catch (e) {
   fail(`skeleton run failed: ${e.status ?? e.signal ?? e.message}`)
   finish()

@@ -3534,15 +3534,20 @@ asserts on the artifacts:
   is correct here — the run captured the evidence before disposal) (T-002).
 
 The skeleton run's outer ceiling (scripts/verify.mjs, `execFileSync` timeout
-**35 min**, T-030) bounds CI; it deliberately exceeds the runner's OWN
-per-worker budget — `--timeout-min` default 15 (src/cli.ts), at which the
-T-011 verified tree kill resolves a stalled worker into a FAILED candidate
-verdict, plus the planner/gates/reviewer legs — so the runner, not
-the verify harness, produces the verdict when a worker stalls, and Gate 2
-fails on its `workerOk` assertion with a truthful line. Since T-030 the run
-is a 2-round loop, so the runner's worst legitimate path is TWO such legs
-(planner + 15-min worker + gates/review, twice — a stall in each round) ⇒
-~34 min; 35 gives margin while still reaping a genuinely stuck run. At the
+**50 min since T-040**; 35 min T-030–T-039) bounds CI; it deliberately exceeds
+the runner's OWN per-worker budget — `--timeout-min` default 15 (src/cli.ts),
+at which the T-011 verified tree kill resolves a stalled worker into a FAILED
+candidate verdict, plus the planner/gates/reviewer/verifier legs — so the
+runner, not the verify harness, produces the verdict when a leg stalls, and
+Gate 2 fails on its `workerOk` assertion with a truthful line. Since T-030
+the run is a 2-round loop, and since T-040 the tier carries
+`--verifier-model` (four real verifier dispatches per healthy run, observed
+278–429s each with a bounded repair; reviews 76–150s): the healthy slow-day
+skeleton path measured ~30+ min across the two wrapper kills recorded under
+Known issue #12, so 35 min sat within noise of a HEALTHY run, and one
+stalled leg (up to 15 min before its own budget reaps it into a runner
+verdict) would SIGTERM an informative run — 50 gives the healthy path room
+plus one such stall while still reaping a genuinely stuck run. At the
 previous 8-minute ceiling one silent worker SIGTERM'd the whole run before the runner
 could finish — an uninformative red that also skips report writing and
 disposal, leaving stale worktree metadata, `swarm/*` branches, and a stale
@@ -3555,12 +3560,14 @@ plus the fast tier, or it preempting the runner's stall path is its own
 misconfiguration (Known issue #12's remedy paragraph applies verbatim).
 **Since T-040 the tracked driving workflow carries the note's number:**
 `.zcode/workflows/ticket-implement.dwf.ts` runs the full tier at
-`timeoutMs: 2700000` (45 min — the 35-min inner ceiling + the fast tier,
-plus the measured verifier overhead the tier now carries; see the
-2026-10-22 follow-up under Known issue #12 for the kill that calibrated
-it). The wrapper is repo content and lanes may raise it when their
-change-set legitimately grows the tier — never shrink the tier's own
-assertions to fit a wrapper.
+`timeoutMs: 3600000` (60 min — the 50-min inner ceiling + the fast tier,
+plus margin; the PAIRED-VALUE comment sits on the raise itself). The two
+1500000ms kills that calibrated this (review rounds 1 and 2) came from the
+workflow's PRE-EDIT loaded script — a lane's edit to the tracked file takes
+effect only when the driving run is amended or re-created from it, so the
+wrapper value and the inner ceiling are one paired decision. The wrapper is
+repo content and lanes may raise it when their change-set legitimately grows
+the tier — never shrink the tier's own assertions to fit a wrapper.
 
 Required when touching `src/runner.ts`, any adapter, gates, workspace handling, or
 anything that changes report shape. Fast tier alone does not clear you here.
@@ -3734,6 +3741,22 @@ landing in T-017's Landed section).
    snapshot/kill window vs an already-gone root) before any edit, and
    until that diagnosis the classification stays loud-by-design,
    benign, evidence-only.
+   **2026-10-22 fourth observation (T-040 lane, mid-review fast tier) —
+   recurred, and the captured-line duty was MISSED by the implementer
+   side.** One fast-tier run aborted at Gate 1.12 (`kill-tree self-check
+   failed: 1`) on a tree the T-040 change-set does not touch (its diff:
+   src/runner.ts, src/types.ts, scripts/check-gate-retry-findings.mjs,
+   scripts/check-gate-retry.mjs, scripts/verify.mjs, the tracked driving
+   workflow, docs); the implementer's output capture (`tail -3`) dropped
+   the check's own `FAIL: <name>` line — the same capture gap this ledger
+   keeps hitting, now on the implementer side of the wrapper. Disposition
+   per this issue's standing rule, a re-run not a code change: the
+   immediate full-output re-run of the identical tree was ALL GREEN
+   (teed: `C:\swarm\verify-red\T-040-lane-fast-rerun2.log`, exit 0, no
+   FAIL lines). The 4th observation therefore does NOT deliver the
+   diagnosis the threshold demands; the classification stays loud-by-design,
+   benign, evidence-only, and the next recurrence must come with the line
+   captured before any edit is considered.
 11. **A one-off Gate 1.17 red with a single failed assertion, not
    reproducible (observed once, 2026-10-18, T-021 lane review round 1).**
    One fast-tier run failed inside `scripts/check-machine-worker.mjs` — exit
@@ -3841,6 +3864,29 @@ landing in T-017's Landed section).
     mandate. The kill was the wrapper's own misconfiguration, not a red of
     any assertion: nothing in the change-set was implicated, and the lane's
     fast tier was and stays green.
+    **2026-10-22 third budget kill (T-040 review round 2) — the SAME
+    1500000ms signature, and the diagnosis this one settles: the budget is
+    driven by the workflow's LOADED script, not the tracked file.** The
+    round-2 rerun carried the lane's raised value in the tracked file
+    (committed, `2700000` at the lane's
+    `.zcode/workflows/ticket-implement.dwf.ts`) and was killed at
+    1500000ms anyway (teed log `C:\swarm\verify-red\T-040-gate2-full.log`,
+    3146 lines, again HEALTHY at the kill — round 1's verifiers 410s/278s
+    and reviews 143s/150s complete, the round-2 planner in flight; slower
+    model day than round 1). The main checkout's copy of the workflow —
+    what a driving run loads before the lane merges — still read
+    1500000ms. Debris (run `20261022201344`: 2 worktrees, 2 `swarm/*`
+    branches, 1 stale lock) disposed through the house path (`npm run
+    clean -- --run 20261022201344 --run-root C:\swarm\verify --force
+    --force-lock`; 4 removed, 0 refused, 0 failed; fixture pristine;
+    evidence kept). Consequence, recorded so the pairing is never
+    half-applied: the lane now carries the PAIRED raise — the inner
+    skeleton ceiling 35 → **50 min** (scripts/verify.mjs; the healthy
+    slow-day path measured ~30+ min, within noise of 35, so one stalled
+    leg would have been an inner SIGTERM) and the workflow's Gate 2
+    `timeoutMs` 2700000 → **3600000 (60 min)** — and the driving run must
+    be AMENDED or re-created from the updated file before its next Gate 2
+    attempt, since no lane commit can change an already-loaded script.
 13. **The first auto-revert: a post-merge fast-tier red that never
     reproduced, with the red output lost (observed once, 2026-10-21,
     T-032 lane, driving run `dwfrun-b35d1c1a`).** T-032 (adversarial
