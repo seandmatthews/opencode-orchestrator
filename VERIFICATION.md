@@ -3691,7 +3691,26 @@ landing in T-017's Landed section).
      BOTH restricted postures ran headless with `--agent plan` to
      completion — the planner's briefs parsed and the reviewer's
      observations parsed (`review.json` `ok: true`) — no permission stall
-     occurred.
+     occurred. **2026-10-22 worker-class observation (run
+     20261022215556's `worker.log`s, the T-040 lane's second driving Gate 2
+     red): the same auto-reject containment, on the WORKER side, derailed
+     BOTH `worktree-write` builders to a same-run NO-OP pair.** Each worker
+     — given a properly leased, properly based worktree (the run's own
+     verifier later read `wt\c01\calc.js`, 17 lines, and `test.js` with the
+     T-041 ratchet checks, proving the lease was populated) — probed the
+     CANONICAL fixture instead of its lease (`Read
+     C:/swarm/demo-target/calc.js`, inferable from the goal text's
+     "demo-target" plus the lease path's `C:\swarm\…` prefix), hit
+     `permission requested: external_directory (C:\swarm\demo-target\*);
+     auto-rejecting` on every such read, and exited 0 in 5.3s/7.4s with
+     zero edits — the ladder's NO-OP verdicts (AGENTS.md #7) and the
+     honestly-unexecuted round 2 were the machinery working, and all nine
+     of the tier's assertion failures are that rule or its honest
+     downstream. Same disposition as every observation in this class: the
+     containment held, nothing leaked, no code change — the failing legs
+     are model-behavior variance, and the remedy is a re-run (the T-038
+     run-1 → run-2 precedent), not a weakening of the NO-OP rule or a
+     relitigation of the blind-reroll ban (decisions.md 2026-10-21).
    - Output-content threats (e.g. a planner brief containing a hostile
      path) are a *different* threat class — §14 governs execution
      capability, not output content; sanitization is carved (T-023).

@@ -228,6 +228,51 @@ healthy path ~30+ min, so the pre-edit 25-min loaded wrapper kills a
 healthy run uninformatically. Gate 2 remains owed and carried by that
 driving run; Gate 3 n/a (no adapter file touched).
 
+**Review round 4 (2026-10-22 — the second driving Gate 2 red: the recorded
+worker NO-OP class, diagnosed from the kept evidence; disposition: re-run,
+not a code change):** Gate 2 (run `20261022215556`, teed
+`C:\swarm\verify-red\T-040-gate2-full.log`) came back RED, exit 1, on 9
+assertions — and every one of them is the NO-OP rule (AGENTS.md #7) or its
+honest downstream. **Diagnosis, from the run's kept evidence (not
+inferred):** BOTH round-1 workers exited 0 in 5.3s/7.4s with zero-byte
+diffs (`report.json`: workerOk true, diffBytes 0, one attempt each;
+`passedAllGates false` on both). The `worker.log`s capture the mechanism:
+each builder probed the CANONICAL fixture instead of its lease —
+`permission requested: external_directory (C:\swarm\demo-target\*);
+auto-rejecting` on every such read, `Read C:/swarm/demo-target/calc.js
+failed … The user rejected permission` — a path inferable from the goal
+text's "demo-target" plus the lease path's `C:\swarm\…` prefix — and both
+sessions derailed to exit-0-with-no-edits. The leases themselves were
+properly based and populated: c01's verifier, running in the SAME worktree
+afterward, read `wt\c01\calc.js` (17 lines, add/clamp only) and `test.js`
+(14 lines with the T-041 ratchet RangeError checks) and its first
+blocker-advisory finding states verbatim "The brief's CHANGES section was
+not implemented at all" — the verifier did exactly its job on a real
+no-op, and c02's parse failure was recorded honestly (`ok: false`, the
+structural assertion added in this change-set passing on a real
+degradation). The engine held everywhere: NO-OP verdicts, review correctly
+skipped on non-survivors, the `rounds` block honestly recording
+`{"round":2,"executed":false}` (zero survivors), hygiene and disposal
+green. **Nothing in this change-set executes on the failing path:** no
+gate failed (the fixture baseline passes its own gates on an untouched
+tree), so the T-040 pre-retry verifier and composition never ran; the
+worker dispatch/prompt/lease path is untouched by the lane's diff. **Class
+citations:** the auto-reject mechanism behaving as designed is Known issue
+#6's recorded residual (planner-class observation 2026-10-20; the
+worker-class observation is now recorded there with this run's captures);
+the zero-byte worker red is T-038's Gate 2 run-1 record verbatim (run
+`20261022152425` → re-run `20261022155445` ALL GREEN). **Disposition
+(AGENTS.md #9, the standing class discipline):** a re-run, not a code
+change — any change that made this run shape pass would have to weaken
+the NO-OP rule (AGENTS.md #7) or relitigate the blind-reroll ban
+(decisions.md 2026-10-21: a zero-byte leg has no failure output to feed
+back; "retrying" one is the banned blind re-roll), and no assertion was
+weakened or touched. Gate 2's re-run is carried by the driving pipeline
+(its budget, its wrapper), as across every prior round; the healthy-run
+rate of this class across recorded runs (T-038 run 2, T-040 round 1: 4/4
+and 4/4 workers productive) says the next run's expected shape is the
+round-1 run's.
+
 **Review round 3 (2026-10-22, after the re-verification round — the driving
 Gate 2 red, addressed per the T-029 precedent):** Gate 2 (run
 `20261022211937`, teed `C:\swarm\verify-red\T-040-gate2-full.log`) came
