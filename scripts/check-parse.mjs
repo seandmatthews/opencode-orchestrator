@@ -1,6 +1,9 @@
 // Parser contract self-check (Gate 0.5, fast tier) — run under tsx:
 //   node node_modules/tsx/dist/cli.mjs scripts/check-parse.mjs
 // Pins the structured-output extraction rules without spending model tokens.
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { parseBriefs, parseReview } from '../src/parse.ts'
 
 const failures = []
@@ -38,6 +41,52 @@ t('separator repair: the recorded duplicated-quote boundary now yields both brie
 t('separator repair is inert whenever the plain scan parses: valid input whose string CONTENT contains the slip pattern parses untouched',
   parseBriefs('["a content \\",\\" b"]', 1)?.[0] === 'a content "," b')
 t('separator repair does not fabricate briefs from hopeless input', parseBriefs('"," "no array here', 1) === null)
+
+// T-040 lane review round 1 — the last-resort objects-shape extraction (the
+// third resort, after the plain scan and the separator repair). Red bar
+// recorded from real run 20261022211937 (the driving Gate 2, 2026-10-22,
+// teed at C:\swarm\verify-red\T-040-gate2-full.log): the ROUND-2 planner —
+// prompted with the composed survivor-evidence block — answered with a
+// complete two-brief array of `{"brief": "<text>"}` OBJECTS instead of an
+// array of strings, and repeated the exact shape on its bounded repair
+// attempt. parseBriefs' element filter drops non-strings, the array scanned
+// empty, and BOTH planner attempts fell back to the raw goal (the runner
+// logged `planner (round 2): no valid output, using raw goal in 115s (2
+// attempts)`), which turned Gate 2's two planner assertions red. The
+// recorded bytes are vendored byte-for-byte at
+// scripts/fixtures/planner-r2-objects-raw.txt (6543 bytes, OpenCode's final
+// frame included — the T-029 fixture faithfulness rule). The extraction
+// reads the model's OWN labeled briefs — it never fabricates one: every
+// element of the parsed slice must be an object carrying its own non-empty
+// string `brief`, else the candidate slice is skipped. The resort runs only
+// when BOTH existing scans return null, so every input that parsed before
+// parses byte-identically by construction (pinned below, the T-029 inertness
+// pattern).
+const objectsRaw = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'planner-r2-objects-raw.txt'), 'utf8')
+const objectsBriefs = parseBriefs(objectsRaw, 2)
+t('objects repair: the recorded round-2 planner payload yields exactly 2 briefs (run 20261022211937 red bar, green bar)',
+  Array.isArray(objectsBriefs) && objectsBriefs.length === 2
+  && objectsBriefs[0]?.startsWith('Brief A - ') && objectsBriefs[1]?.startsWith('Brief B - '))
+t('objects repair: the briefs are the model\'s own bytes, read out of the recorded payload — never fabricated',
+  objectsBriefs?.every((b) => objectsRaw.includes(b)) === true
+  && objectsBriefs?.[0] !== objectsBriefs?.[1])
+t('objects repair: one-object payload cycles to fill count, longer truncates — the scanBriefs semantics',
+  JSON.stringify(parseBriefs('[{"brief":"only one"}]', 3)) === JSON.stringify(['only one', 'only one', 'only one'])
+  && JSON.stringify(parseBriefs('[{"brief":"a"},{"brief":"b"},{"brief":"c"}]', 2)) === JSON.stringify(['a', 'b']))
+t('objects repair never fabricates: missing/non-string/empty brief values and empty arrays all stay null',
+  parseBriefs('[{"text":"no brief key"}]', 1) === null
+  && parseBriefs('[{"brief":"a"},{"brief":42}]', 1) === null
+  && parseBriefs('[{"brief":"  "}]', 1) === null
+  && parseBriefs('[{"brief":"a"},1]', 1) === null
+  && parseBriefs('[{"brief":null}]', 1) === null
+  && parseBriefs('[]', 1) === null)
+t('objects repair is a LAST resort: a mixed object+string array keeps parsing through the PLAIN path (the existing filter semantics, unchanged — the resort never fires)',
+  parseBriefs('[{"brief":"a"},"plain string"]', 1)?.[0] === 'plain string')
+t('objects repair is a LAST resort: valid string arrays whose string CONTENT embeds the objects pattern parse byte-identically through the plain path',
+  parseBriefs('["a {\\"brief\\": \\"fake\\"} b","c"]', 2)?.[0] === 'a {"brief": "fake"} b'
+  && parseBriefs('["a {\\"brief\\": \\"fake\\"} b","c"]', 2)?.[1] === 'c')
+t('objects repair tolerates the recorded frame: the fixture\'s trailing OpenCode footer and in-brief brackets do not derail the scan',
+  objectsBriefs?.[1]?.includes('crosswindComponent') === true)
 
 // parseReview
 const good = '{"observations":[{"finding":"f","severity":"concern"},{"finding":"g","severity":"info","evidence":"diff"}]}'

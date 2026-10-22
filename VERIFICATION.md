@@ -20,7 +20,7 @@ node node_modules/tsx/dist/cli.mjs scripts/check-parse.mjs
 
 Pins the JSON extraction rules for planner briefs and reviewer observations
 (prose-tolerant scanning, cycling, rejection shapes) without spending model tokens.
-Since T-029's review round 1 it also pins `parseBriefs`'s LAST-RESORT separator
+Since T-029's review round 1 it also pins `parseBriefs`'s FIRST LAST-RESORT
 repair: when no `[..]` slice parses, the scan retries once over text with the
 observed LLM slip repaired — a duplicated closing quote at an element boundary
 (`"," "` where `", "` was meant; recorded verbatim from real run
@@ -34,6 +34,38 @@ content contains the slip's byte pattern parses through the plain path with
 content intact. Every input that parsed before this change parses
 byte-identically; no existing fixture changed. Required whenever `src/parse.ts`
 changes.
+
+Since the T-040 lane's review round 1 it also pins `parseBriefs`'s SECOND
+LAST-RESORT repair, the objects-shape READ (run only when BOTH the plain scan
+and the separator repair return null, so structurally inert while either
+parses): the ROUND-2 planner of real run 20261022211937 (the driving Gate 2
+red that landed it, teed at `C:\swarm\verify-red\T-040-gate2-full.log` —
+`planner (round 2): no valid output, using raw goal in 115s (2 attempts)`)
+answered the composed survivor-evidence prompt with a complete two-brief
+array of `{"brief": "<text>"}` OBJECTS instead of an array of strings and
+repeated the exact shape on its bounded repair attempt; the plain scan's
+element filter dropped every object, the array scanned empty, both planner
+attempts fell back to the raw goal, and Gate 2's two planner assertions went
+red (the engine's fallback itself behaved exactly as designed — round 2
+dispatched on raw-goal briefs and every candidate stayed green). The
+recorded bytes are vendored byte-for-byte at
+`scripts/fixtures/planner-r2-objects-raw.txt` (6543 bytes, the OpenCode
+final frame included — the T-029 fixture-faithfulness rule) and the repair
+READS the model's own labeled briefs out of them: a candidate `[..]` slice
+parses only when its EVERY element is an object carrying its own non-empty
+string `brief` (the all-or-nothing rule — one bad element sinks the slice;
+nothing is fabricated or rewritten), with `scanBriefs`'s pad/truncate
+semantics verbatim. Fixtures pin the recorded payload yielding exactly the
+model's own two briefs (each output byte found in the recorded payload),
+cycle/truncate parity with the plain scan, the never-fabricates refusals
+(missing/non-string/empty `brief`, non-object elements, empty arrays — all
+null), that a mixed object+string array still parses through the PLAIN path
+unchanged (the resort never fires), that string content embedding the
+objects pattern parses byte-identically through the plain path (the T-029
+inertness pin, second instance), and that the recorded frame's trailing
+OpenCode footer and in-brief brackets do not derail the scan. Every input
+that parsed before either repair parses byte-identically by construction;
+no existing fixture changed. Required whenever `src/parse.ts` changes.
 
 ## Gate 1 — fixture baseline (seconds)
 

@@ -228,6 +228,55 @@ healthy path ~30+ min, so the pre-edit 25-min loaded wrapper kills a
 healthy run uninformatically. Gate 2 remains owed and carried by that
 driving run; Gate 3 n/a (no adapter file touched).
 
+**Review round 3 (2026-10-22, after the re-verification round — the driving
+Gate 2 red, addressed per the T-029 precedent):** Gate 2 (run
+`20261022211937`, teed `C:\swarm\verify-red\T-040-gate2-full.log`) came
+back RED, exit 1, on EXACTLY two assertions — `planner produced briefs
+(attempts=2)` and `one round-2 brief per round-2 candidate` — with every
+other assertion green: all four candidates worker-ok with non-zero diffs,
+every gate PASS, a well-formed verifier block on every candidate (this
+ticket's feature observed working on a real run), reviews parsed, two
+executed rounds, hygiene and disposal green. **Diagnosis (from the run's
+kept evidence):** the ROUND-2 planner answered the composed
+survivor-evidence prompt with a complete two-brief array of
+`{"brief": "<text>"}` OBJECTS instead of an array of strings
+(`planner-r2-raw.txt`, 6543 bytes) and repeated the exact shape on its
+bounded repair attempt; `parseBriefs`' element filter dropped every
+object, the array scanned empty, and both planner attempts fell back to
+the raw goal (`planner (round 2): no valid output, using raw goal in 115s
+(2 attempts)`) — the engine's fallback behaving exactly as designed,
+nothing else implicated (round 1's planner also slipped — the separator
+class — and RECOVERED through repair 1). **Fix (AGENTS.md #8, the T-029
+precedent verbatim — a driving Gate 2 red on a planner slip lands its
+documented last-resort repair in the red lane):** `src/parse.ts` gains a
+SECOND last-resort repair — a third scan that READS a `[..]` slice parsing
+to an array whose EVERY element is an object carrying its own non-empty
+string `brief` (all-or-nothing: one bad element sinks the slice; the
+model's own labeled briefs are read out, never fabricated or rewritten),
+with the plain scan's pad/truncate semantics verbatim, structurally inert
+while either existing scan parses — so every input that parsed before
+parses byte-identically BY CONSTRUCTION and no assertion anywhere was
+weakened (Gate 2's two planner assertions are untouched). The recorded
+bytes are vendored byte-for-byte at
+`scripts/fixtures/planner-r2-objects-raw.txt` (OpenCode final frame
+included, the T-029 fixture-faithfulness rule). **Red bar measured before
+the engine change:** `check-parse.mjs` with the new pins ran RED — 4
+failures, 23 ok (teed `C:\swarm\verify-red\T-040-parse-red2.log`) — the
+four being exactly the extraction pins; the red run itself caught one of
+the new pins contradicting existing behavior (a mixed object+string array
+parses through the PLAIN path's string filter today, the existing
+`non-string elements filtered` pin) and the pin was corrected to pin the
+actual plain-path semantics before the engine changed. **Green bar:**
+`check-parse.mjs` ALL GREEN, 27 ok (T-040-parse-green.log); Gate 0 exit 0;
+full fast tier exit 0, ALL GREEN, 1571 ok lines
+(`C:\swarm\verify-red\T-040-parse-fix-fast.log`). VERIFICATION.md's Gate
+0.5 section documents both repairs and the new fixture. **Gate 2 re-run is
+carried by the driving pipeline** (its budget, its wrapper): the recorded
+failure shape now parses (proven on the recorded bytes), a strings reply
+parses as before, and the honest residual exposure — a third, unrecorded
+planner shape — stays a graceful raw-goal fallback, recorded as open (the
+T-033 posture).
+
 ## Verification
 
 Gate 0 throughout. **Gate 1.27** — token-free fake-adapter drives, wired
