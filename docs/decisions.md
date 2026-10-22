@@ -18,7 +18,9 @@ contradicts one of these must first rewrite its entry here, with a date and a re
   endpoints replace these by config alone.
 - **2026-10-10 — Machine gates decide survival; models advise.** Spec §3.2. Gate =
   shell command, exit 0 passes. A zero-byte diff is a NO-OP verdict, never a pass
-  (learned: gates blessed untouched worktrees during the PWD incident).
+  (learned: gates blessed untouched worktrees during the PWD incident). The
+  re-roll prohibition's scope was narrowed 2026-10-21 (T-038) to BLIND re-rolls
+  only — see that entry below.
 - **2026-10-10 — Mechanism over prompts for isolation.** PWD/OLDPWD pinned to the
   contracted cwd in the adapter (spec §3.6, §14). Prompt statements of policy are
   defense-in-depth, never the boundary.
@@ -111,6 +113,42 @@ contradicts one of these must first rewrite its entry here, with a date and a re
   (c) candidate lineage lands (§34:2137; T-030:88-90's carve) — without
   generation identity beyond the `-rN` id suffix, iterated generations are
   unaccountable.
+- **2026-10-21 — The re-roll prohibition is about blindness, not repetition:
+  one bounded feedback-informed gate retry is permitted under `--gate-retry`
+  (T-038).** This entry rewrites the scope of the re-roll prohibition inside
+  the 2026-10-10 machine-gates decision ("gates decide survival; models
+  advise"), which until now read as: a worker that succeeded but produced a
+  zero-byte diff or failed gates is eliminated on the ladder, and re-rolling
+  it would be model-shopping around a machine verdict (src/runner.ts's
+  ladder comment; types.ts's FailureReason vocabulary note). The split that
+  makes the prohibition coherent is blind vs informed:
+  - **Blind re-rolls stay banned, unchanged.** Same brief, fresh dice, in
+    every mode: that is model-shopping around a machine verdict, and a
+    zero-byte-diff candidate has no failure output to feed back anyway, so
+    "retrying" one is the blind re-roll by another name (AGENTS.md #7).
+  - **One feedback-informed gate retry is permitted under the run-level
+    `--gate-retry` flag.** The bound is fixed at one per candidate — no
+    numeric knob. The retry fires only when the worker SUCCEEDED, the
+    captured diff is non-zero, and at least one machine gate failed; the
+    retry brief is composed MECHANICALLY from the gates' own recorded output
+    (name, command, `outputTail`) plus the captured diff — string assembly
+    in the runner, a template, never a model call: no model composes or
+    adjudicates the feedback.
+  - **The same Gate objects re-run unchanged on the retry.** A retry never
+    weakens, skips, or substitutes a gate; the gates decide survival on the
+    retry leg exactly as on the first — a gamed fix must survive them again.
+  - **Both legs are recorded** (attempt-scoped gate results on the pre-retry
+    leg, the composed brief hashed and written as evidence), and **the final
+    attempt's verdict stands**: a retry that fails again is eliminated by
+    the unchanged ladder with no new elimination vocabulary.
+  Spec sanction: §24:1462 — "A required-gate failure eliminates the
+  candidate **unless a bounded repair policy applies**" — and §30:1893's
+  "retry same worker once" (the policy T-007 generalized to mechanical legs
+  only). Machine evidence (the gate's own `outputTail`) feeding a bounded
+  mechanical retry is the same evidence class the planner's and reviewer's
+  bounded repair attempts already use on invalid structured output; the
+  model still never participates in any verdict (2026-10-10 stands: gates
+  decide survival; models advise).
 - **2026-10-21 — The verifier's findings are advisory; a model-authored
   check never decides survival in the run that produced it (T-039).** The
   fourth model role (T-039, spec §10.1/§9.2) actively tests a candidate's
