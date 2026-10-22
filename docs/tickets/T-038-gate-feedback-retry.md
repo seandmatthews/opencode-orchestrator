@@ -1,6 +1,6 @@
 # T-038 — Bounded gate-failure retry: `--gate-retry` — one feedback-informed attempt composed from the gates' own recorded output (spec §24:1462, §30:1893; decisions.md entry in-ticket)
 
-**Status:** done 2026-10-21
+**Status:** done 2026-10-22
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 3
 **Depends on:** — (T-007's attempt ladder is the substrate, done 2026-10-16; T-027's recorded `GateResult.command` supplies half the feedback payload, done 2026-10-19; T-029's promptVersion gives per-attempt provenance for free, done 2026-10-20). T-040 (proposed) is the successor that adds verifier findings to the same composition seam; this ticket is valuable and shippable without it.
@@ -54,7 +54,7 @@ The substrate is fully built: attempt ladder with fresh leases and per-attempt e
 - [x] Interactions: `--rounds 2` retries within each round's ladder (round-2 id `-rN` + attempt `-aN` no collision); `--jobs` mode retries per-job through the same `runJob`; `--no-planner` composes from the raw goal — pinned by **Gate 1.24** drives.
 - [x] The run header line carries `gateRetry: true` when the flag is set, and recovery derives the retry bound from it — pinned by **Gate 1.24** (header-line assertion) with the recovery disposition named as a manual face if not mechanically driven.
 - [x] VERIFICATION.md extended in the same change-set (AGENTS.md #6): the new Gate 1.24 section (every leg above), the recorded red bar, the decisions-entry citation — pinned by the full fast tier `npm run verify` ALL GREEN with the new section present.
-- [ ] **Gate 2 owed** (real tokens): the change touches `src/runner.ts` verdict-adjacent code and adds an optional report block — on the trigger list. The run is a real `--goal` run with `--gate-retry` demonstrating a genuine gate-failure → feedback retry → survival (or, honestly recorded, the failure of the retry to convert — both outcomes answer the staged question); its `report.json` path recorded here and in VERIFICATION.md. **NOT RUN by this lane** (the lane was instructed not to run verify:full; model tokens). Owed at merge: `scripts/verify.mjs`'s full tier now passes `--gate-retry` in this change-set, so the driving gate's `npm run verify:full` IS this ticket's real run — record its `report.json` path and what the run's `gateRetry` blocks show (conversion or not) here and in VERIFICATION.md when it lands. The flag is inert on any candidate whose gates pass first try, so a run where no gate ever fails demonstrates the no-regression half only — that outcome is recorded honestly, exactly as this criterion allows.
+- [x] **Gate 2 owed** (real tokens): the change touches `src/runner.ts` verdict-adjacent code and adds an optional report block — on the trigger list. **RUN AND RECORDED 2026-10-22** (hand-run post-review; two full-tier runs of this exact tree — run 1 `20261022152425` RED on a diagnosed worker no-op flake with every engine rule holding, run 2 `20261022155445` **ALL GREEN**; no candidate failed a gate in either run, so the flag never fired: the no-regression half is demonstrated and the conversion question stays OPEN, recorded verbatim in the Landed block below).
 - [x] **Gate 3 n/a** (no adapter change; no new harness posture).
 
 ## Landed
@@ -151,7 +151,7 @@ Measured gate numbers (this lane, this tree):
   re-run of the identical tree was ALL GREEN — the ledger's response
   (re-run, not a code change).
 - **Gate 0** typecheck exit 0 throughout.
-- **Gate 2: OWED, NOT RUN by this lane** (instructed not to run
+- **Gate 2: OWED at review, NOT RUN by this lane — RECORDED 2026-10-22 (block below)**
   verify:full; real model tokens). The full tier now carries
   `--gate-retry`, so the driving gate's `npm run verify:full` is this
   ticket's real run; its `report.json` path and the honest
@@ -164,14 +164,10 @@ Measured gate numbers (this lane, this tree):
   (05:37, pre-change-set — its dispatch.jsonl header carries no `gateRetry`
   field), and the driving workflow's T-038 tee
   (`C:\swarm\verify-red\T-038-lane-fast.log`, 17:12) holds the lane fast
-  tier only — ALL GREEN, no Gate 2 output yet. **RECORDING BLOCK — fills
-  when the driving run lands:** run id; `report.json` path; the `rounds`
-  block outcome (two executed rounds? survivors?); whether any candidate
-  failed a gate (the flag fires only then); per fired retry the
-  `gateRetry` block (`fromAttempt`/`toAttempt`/`gates`/`fingerprint`) and
-  whether the retry CONVERTED (final `passedAllGates`) or failed to
-  convert — either outcome answers the staged question and is recorded
-  verbatim, never smoothed.
+  tier only — ALL GREEN, no Gate 2 output yet. :**RECORDED 2026-10-22** (hand-run by the finishing session after the lane's review block; two full-tier runs of this exact tree, both logs teed under `C:\swarmerify-red\`):
+  - **Run 1 — `20261022152425`** (`C:\swarmerify61022152425eport.json`; log `T-038-hand-gate2-full.log`): RED — exactly one assertion failed, `c01-r2: diff non-empty (0 bytes)`. The engine held everywhere this ticket's rules bite: the no-op candidate was recorded `passedAllGates: false` (the NO-OP rule, AGENTS.md #7), the flag stayed INERT on it (a zero-byte diff is terminal — "retrying" one is the banned blind re-roll), and no candidate failed a gate, so no retry was ever eligible. Diagnosis: the known worker no-op flake class (worker exit 0, zero edits — the class AGENTS.md #7 exists for); nothing in the change-set implicated — the same tree's run 2 below and the T-030-era run `20261020171354` both had every candidate produce a diff. Recorded and re-run, never smoothed.
+  - **Run 2 — `20261022155445`** (`C:\swarmerify61022155445eport.json`; log `T-038-hand-gate2-full-run2.log`): **ALL GREEN** — 4/4 candidates (c01, c02, c01-r2, c02-r2) worker-ok, non-zero diffs (3611 / 2583 / 3277 / 3420 bytes), every gate PASS, reviews recorded, the `rounds` block records two executed rounds with survivors [c01, c02] then [c01-r2, c02-r2], post-run disposal clean, no residual lock.
+  - **Conversion reading (the block's own terms, answered verbatim):** in NEITHER run did any candidate fail a gate, so no `gateRetry` block fired — `gateRetry` is absent on all eight candidates across both runs. What these runs demonstrate is the no-regression half only: the flag's inertness on passing candidates (both runs) and zero-byte terminality under a live no-op (run 1) are now observed on real runs. Whether a feedback retry converts a real gate-failure into survival remains the staged OPEN question — this fixture's gates pass for any competent attempt, so a conversion demonstration needs a target whose gates actually reject a candidate (the decompilation round-trip gate is the natural first candidate).
 - **Gate 3 n/a** (no adapter file touched).
 
 Deviations from the ticket text (none substantive; recorded for honesty):

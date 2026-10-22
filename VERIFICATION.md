@@ -3331,11 +3331,18 @@ genuine gate-failure → feedback retry → survival — or the retry fails to
 convert — is the staged empirical question T-038 records as open, not
 answered; both outcomes are honest Gate 2 outcomes, read off the run's
 `gateRetry` blocks and verdicts and recorded in the ticket's Landed
-section. **Recording pending at this change-set's landing:** the driving
-run had not executed when T-038 was reviewed (verified 2026-10-21 — no run
-dir under `C:\swarm\verify` carries the flag's dispatch header yet); the
-ticket's Landed section holds the recording block its `report.json` path
-and `gateRetry` outcome fill. Then
+section. :**Recorded 2026-10-22 (two full-tier runs of this exact tree, hand-run
+post-review; logs `C:\swarmerify-red\T-038-hand-gate2-full{,-run2}.log`):**
+run 1 (`20261022152425`) RED on exactly one assertion — candidate c01-r2
+produced a zero-byte diff, and the engine's own rules held (NO-OP recorded
+`passedAllGates: false`, the flag inert on a terminal zero-byte leg — a live
+demonstration of both immunity faces); diagnosed as the known worker no-op
+flake class, nothing in the change-set implicated. Run 2 (`20261022155445`)
+**ALL GREEN** — 4/4 candidates with non-zero diffs, every gate PASS, both
+rounds executed, disposal clean. No candidate failed a gate in either run,
+so no `gateRetry` block fired: these runs demonstrate the no-regression half
+only, and the conversion question stays recorded as open (the ticket's
+Landed block holds the verbatim reading). Then
 asserts on the artifacts:
 
 - every candidate's worker exited 0 (both rounds' candidates),
