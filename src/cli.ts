@@ -43,6 +43,21 @@ Options:
   --reviewer-model <id>    Reviewer-tier model ID for advisory post-gate review
                            of passing candidates (default: zai-coding-plan/glm-5.3)
   --no-review              Skip the reviewer phase
+  --verifier-model <id>    Verifier-tier model ID for active pre-disposition
+                           verification (T-039): after the gates and probes, on
+                           every candidate whose final attempt completed — gate
+                           outcome regardless — the verifier runs NEW checks in
+                           the candidate worktree and records findings (with the
+                           commands it ran) under each candidate's "verifier"
+                           report block. Findings, never verdicts. Off unless
+                           given (no default model).
+  --verifier-worker <id>   Adapter for the verifier role (default: the --worker
+                           value). "machine" requires --verifier-command.
+                           Applies in both --goal and --jobs mode.
+  --verifier-command <json>
+                           The machine command for a verifier resolved to
+                           "machine" — a JSON argv list. Refused on a
+                           verifier resolving to "opencode".
   --worker <id>            Worker adapter (default: opencode). "machine"
                            (T-017) is per-job only — a --jobs spec's
                            worker+command fields; run-level --worker machine
@@ -120,6 +135,12 @@ interface Options {
   model: string
   plannerModel: string | null
   reviewerModel: string | null
+  /** T-039: the verifier role is opt-in — null (the default) skips it. */
+  verifierModel: string | null
+  /** T-039: per-role adapter id; null until defaulted to `workerId` in main(). */
+  verifierWorkerId: string | null
+  /** T-039: the verifier's machine command source (a JSON argv). */
+  verifierCommand: string[] | null
   workerId: string
   /** T-025: per-role adapter ids; null until defaulted to `workerId` in main(). */
   plannerWorkerId: string | null
@@ -170,6 +191,9 @@ function parseArgs(argv: string[]): Options {
     model: 'zai-coding-plan/glm-5.3-flash',
     plannerModel: 'zai-coding-plan/glm-5.3',
     reviewerModel: 'zai-coding-plan/glm-5.3',
+    verifierModel: null,
+    verifierWorkerId: null,
+    verifierCommand: null,
     workerId: 'opencode',
     plannerWorkerId: null,
     reviewerWorkerId: null,
@@ -208,6 +232,9 @@ function parseArgs(argv: string[]): Options {
       case '--no-planner': opts.plannerModel = null; break
       case '--reviewer-model': opts.reviewerModel = value(); break
       case '--no-review': opts.reviewerModel = null; break
+      case '--verifier-model': opts.verifierModel = value(); break
+      case '--verifier-worker': opts.verifierWorkerId = value(); break
+      case '--verifier-command': opts.verifierCommand = parseCommandArgv('--verifier-command', value()); break
       case '--worker': {
         const id = value()
         // T-017: `machine` is refused at run level, at parse time (the
@@ -381,6 +408,11 @@ function perRoleRefusal(opts: Options): string | null {
   const roles = [
     { role: 'planner', id: opts.plannerWorkerId!, flag: '--planner-worker', commandFlag: '--planner-command', command: opts.plannerCommand },
     { role: 'reviewer', id: opts.reviewerWorkerId!, flag: '--reviewer-worker', commandFlag: '--reviewer-command', command: opts.reviewerCommand },
+    // T-039: the verifier's pairing rules ride the same table — validated
+    // whenever its flags appear, independently of whether --verifier-model
+    // enables the role (flag-level validity, like the planner's flags in
+    // --jobs mode).
+    { role: 'verifier', id: opts.verifierWorkerId!, flag: '--verifier-worker', commandFlag: '--verifier-command', command: opts.verifierCommand },
   ]
   for (const r of roles) {
     if (!WORKER_ADAPTERS.includes(r.id)) {
@@ -403,6 +435,10 @@ async function main(): Promise<void> {
   // whole argv is read, because --worker may appear after --planner-worker.
   opts.plannerWorkerId = opts.plannerWorkerId ?? opts.workerId
   opts.reviewerWorkerId = opts.reviewerWorkerId ?? opts.workerId
+  // T-039: the verifier role defaults to the --worker adapter, exactly as the
+  // planner/reviewer selections do; absent --verifier-model keeps the whole
+  // role off.
+  opts.verifierWorkerId = opts.verifierWorkerId ?? opts.workerId
   // T-025: the per-role id/pairing refusals happen before the --jobs spec is
   // even read — before repo validation, the checkout lock, or any artifacts
   // dir exists (zero side effects, the parse-refusal pattern).
@@ -463,11 +499,18 @@ async function runPipeline(opts: Options, jobsSpec: JobsSpec | null): Promise<vo
   console.log(`repo:     ${opts.repo} @ ${baseSha.slice(0, 12)}`)
   console.log(`planner:  ${jobsSpec ? '(skipped — briefs come from the jobs spec)' : opts.plannerModel ?? '(disabled — candidates get the raw goal)'}`)
   console.log(`reviewer: ${opts.reviewerModel ?? '(disabled)'}`)
+  // T-039: the verifier line is printed only when the role is enabled — the
+  // producer-only pattern holds for stdout too, so flag-less runs are
+  // byte-identical.
+  if (opts.verifierModel) {
+    console.log(`verifier: ${opts.verifierModel}`)
+  }
   // T-025: the workers line names non-default advisory roles; with no new
   // flags it is byte-identical to today.
   const rolesText = [
     opts.plannerWorkerId !== opts.workerId ? `planner=${opts.plannerWorkerId}` : null,
     opts.reviewerWorkerId !== opts.workerId ? `reviewer=${opts.reviewerWorkerId}` : null,
+    opts.verifierWorkerId !== opts.workerId ? `verifier=${opts.verifierWorkerId}` : null,
   ].filter(Boolean).join(' ')
   console.log(`workers:  ${opts.model} (worker: ${opts.workerId}${rolesText ? `, ${rolesText}` : ''})`)
   console.log(`goal:     ${opts.goal || (jobsSpec ? '(none — briefs come from the jobs spec)' : '')}`)
@@ -482,6 +525,9 @@ async function runPipeline(opts: Options, jobsSpec: JobsSpec | null): Promise<vo
     model: opts.model,
     plannerModel: jobsSpec ? null : opts.plannerModel,
     reviewerModel: opts.reviewerModel,
+    // T-039: the verifier role rides both modes like the reviewer; null (the
+    // default) keeps it off entirely — no dispatches, no report block.
+    verifierModel: opts.verifierModel,
     candidateIds: jobsSpec ? [] : Array.from({ length: opts.candidates }, (_, i) => `c${String(i + 1).padStart(2, '0')}`),
     concurrency: opts.concurrency,
     // T-030: the bounded loop flag; 1 (the default) = today's single pass.
@@ -504,6 +550,12 @@ async function runPipeline(opts: Options, jobsSpec: JobsSpec | null): Promise<vo
       : {}),
     ...(opts.reviewerWorkerId !== opts.workerId
       ? { reviewerWorker: createWorker(opts.reviewerWorkerId!, opts, opts.reviewerCommand ?? undefined) }
+      : {}),
+    // T-039: a non-default verifier role builds its own adapter through the
+    // same createWorker (a machine verifier's command was validated in
+    // main()); the default passes nothing and rides the run-level adapter.
+    ...(opts.verifierWorkerId !== opts.workerId
+      ? { verifierWorker: createWorker(opts.verifierWorkerId!, opts, opts.verifierCommand ?? undefined) }
       : {}),
     workspaces: new WorktreeProvider(opts.repo, join(artifactsDir)),
     artifactsDir,

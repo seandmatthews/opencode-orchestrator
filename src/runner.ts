@@ -8,7 +8,7 @@ import { composeRoundPacket } from './rounds.js'
 import { buildEarlyStops, buildSchedule, earlyStopMet, readyJobs } from './scheduler.js'
 import type { EarlyStopPolicy, PhaseSpec } from './scheduler.js'
 import { DERIVED_PHASE_ID } from './store/index.js'
-import type { Attempt, CandidateReport, FailureRecord, Gate, GateResult, PlannerReport, ProbeRunSummary, ReviewReport, RoundRecord, RunReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
+import type { Attempt, CandidateReport, FailureRecord, Gate, GateResult, PlannerReport, ProbeRunSummary, ReviewReport, RoundRecord, RunReport, VerifierReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
 
 /**
  * Best-effort append to <runDir>/dispatch.jsonl (T-010) — the in-run evidence
@@ -77,6 +77,23 @@ export interface SkeletonOptions {
   plannerModel: string | null
   /** Reviewer-tier model ID for advisory post-gate review, or null to skip. */
   reviewerModel: string | null
+  /**
+   * T-039 verifier-tier model ID for active pre-disposition verification, or
+   * null/absent to skip the role entirely (the producer-only pattern: no
+   * `verifier` block on any candidate, report shape unchanged). Unlike the
+   * reviewer this role is opt-in — there is no default model. Optional at
+   * the seam (the T-025 plannerWorker/reviewerWorker pattern) so direct
+   * `runSkeleton` callers compile and behave unchanged: absent ≡ null ≡ the
+   * role never dispatches.
+   */
+  verifierModel?: string | null
+  /**
+   * T-039: the verifier's own adapter (the T-025 per-role harness selection
+   * pattern). Optional — absent (the default) resolves to `worker`, so the
+   * verifier rides the run-level adapter exactly as the planner/reviewer
+   * flags resolve theirs.
+   */
+  verifierWorker?: WorkerAdapter
   candidateIds: string[]
   concurrency: number
   timeoutMs: number
@@ -608,6 +625,123 @@ async function runReview(
   return report
 }
 
+/**
+ * The T-039 verifier prompt (the reviewerPrompt template): the brief, the
+ * captured diff (char-capped at the MAX_DIFF_CHARS precedent), and the list
+ * of gates that ALREADY ran — with names, commands, and verdicts — then the
+ * novelty directive: these machine checks already ran; do not merely re-run
+ * the suite; run NEW checks — edge cases, timing, adversarial inputs — and
+ * cite every command you ran and its output (spec §3.3: evidence before
+ * interpretation; a finding without its command and output is not evidence).
+ * The output contract is the reviewer's observations object, parsed by the
+ * same parseReview.
+ */
+function verifierPrompt(brief: string, workspacePath: string, diff: string, gateLines: string[]): string {
+  const truncated = diff.length > MAX_DIFF_CHARS
+  return [
+    'You are the verification tier of a multi-candidate implementation system.',
+    'A worker implemented a brief, the candidate diff below was already captured, and the machine gates listed below already ran.',
+    'Your job is ACTIVE verification, not re-review: run NEW checks yourself — edge cases, timing, adversarial inputs,',
+    'boundary conditions — against the candidate workspace. Do not merely re-run the gates that already ran.',
+    '',
+    'You may run commands inside the workspace below. Never modify any files:',
+    'the diff evidence was already captured before you run, and your value is the findings, not the changes.',
+    `  ${workspacePath}`,
+    '',
+    `BRIEF the worker was given:`,
+    brief,
+    '',
+    'MACHINE GATES THAT ALREADY RAN (do not just re-run these):',
+    ...gateLines,
+    '',
+    `CANDIDATE DIFF${truncated ? ` (truncated to ${MAX_DIFF_CHARS} chars)` : ''}:`,
+    diff.slice(0, MAX_DIFF_CHARS),
+    '',
+    'Cite EVERY command you ran and the exact output you saw, in the evidence field. A finding without',
+    'the command that produced it and that command\'s output is not evidence.',
+    '',
+    'Output ONLY a JSON object, no markdown fences, no commentary:',
+    '{"observations": [{"finding": "<one concrete finding>", "severity": "info" | "concern" | "blocker-advisory", "evidence": "<commands run + output cited>"}]}',
+    'Give 2 to 6 observations. severities: info = worth knowing, concern = possible problem,',
+    'blocker-advisory = would block merge if a human agrees. Your findings never change the run verdict.',
+  ].join('\n')
+}
+
+/**
+ * One verifier run on a candidate's final completed attempt (T-039): the
+ * runReview parse-with-repair shape — one bounded repair attempt on invalid
+ * output, parse failure degrading to `ok: false` with empty observations,
+ * never verdict-affecting — riding the 'worktree-read' posture (see below)
+ * and persisting the raw model output as `verifier-raw.txt` (the
+ * review-raw.txt pattern) beside `verifier.log`.
+ */
+async function runVerifier(
+  opts: SkeletonOptions,
+  ctx: { id: string; dir: string; workspacePath: string; brief: string; diff: string; gateLines: string[] },
+): Promise<VerifierReport> {
+  // T-025 pattern: the verifier rides its own adapter when one was selected
+  // (--verifier-worker), otherwise the run-level worker. One local covers
+  // both execute calls (initial + the bounded repair) — they share baseReq.
+  const worker = opts.verifierWorker ?? opts.worker
+  const prompt = verifierPrompt(ctx.brief, ctx.workspacePath, ctx.diff, ctx.gateLines)
+  const logPath = join(ctx.dir, 'verifier.log')
+  const rawOutputPath = join(ctx.dir, 'verifier-raw.txt')
+  const started = Date.now()
+
+  // T-023 (spec §14): the verifier rides the SAME restricted posture as the
+  // reviewer — 'worktree-read', passed explicitly, enforced at the adapter
+  // with refuse-not-downgrade. T-039's step-one probe
+  // (scripts/diag-execute.mjs, run against the vendored harness) answered
+  // that this posture is EXECUTE-CAPABLE — the plan agent runs commands
+  // while its edit tools stay deny-listed — which is exactly the
+  // execute-but-don't-mutate split the verifier needs, so no additional
+  // ExecutionPolicy value was added. The cwd is the candidate worktree
+  // lease: a disposable workspace whose diff evidence was captured before
+  // the verifier runs, so nothing the verifier does can dirty it — and never
+  // the canonical checkout (ground rule 3). The prompt's "never modify any
+  // files" line stays as reinforcement (decisions.md: prompts are
+  // defense-in-depth, never the boundary).
+  const baseReq = {
+    model: opts.verifierModel!,
+    cwd: ctx.workspacePath,
+    logPath,
+    timeoutMs: opts.timeoutMs,
+    executionPolicy: 'worktree-read',
+  } as const
+  let result = await worker.execute({ ...baseReq, prompt })
+  let attempts = 1
+  let parsed = result.ok ? parseReview(result.responseTail) : null
+
+  if (!parsed && !result.timedOut) {
+    attempts = 2
+    console.log(`[${ctx.id}] verifier: output was not a valid observation object, running one bounded repair attempt`)
+    result = await worker.execute({
+      ...baseReq,
+      prompt: [
+        prompt,
+        '',
+        'Your previous response was not a valid JSON observations object. Previous response:',
+        result.responseTail,
+        '',
+        'Output ONLY the JSON object: {"observations": [{"finding": "...", "severity": "info" | "concern" | "blocker-advisory", "evidence": "..."}]}. No other text.',
+      ].join('\n'),
+    })
+    parsed = result.ok ? parseReview(result.responseTail) : null
+  }
+
+  writeFileSync(rawOutputPath, result.responseTail)
+  const report: VerifierReport = {
+    model: opts.verifierModel!,
+    ok: parsed !== null,
+    attempts,
+    observations: parsed?.observations ?? [],
+    rawOutputPath,
+  }
+  const severities = report.observations.map((o) => o.severity).join(', ')
+  console.log(`[${ctx.id}] verifier: ${report.observations.length} finding(s) in ${((Date.now() - started) / 1000).toFixed(0)}s${report.observations.length > 0 ? ` (${severities})` : ''}${report.ok ? '' : ' — PARSE FAILED after repair'}`)
+  return report
+}
+
 /** §7.7 context fingerprint, narrowed to what has a producer: sha256 over
  *  brief + model + the composed prompt with the workspace-path line excluded,
  *  so the same brief+model hashes identically across attempts (an
@@ -980,6 +1114,29 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
       // machine gates decide survival; probes advise/record).
       if (job.probes && job.probes.length > 0) {
         base.probes = await runProbes(job, opts, lease)
+      }
+
+      // T-039: active pre-disposition verification — after the gate loop and
+      // probes, before review, on the final completed attempt REGARDLESS of
+      // gate outcome (the T-015 posture: evidence about failures is
+      // evidence). The diff was captured before the gates ran (above), so
+      // the verifier's executions in the workspace cannot dirty diff
+      // evidence. Findings, never verdicts: the ladder computed above reads
+      // `passed`/`diffBytes` alone and no line below feeds the verifier block
+      // back into any verdict — a blocker-advisory finding eliminates
+      // nothing, promotes nothing, reorders nothing (decisions.md 2026-10-21:
+      // a model-authored check never decides survival in the run that
+      // produced it). Reviewer ordering and survivor-only scope unchanged;
+      // the verifier is not a reviewer replacement this slice.
+      if (opts.verifierModel) {
+        base.verifier = await runVerifier(opts, {
+          id,
+          dir,
+          workspacePath: lease.path,
+          brief: job.brief,
+          diff,
+          gateLines: base.gates.map((g) => `- ${g.name}: ${g.passed ? 'PASS' : 'FAIL'}${g.command !== undefined ? ` — command: ${g.command}` : ' — command not recorded'}`),
+        })
       }
 
       if (opts.reviewerModel && base.passedAllGates) {
