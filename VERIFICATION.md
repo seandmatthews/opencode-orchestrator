@@ -3008,6 +3008,125 @@ is exactly what T-040/T-041 consume and stage. **Gate 3 n/a** (no adapter
 change: the verifier rides 'worktree-read' unchanged; both probes re-run
 and recorded above, per ground rule 5).
 
+## The ratchet — finding→gate promotion (T-041: human-owned, ticket-carried, cross-run)
+
+Spec §32:1939-1971 — every real failure the swarm discovers should convert into a
+check that fires forever after, so the error rate ratchets down across runs instead
+of oscillating. The convention (AGENTS.md ground rule #11; its boundary is the
+decisions.md **2026-10-21 T-039 entry** — findings are advisory, a model-authored
+check never decides survival in the run that produced it):
+
+- **Never auto-promoted.** No engine code reads a findings block and edits a gate
+  string, fixture, or spec — the promotion is a human change-set (ground rule 6's
+  change-set discipline is the vehicle).
+- **Never in the run that produced the finding.** The ratchet crosses runs:
+  finding in run N → promotion change-set → gate in run N+1.
+- **The promotion artifact is the ticket.** Its change-set carries the finding
+  cited (run id, candidate, observation, artifact path), the reproduction, the new
+  gate command or fixture test, and the re-run that eliminates on it. From then on
+  the check is `gate X, command Y, exit Z` — mechanically reproducible forever
+  (the T-027 recorded-command property, exercised cross-run).
+
+**The first promotion, recorded (this change-set IS the promotion ticket, T-041):**
+
+- **The finding:** run `20261021225243` (T-039's Gate 2 record,
+  `C:\swarm\20261021225243\report.json`), candidate c01, verifier `concern` —
+  "Inverted bounds are silently accepted: clamp(5,10,0) returns 0 instead of
+  erroring or normalizing; there is no lo<=hi guard in calc.js:6" — with the
+  command-and-output evidence cited in the observation (`swap_lo_hi 0`; calc.js
+  line 6). The candidate's own diff is vendored byte-identical at
+  `scripts/fixtures/t041-finding-diff.patch` (sha256 `9570099f…`, 725 bytes —
+  the report's `diffBytes`).
+- **Red bar (pre-promotion, run N):** `C:\swarm\20261021234438\report.json` —
+  the finding's own diff replayed against the pre-promotion fixture (base
+  `cfc196717a2f`) through a real CLI run (`--jobs` with `worker: "machine"` — the
+  T-017 token-free end-to-end; no model authored or ran this candidate):
+  build PASS + test PASS (exit 0 both, commands recorded) ⇒ `passedAllGates`
+  true — the failure class the finding describes survives the old gates, which is
+  exactly why the promotion was needed. Worktree disposed through
+  `npm run clean -- --run 20261021234438 --force`; evidence kept.
+- **The promotion (this change-set):** `scripts/demo-target.mjs` gains the guarded
+  `clamp` (inverted bounds throw `RangeError`) and the test.js assertions pinning
+  inverted bounds (`assert.throws(() => clamp(5, 10, 0), RangeError)` and
+  `clamp(0, -5, -10)`) — a human-authored, ticket-carried edit, committed before
+  run N+1 executed. Gate 1 stays green with the promoted check in place (the
+  fixture's baseline passes its own gates — AGENTS.md #7 applies to the fixture
+  too), pinned in the fast tier by Gate 1.26 S2.
+- **Green bar (post-promotion, run N+1):** `C:\swarm\20261021234632\report.json` —
+  the same failure class reintroduced against the promoted fixture (base
+  `c1274b90d41b`): build PASS, **test FAIL exitCode 1** ⇒ `passedAllGates` false,
+  no error — eliminated, the elimination evidence citing gate name `test`,
+  command `node test.js`, exitCode 1 (the T-027 property, cross-run), the output
+  tail naming the promoted assertion (`Missing expected exception (RangeError)`),
+  and the 450-byte diff being exactly the guard stripped (a real regression,
+  never a NO-OP). Worktree disposed through `npm run clean -- --run
+  20261021234632 --force`; evidence kept.
+
+Honesty notes, per ground rule 9: both proof runs' candidates are machine-worker
+replays of the finding's class — token-free, driven through the real pipeline
+entry; the report's model string is recorded verbatim for a candidate no model
+touched (the documented MachineWorker posture, src/worker/machine.ts). The
+MODEL-authored part of the chain is the finding itself, produced by the real
+verifier in run 20261021225243 and quoted verbatim above; the promoted check was
+authored by this change-set and already committed when run N+1 ran. A botched
+first green drive (run `20261021234545` — the worker refused a CRLF-induced no-op
+with exit 1, WORKER FAILED, zero-byte diff, per AGENTS.md #7) sits in the run
+root uncited as evidence; the fixed worker is line-ending aware. The fast tier
+re-proves the mechanism token-free (Gate 1.26 below) and never reads the recorded
+runs back.
+
+## Gate 1.26 — the ratchet: finding→gate promotion proof (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-ratchet.mjs
+```
+
+Pins T-041 (spec §32; the convention section above): the promotion mechanism,
+re-provable forever, token-free. Both drives go through the REAL pipeline entry
+(src/cli.ts) with `worker: "machine"` jobs (the T-017 token-free end-to-end, the
+Gate 1.17 S5 pattern) under sandbox run roots and sandbox DBs — no live store, no
+residue: the sandbox `C:\swarm\verify-ratchet` is removed at the end (AGENTS.md #10
+mechanized). It asserts:
+
+- the pre-promotion fixture, built from verbatim pre-promotion literals (the
+  demo-target content before this promotion): baseline passes its own gates, and
+  there is no clamp anywhere — the old-gates world;
+- the promoted fixture, generated by the REAL promoted `scripts/demo-target.mjs`:
+  generation exits 0 with build ok + tests ok (Gate 1's content, green with the
+  promoted check in place); both promoted inverted-bounds assertions are in the
+  generated test.js and the guard in the generated calc.js; and the finding's own
+  diff NO LONGER APPLIES to it (`git apply --check` refuses — the fixture moved
+  past the finding);
+- the vendored finding (`scripts/fixtures/t041-finding-diff.patch`, the
+  byte-identical diff of run 20261021225243 c01): carries the unguarded clamp body
+  and no guard, and applies cleanly to the pre-promotion fixture (it is that
+  era's candidate diff);
+- **RED BAR**: the real-CLI drive against the pre-promotion fixture exits 0 (the
+  run completes mechanically) and the candidate that breaks the (future) promoted
+  check PASSES the old gates and survives — workerOk, diffBytes exactly 725 (the
+  finding's own diff — never a NO-OP pass, AGENTS.md #7), passedAllGates true,
+  both demo gates PASS with their commands recorded (T-027);
+- **GREEN BAR**: the same-class drive against the promoted fixture exits 0 (an
+  elimination is a verdict, not a crash), the candidate is eliminated with
+  passedAllGates false and no error, and the elimination cites gate name +
+  command + exitCode (`test` / `node test.js` / 1 — the T-027 property,
+  cross-run), the failing output tail naming the promoted RangeError assertion,
+  and the eliminated diff being the real guard regression (the `-  if (lo > hi) {`
+  hunk — never a NO-OP);
+- no residual lock files after either drive (released on every path).
+
+Not pinned here and carved by the ticket: any engine promotion path (none exists —
+zero `src/` changes; the decisions.md T-039 entry bans auto-promotion outright);
+finding taxonomy, scoring, or promotion thresholds; the convention applied
+retroactively over pre-ratchet findings; Codex/Sol as the promoting reviewer
+(the human is the promoter this slice; §10.2/§10.6's advisory review of
+promotions is future vocabulary); extending the demo fixture beyond the promoted
+check. **Gate 2 not owed** — trigger analysis, per the T-018:223-228 precedent:
+no `src/` change, no adapter, no report shape, no scheduler/store/dashboard
+surface; the change-set is documentation + fixture + gate scripts, and Gate 1
+re-runs green inside the tier against the promoted fixture. **Gate 3 n/a** (no
+adapter touched).
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash

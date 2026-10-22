@@ -1,0 +1,30 @@
+diff --git a/calc.js b/calc.js
+index d4e50c0..400901c 100644
+--- a/calc.js
++++ b/calc.js
+@@ -2,4 +2,8 @@ function add(a, b) {
+   return a + b
+ }
+ 
+-module.exports = { add }
++function clamp(v, lo, hi) {
++  return Math.min(Math.max(v, lo), hi)
++}
++
++module.exports = { add, clamp }
+diff --git a/test.js b/test.js
+index 3eabc35..c30630d 100644
+--- a/test.js
++++ b/test.js
+@@ -1,7 +1,10 @@
+ const assert = require('node:assert')
+-const { add } = require('./calc.js')
++const { add, clamp } = require('./calc.js')
+ 
+ assert.equal(add(1, 2), 3)
+ assert.equal(add(-1, 1), 0)
+ assert.equal(add(0, 0), 0)
++assert.equal(clamp(5, 0, 10), 5)
++assert.equal(clamp(-1, 0, 10), 0)
++assert.equal(clamp(11, 0, 10), 10)
+ console.log('tests ok')
