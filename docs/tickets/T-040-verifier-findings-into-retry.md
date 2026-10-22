@@ -1,6 +1,6 @@
 # T-040 — Verifier findings ride the retry brief: the T-038/T-039 composition seam (spec §24:1462 + §9.2; joins the two proposed lanes)
 
-**Status:** proposed
+**Status:** done 2026-10-22
 **Category:** engine
 **Value (1-5):** 3 · **Risk (1-5):** 2
 **Depends on:** T-038 (proposed — the `--gate-retry` composition seam and the `gateRetry` report block) and T-039 (proposed — the verifier role and its observations schema). Neither lane depends on the other; this ticket is their join.
@@ -24,21 +24,139 @@ This ticket is also the cheapest possible consumer for T-039's output: without i
 
 ## Acceptance criteria
 
-- [ ] The pre-retry verifier call site fires exactly when the T-038 leg is retry-eligible, before composition; a verifier parse failure on that leg composes a gates-only brief and the retry still fires — pinned by **Gate 1.26** (token-free fake-adapter drives; next free gate number at implementation).
-- [ ] The composed brief contains both sections — every failing gate's name/command/outputTail AND the included findings with their evidence — capped by the documented constants; the `gateRetry` block records `findings.count`/`included` and the fingerprint covers the full composed text — pinned by **Gate 1.26**.
-- [ ] The zero-findings face: a verifier returning no observations composes a gates-only brief, retry unchanged from T-038's behavior — pinned by **Gate 1.26**.
-- [ ] **Verdict immunity with findings present**: a candidate whose pre-retry verification returned `blocker-advisory` findings survives iff the re-run gates pass, and is eliminated iff they fail — findings are never a verdict input even when they rode the retry brief — pinned by **Gate 1.26** (the adversarial form of T-038's immunity leg).
-- [ ] Caps hold under flood: a fake verifier returning dozens of long findings produces a brief within the documented bounds, gates section intact — pinned by **Gate 1.26**.
-- [ ] VERIFICATION.md extended in the same change-set (AGENTS.md #6): the Gate 1.26 section; the T-038 section updated to name the composition extension — pinned by the full fast tier `npm run verify` ALL GREEN.
-- [ ] **Gate 2 owed** if sequenced as its own change-set (runner + composition): a real `--goal --gate-retry --verifier-model` run end-to-end; **or**, if T-038/T-039/T-040 land as one change-set lane, this criterion merges into that lane's single Gate 2 run — decided and recorded at implementation, never silently dropped.
+- [x] The pre-retry verifier call site fires exactly when the T-038 leg is retry-eligible, before composition; a verifier parse failure on that leg composes a gates-only brief and the retry still fires — pinned by **Gate 1.27** (token-free fake-adapter drives; the ticket's "Gate 1.26" placeholder was written before T-041 took that number — 1.27 is the next free gate number at implementation, per this line's own clause).
+- [x] The composed brief contains both sections — every failing gate's name/command/outputTail AND the included findings with their evidence — capped by the documented constants; the `gateRetry` block records `findings.count`/`included` and the fingerprint covers the full composed text — pinned by **Gate 1.27** (F1).
+- [x] The zero-findings face: a verifier returning no observations composes a gates-only brief, retry unchanged from T-038's behavior — pinned by **Gate 1.27** (F3, plus the info-only eligibility filter).
+- [x] **Verdict immunity with findings present**: a candidate whose pre-retry verification returned `blocker-advisory` findings survives iff the re-run gates pass, and is eliminated iff they fail — findings are never a verdict input even when they rode the retry brief — pinned by **Gate 1.27** (F1 survive face + F4 elimination face, the adversarial form of T-038's immunity leg).
+- [x] Caps hold under flood: a fake verifier returning dozens of long findings produces a brief within the documented bounds, gates section intact — pinned by **Gate 1.27** (F5: 12 long findings ⇒ count 12, included 5, per-string caps, gates section intact).
+- [x] VERIFICATION.md extended in the same change-set (AGENTS.md #6): the Gate 1.27 section; the T-038 (Gate 1.24) section updated to name the composition extension — pinned by the full fast tier `node scripts/verify.mjs fast` ALL GREEN (exit 0, this lane).
+- [x] **Gate 2 owed**, decided and recorded at implementation: T-038/T-039 landed as their own change-sets (commits b15dfd1, f73f7e4), so this ticket IS its own change-set — Gate 2 is NOT merged away. The full tier's Gate 2 invocation now passes `--verifier-model zai-coding-plan/glm-5.3-flash` (this change-set), making the driving `npm run verify:full` run exactly the ticketed shape — a real `--goal --gate-retry --verifier-model` run end-to-end — with structural per-candidate verifier assertions added; the driving workflow runs it after this commit (the implementer does not spend the tokens; the division of labor is the driving script's). Whether the real run produces a genuine findings-riding conversion is read off the run's `gateRetry.findings` provenance and recorded by the driver either way (the T-038 posture: both outcomes are honest).
 
 ## Landed
 
-(added when done: what actually changed, deviations, measured gate numbers)
+2026-10-22, lane `ticket/T-040-verifier-findings-into-retry`. What actually changed:
+
+- **src/runner.ts** — the pre-retry verifier call site in `runJob`'s T-038
+  retry branch: after the machine gates reject the change and BEFORE
+  composition, the retry-eligible leg is verified against its own failing
+  lease — the same `runVerifier`, same 'worktree-read' posture, same
+  observations schema, and the same failure context the T-039 final-attempt
+  call gets (the gates that already ran with names/verdicts/recorded
+  commands, the captured diff, the brief). Bounded by construction at two
+  verifications per candidate (the gate-retry bound is one). The call is
+  guarded: a parse failure after the bounded repair, OR the adapter
+  throwing, composes a gates-only brief and the retry still fires (the leg
+  stays `gates-failed`, never an error leg); the degradation is recorded in
+  `gateRetry.findings.ok = false`. The pre-retry leg's verifier evidence is
+  kept distinct from the final leg's (`verifier-pre-retry.log` /
+  `verifier-pre-retry-raw.txt` in the failing attempt's evidence dir —
+  `runVerifier`'s ctx gained an optional `evidenceTag`, absent on the
+  T-039 call, whose paths are unchanged), so neither leg's raw output can
+  overwrite the other's. `composeGateRetryBrief` gained the findings
+  section, AFTER the gates section, rendered only when ≥ 1 eligible finding
+  exists (zero ⇒ byte-identical T-038 gates-only composition): eligible =
+  `blocker-advisory` + `concern` (`info` never rides), each as a
+  FINDING(severity)/EVIDENCE pair, top-N bounded by the now-documented,
+  exported constant `MAX_RETRY_FINDINGS = 5` (first-N in the verifier's own
+  order) and per-string char-capped by `MAX_RETRY_FINDING_CHARS = 2_000`
+  (the MAX_DIFF_CHARS precedent narrowed to a per-string cap so one huge
+  evidence blob cannot crowd out the other findings); the gate output stays
+  the primary payload. The returned fingerprint continues to hash the full
+  composed text — findings included by construction. `gateRetry` gained
+  `findings: {count, included, ok}`: count = eligible findings returned
+  pre-cap; included = embedded post-caps; ok = parsed schema-valid verifier
+  output existed at all. Retry eligibility untouched; no verdict line reads
+  findings; dispatch.jsonl line shapes unchanged.
+- **src/types.ts** — `GateRetryRecord.findings` (required on the block,
+  doc-commented; the block only ever exists when the flag fired).
+- **scripts/check-gate-retry-findings.mjs** — NEW, the pinning gate: see
+  Gate 1.27 below (the ticket's "Gate 1.26" placeholder predates T-041
+  taking that number; 1.27 is the next free number at implementation, per
+  the criterion's own clause). F1 call site + both-sections brief +
+  provenance + distinct leg evidence + immunity survive face; F2
+  parse-failure degradation (gates-only brief, retry fires, honest
+  `{0, 0, false}`, raw output persisted verbatim, fingerprint exact) and
+  F2b verifier-crash degradation (same faces, the leg stays `gates-failed`);
+  F3 zero-findings and info-only-eligibility faces (gates-only,
+  `{0, 0, true}`); F4 the immunity elimination face (findings rode, gates
+  failed again ⇒ eliminated, no error, no new vocabulary,
+  `passedAllGates === (gates.length > 0 && gates.every(passed) && diffBytes
+  > 0)`); F5 flood (12 long findings ⇒ count 12, included 5, first-N
+  order, per-string caps, brief within the documented bound, gates section
+  intact); F0 verifier absence (`{0, 0, false}`, T-038 behavior verbatim,
+  no verifier evidence files).
+  **Red bar (AGENTS.md #8), recorded BEFORE the engine change:** against
+  the pre-change tree the check ran RED — 8 reported failures: 7 assertion
+  failures (the exported-caps pin; the dispatch-order pin — no verifier
+  entry between the gate loop and the retry worker; two verifier dispatches;
+  the pre-retry prompt context; the findings section; the gateRetry exact
+  shape — no `findings` key; findings-in-attempt-2's-prompt) plus the
+  run-ending `ENOENT ... c01\verifier-pre-retry-raw.txt`. F2–F0's green is
+  established on the post-change tree (the ENOENT aborted `main()` in the
+  red run).
+- **scripts/check-gate-retry.mjs** (Gate 1.24) — G1's exact-shape pin
+  extended to the new 5-key block; its drive configures no verifier, so it
+  pins the honest zero record `{count: 0, included: 0, ok: false}`. The
+  T-031 flip precedent: net strictness increases — the four T-038 fields
+  stay pinned exactly, the fifth is positively exercised by Gate 1.27. No
+  other assertion in the gate touched; the whole check ALL GREEN.
+- **scripts/verify.mjs** — fast tier: Gate 1.27 wired after Gate 1.26. Full
+  tier: the Gate 2 invocation now passes `--verifier-model
+  zai-coding-plan/glm-5.3-flash` (making the driving full-tier run the
+  ticketed Gate 2 shape — see the recorded sequencing decision on the last
+  acceptance criterion), with STRUCTURAL per-candidate assertions added
+  (verifier block present with the model verbatim; honest ok flag —
+  well-formed severity vocabulary when true, explicit false on a real-run
+  parse degradation, itself an honest pass; raw output persisted on disk).
+  No assertion weakened: every existing Gate 2 assertion is untouched and
+  stays gate-decided.
+- **VERIFICATION.md** — the Gate 1.27 section (constants, faces, red bar,
+  carves, the Gate-2-owed analysis); the Gate 1.24 section's T-040 update
+  note (the new block shape, the deliberate G1 pin extension, the
+  store/recovery untouched note); the Gate 2 section documents the verifier
+  leg and its structural assertions. All in this change-set (AGENTS.md #6).
+- **docs/tickets/README.md** — the T-040 index row → done 2026-10-22 (this
+  change).
+
+Deviations from the ticket text, owned:
+
+- **Gate number:** the criteria said Gate 1.26; T-041 took it. Landed as
+  **Gate 1.27** (the criteria's own "next free gate number at
+  implementation" clause).
+- **`findings` is `{count, included, ok}`**, not the ticket's literal
+  `{count, included}`: the third field is the ticket's own "records the
+  degradation" requirement made machine-readable — `ok: false` distinguishes
+  a parse failure / crashed verifier / no verifier configured from a genuine
+  zero-findings verification (`{0, 0, true}`), which Gate 1.27's F2 and F3
+  faces pin separately. A report reader can now tell WHY no findings rode.
+- **The pre-retry call is additionally guarded against the adapter
+  THROWING** (the ticket names parse failure only): a crash composes the
+  same gates-only brief, records the same degradation, and the retry still
+  fires — "verifier absence never blocks the mechanical retry" extended to
+  verifier breakage, so a model-tool crash can never consume the
+  machine-eligible retry. Pinned by Gate 1.27 F2b.
+
+Gates measured on this lane (all run by the implementer unless noted):
+Gate 0 `tsc --noEmit` exit 0 after the engine change;
+`check-gate-retry-findings` RED (8 reported failures, output captured
+above) pre-change → **ALL GREEN** post-change; `check-gate-retry`
+(Gate 1.24) **ALL GREEN**; `check-verifier` (Gate 1.25) **ALL GREEN**;
+full fast tier `node scripts/verify.mjs fast` **ALL GREEN** (exit 0, all
+gates 0–1.27, Gate 1.27 wired in). **Gate 2 owed — carried by the driving
+full-tier run** (`npm run verify:full`, now carrying `--verifier-model`),
+which the driving workflow executes after this commit; the implementer did
+not run it (model tokens are the driver's budget — the ask's division of
+labor). **Gate 3 n/a** (no adapter file touched).
 
 ## Verification
 
-Gate 0 throughout. **Gate 1.26** — token-free fake-adapter drives, wired into the fast tier. **Gate 2** per the sequencing note above (own run, or merged into the joined lane's run — recorded either way). **Gate 3 n/a** (no adapter change; the verifier's posture was settled by T-039).
+Gate 0 throughout. **Gate 1.27** — token-free fake-adapter drives, wired
+into the fast tier (renumbered from this ticket's Gate 1.26 placeholder;
+T-041 took 1.26). **Gate 2** per the sequencing decision recorded on the
+last acceptance criterion: this is its own change-set, so Gate 2 is the
+driving full-tier run, now shaped (`--verifier-model`) to be exactly the
+ticketed run. **Gate 3 n/a** (no adapter change; the verifier's posture
+was settled by T-039).
 
 ## References
 

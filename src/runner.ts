@@ -8,7 +8,7 @@ import { composeRoundPacket } from './rounds.js'
 import { buildEarlyStops, buildSchedule, earlyStopMet, readyJobs } from './scheduler.js'
 import type { EarlyStopPolicy, PhaseSpec } from './scheduler.js'
 import { DERIVED_PHASE_ID } from './store/index.js'
-import type { Attempt, CandidateReport, FailureRecord, Gate, GateResult, PlannerReport, ProbeRunSummary, ReviewReport, RoundRecord, RunReport, VerifierReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
+import type { Attempt, CandidateReport, FailureRecord, Gate, GateResult, PlannerReport, ProbeRunSummary, ReviewObservation, ReviewReport, RoundRecord, RunReport, VerifierReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
 
 /**
  * Best-effort append to <runDir>/dispatch.jsonl (T-010) — the in-run evidence
@@ -452,6 +452,20 @@ function plannerPrompt(goal: string, count: number, contextBlock?: string): stri
 
 const MAX_DIFF_CHARS = 30_000
 
+/**
+ * T-040: the retry brief's findings section is bounded by these documented
+ * constants — CLI config for them is carved (the ticket), so the values live
+ * here, exported for the pinning gate (Gate 1.27). Top-N: at most
+ * MAX_RETRY_FINDINGS eligible findings ride the brief, in the verifier's own
+ * order. Char cap: each finding's `finding` and `evidence` string is capped
+ * at MAX_RETRY_FINDING_CHARS (the MAX_DIFF_CHARS precedent, narrowed from a
+ * whole-section cap to a per-string cap so one huge evidence blob cannot
+ * crowd out the other findings). A flood of findings must not drown the gate
+ * output, which stays the primary payload.
+ */
+export const MAX_RETRY_FINDINGS = 5
+export const MAX_RETRY_FINDING_CHARS = 2_000
+
 function reviewerPrompt(brief: string, workspacePath: string, diff: string, gateLines: string[]): string {
   const truncated = diff.length > MAX_DIFF_CHARS
   return [
@@ -668,24 +682,28 @@ function verifierPrompt(brief: string, workspacePath: string, diff: string, gate
 }
 
 /**
- * One verifier run on a candidate's final completed attempt (T-039): the
- * runReview parse-with-repair shape — one bounded repair attempt on invalid
- * output, parse failure degrading to `ok: false` with empty observations,
- * never verdict-affecting — riding the 'worktree-read' posture (see below)
- * and persisting the raw model output as `verifier-raw.txt` (the
- * review-raw.txt pattern) beside `verifier.log`.
+ * One verifier run on a candidate's attempt (T-039 final-attempt call;
+ * T-040 adds the PRE-RETRY call at the same seam): the runReview
+ * parse-with-repair shape — one bounded repair attempt on invalid output,
+ * parse failure degrading to `ok: false` with empty observations, never
+ * verdict-affecting — riding the 'worktree-read' posture (see below) and
+ * persisting the raw model output as `verifier-raw.txt` (the review-raw.txt
+ * pattern) beside `verifier.log`. `evidenceTag` (T-040, optional — absent on
+ * the T-039 call, whose paths are byte-identical) distinguishes a second
+ * call's evidence files within one candidate so neither leg's raw output can
+ * overwrite the other's (the planner round-tag precedent).
  */
 async function runVerifier(
   opts: SkeletonOptions,
-  ctx: { id: string; dir: string; workspacePath: string; brief: string; diff: string; gateLines: string[] },
+  ctx: { id: string; dir: string; workspacePath: string; brief: string; diff: string; gateLines: string[]; evidenceTag?: string },
 ): Promise<VerifierReport> {
   // T-025 pattern: the verifier rides its own adapter when one was selected
   // (--verifier-worker), otherwise the run-level worker. One local covers
   // both execute calls (initial + the bounded repair) — they share baseReq.
   const worker = opts.verifierWorker ?? opts.worker
   const prompt = verifierPrompt(ctx.brief, ctx.workspacePath, ctx.diff, ctx.gateLines)
-  const logPath = join(ctx.dir, 'verifier.log')
-  const rawOutputPath = join(ctx.dir, 'verifier-raw.txt')
+  const logPath = join(ctx.dir, `verifier${ctx.evidenceTag ?? ''}.log`)
+  const rawOutputPath = join(ctx.dir, `verifier${ctx.evidenceTag ?? ''}-raw.txt`)
   const started = Date.now()
 
   // T-023 (spec §14): the verifier rides the SAME restricted posture as the
@@ -767,16 +785,29 @@ function inputContextHash(brief: string, model: string, workspacePath: string): 
  *  reviewer-prompt precedent), per FAILING gate its name, its recorded
  *  command (`GateResult.command`, T-027) and its `outputTail` (the 4000-byte
  *  tail, src/gate/command.ts), and the worker's attempt summary where the
- *  harness produced one. Passing gates contribute nothing. The returned
- *  fingerprint is the sha256 of the exact text — the bytes written to the
- *  retry attempt's `retry-brief.txt` AND wrapped into its prompt (the T-030
- *  packetFingerprint pattern; one composition, two consumers). */
+ *  harness produced one. Passing gates contribute nothing.
+ *
+ *  T-040: `findings` — the ELIGIBLE observations (severity blocker-advisory |
+ *  concern, pre-filtered by the caller) from the pre-retry verification —
+ *  ride as a section AFTER the gates section, top-N bounded at
+ *  MAX_RETRY_FINDINGS and per-string char-capped at MAX_RETRY_FINDING_CHARS
+ *  (both documented, exported above): a flood of findings must not drown the
+ *  gate output, which stays the primary payload. The caller may pass none
+ *  (no verifier configured, parse failure, verifier crash, zero eligible
+ *  findings) — the brief is then byte-identical to T-038's composition, no
+ *  empty section. The returned fingerprint is the sha256 of the exact text —
+ *  findings included by construction — the bytes written to the retry
+ *  attempt's `retry-brief.txt` AND wrapped into its prompt (the T-030
+ *  packetFingerprint pattern; one composition, two consumers).
+ *  `includedFindings` is the number actually embedded (≤ findings.length),
+ *  the `gateRetry.findings.included` provenance. */
 function composeGateRetryBrief(
   brief: string,
   diff: string,
   failedGates: GateResult[],
   workerSummary: string,
-): { text: string; fingerprint: string } {
+  findings: ReviewObservation[] = [],
+): { text: string; fingerprint: string; includedFindings: number } {
   const truncated = diff.length > MAX_DIFF_CHARS
   const lines = [
     'Your previous attempt below WAS APPLIED to the workspace, but the machine gates REJECTED it.',
@@ -803,8 +834,23 @@ function composeGateRetryBrief(
       g.outputTail,
     )
   }
+  const included = findings.slice(0, MAX_RETRY_FINDINGS)
+  if (included.length > 0) {
+    const cap = (s: string) => (s.length > MAX_RETRY_FINDING_CHARS ? s.slice(0, MAX_RETRY_FINDING_CHARS) : s)
+    lines.push(
+      '',
+      'VERIFIER FINDINGS (advisory — a verifier actively tested the previous attempt; fix these too. The SAME machine gates still decide):',
+    )
+    for (const f of included) {
+      lines.push(
+        '',
+        `FINDING (${f.severity}): ${cap(f.finding)}`,
+        `EVIDENCE: ${cap(f.evidence ?? '(none cited)')}`,
+      )
+    }
+  }
   const text = lines.join('\n')
-  return { text, fingerprint: createHash('sha256').update(text).digest('hex') }
+  return { text, fingerprint: createHash('sha256').update(text).digest('hex'), includedFindings: included.length }
 }
 
 /** Execute one job (T-009): the T-007 attempt loop verbatim, with the job's
@@ -825,8 +871,11 @@ function composeGateRetryBrief(
  *  ≤ maxAttempts + 1). The retry brief becomes the retry attempt's brief:
  *  its promptVersion and inputContextHash hash the composed text (the hash
  *  correctly differs from attempt 1's — the brief differs), while
- *  `base.brief` keeps the ORIGINAL brief. Blind re-rolls stay banned
- *  (decisions.md 2026-10-21). */
+ *  `base.brief` keeps the ORIGINAL brief. T-040: before composition, the
+ *  retry-eligible leg is itself verified (the pre-retry verifier call site)
+ *  and its eligible findings ride the composed brief under documented caps —
+ *  still no model call composes the brief, still zero verdict inputs. Blind
+ *  re-rolls stay banned (decisions.md 2026-10-21). */
 async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<CandidateReport> {
   const id = job.id
   const dir = join(opts.artifactsDir, id)
@@ -1067,13 +1116,60 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
         // to their own attempt and would otherwise be lost (the final
         // attempt's gates overwrite the candidate-level array below).
         attempt.gateResults = attemptGates
-        const composed = composeGateRetryBrief(job.brief, diff, failedGates, result.responseTail)
+        // T-040: the PRE-RETRY verifier call site — fires exactly when this
+        // leg is retry-eligible (the condition above) and BEFORE composition,
+        // against the failing attempt's lease (same posture, same schema, and
+        // the same failure context the final-attempt call gets: the gates
+        // that already ran with names/verdicts/commands, the captured diff,
+        // the brief). Bounded by construction: the gate-retry bound is one,
+        // so a candidate is verified at most twice — once here, once on its
+        // final attempt per T-039. Findings are advisory inputs to the
+        // COMPOSITION only — they shape what the retry tries; the re-run
+        // gates decide what survives (decisions.md 2026-10-10, extended
+        // 2026-10-21): no verdict line below reads them. The evidence tag
+        // keeps this leg's verifier files (verifier-pre-retry.log/-raw.txt,
+        // in THIS attempt's evidence dir) from ever overwriting the final
+        // attempt's (verifier.log/-raw.txt). Any failure here — parse failure
+        // after the bounded repair, or the adapter throwing — composes a
+        // GATES-ONLY brief and the retry still fires: verifier absence (or
+        // breakage) never blocks the mechanical retry, and the degradation is
+        // recorded in `gateRetry.findings.ok` rather than silently swallowed.
+        let retryFindings: ReviewObservation[] = []
+        let findingsOk = false
+        if (opts.verifierModel) {
+          try {
+            const preRetry = await runVerifier(opts, {
+              id,
+              dir: evidenceDir,
+              workspacePath: lease.path,
+              brief: job.brief,
+              diff,
+              gateLines: attemptGates.map((g) => `- ${g.name}: ${g.passed ? 'PASS' : 'FAIL'}${g.command !== undefined ? ` — command: ${g.command}` : ' — command not recorded'}`),
+              evidenceTag: '-pre-retry',
+            })
+            findingsOk = preRetry.ok
+            // Only actionable severities ride: blocker-advisory and concern.
+            // `info` is worth knowing, not a fix instruction; `count` below is
+            // the ELIGIBLE count, pre-cap.
+            retryFindings = preRetry.observations.filter((o) => o.severity === 'blocker-advisory' || o.severity === 'concern')
+          } catch (e) {
+            console.log(`[${id}] pre-retry verifier failed: ${errorMessage(e)}; composing a gates-only retry brief — the retry is mechanical and never blocked`)
+          }
+        }
+        const composed = composeGateRetryBrief(job.brief, diff, failedGates, result.responseTail, retryFindings)
         pendingRetryBrief = composed.text
         base.gateRetry = {
           fromAttempt: n,
           toAttempt: n + 1,
           gates: failedGates.map((g) => g.name),
           fingerprint: composed.fingerprint,
+          // T-040 provenance, beside the fingerprint (which covers the full
+          // composed text including the findings section by construction):
+          // count = eligible findings returned pre-cap; included = embedded
+          // post-caps; ok = parsed schema-valid verifier output existed at all
+          // (false = no verifier configured, or the pre-retry output failed
+          // to parse / the verifier crashed — the recorded degradation).
+          findings: { count: retryFindings.length, included: composed.includedFindings, ok: findingsOk },
         }
         attemptBrief = composed.text
         console.log(`[${id}] attempt ${n}: gates rejected the change (${failedGates.map((g) => g.name).join(', ')}); composing the one feedback-informed gate retry (attempt ${n + 1})`)

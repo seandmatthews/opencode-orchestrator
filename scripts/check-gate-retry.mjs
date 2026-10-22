@@ -19,6 +19,11 @@
 // substitutes a gate — decisions.md 2026-10-21); a flag-less drive carries
 // no gateRetry block and no attempt-scoped gate fields. All git calls are
 // list-form (AGENTS.md #4); the sandbox is removed at the end (AGENTS.md #10).
+// T-040 note: the gateRetry block's shape pin above now includes the
+// `findings` provenance ({count, included, ok}); this drive configures no
+// verifier, so the block carries the honest zero record {0, 0, false}. The
+// findings-bearing composition is pinned by Gate 1.27
+// (scripts/check-gate-retry-findings.mjs).
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -204,11 +209,12 @@ const main = async () => {
       c.workerOk === true && c.passedAllGates === true && c.diffBytes > 0 && c.error === undefined
       && c.gates.length === 3 && c.gates.every((g) => g.passed === true)
       && norm(c.workspacePath ?? '') === norm(join(artifactsDir, 'wt', 'c01-a2')))
-    t('G1: the gateRetry block is exactly the ticketed shape {fromAttempt, toAttempt, gates, fingerprint}',
+    t('G1: the gateRetry block is exactly the ticketed shape {fromAttempt, toAttempt, gates, fingerprint, findings{count, included, ok}} (the T-038 shape plus the T-040 provenance — no verifier configured on this drive, so the zero/zero/false degradation record)',
       c.gateRetry !== undefined
       && c.gateRetry.fromAttempt === 1 && c.gateRetry.toAttempt === 2
       && eq(c.gateRetry.gates, ['build', 'lint'])
-      && /^[0-9a-f]{64}$/.test(c.gateRetry.fingerprint))
+      && /^[0-9a-f]{64}$/.test(c.gateRetry.fingerprint)
+      && eq(c.gateRetry.findings, { count: 0, included: 0, ok: false }))
     t('G1: CandidateReport.brief is the ORIGINAL brief, never replaced', c.brief === BRIEF)
     const briefPath = join(artifactsDir, 'c01', 'attempt-2', 'retry-brief.txt')
     t('G1: the composed brief file exists in the retry attempt\'s evidence dir', existsSync(briefPath))
