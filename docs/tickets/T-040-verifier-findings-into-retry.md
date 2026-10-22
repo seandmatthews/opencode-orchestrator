@@ -205,6 +205,29 @@ run must be amended (or re-created from the updated tracked file) so its
 Gate 2 `world.run` carries `timeoutMs: 3600000` before the next attempt.
 The lane fast tier was re-run green after these edits.
 
+**Re-verification round (2026-10-22, a later implementer session on the
+same lane):** the lane worktree directory had been cleared between
+sessions while the branch survived (tip `8a1526a`, clean, unmerged); this
+session re-attached a fresh worktree to the existing branch — the
+change-set was NOT redone — audited the full diff against the ticket
+(faithful; the three owned deviations above stand), and re-measured the
+gates on the identical tree: Gate 0 `tsc --noEmit` exit 0; Gate 1.27
+standalone **ALL GREEN, 35 `ok:` assertions** (teed
+`C:\swarm\verify-red\T-040-reverify-gate127.log`); Gate 1.24 standalone
+**ALL GREEN** (its extended 5-key shape pin green against a verifier-less
+drive); full fast tier `node scripts/verify.mjs fast` **exit 0, ALL
+GREEN, 1564 `ok:` lines** (full output teed
+`C:\swarm\verify-red\T-040-reverify-fast-full.log`; all sections Gate 0
+through 1.27; the two check sandboxes removed afterward; the lane tree
+clean after `npm install` — package-lock.json untouched). The standing
+pre-Gate-2 condition is restated for whoever drives the full tier: the
+loaded workflow script must carry the amended `timeoutMs: 3600000`
+(Known issue #12's third-kill record) BEFORE the next `verify:full`
+attempt — the inner ceiling on this tree is 50 min and the measured
+healthy path ~30+ min, so the pre-edit 25-min loaded wrapper kills a
+healthy run uninformatically. Gate 2 remains owed and carried by that
+driving run; Gate 3 n/a (no adapter file touched).
+
 ## Verification
 
 Gate 0 throughout. **Gate 1.27** — token-free fake-adapter drives, wired
