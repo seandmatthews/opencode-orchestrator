@@ -3553,6 +3553,14 @@ whoever drives this gate: the ceiling raise is the same discipline as the
 T-027 wrapper raise — a driving wrapper must sit ABOVE this inner ceiling
 plus the fast tier, or it preempting the runner's stall path is its own
 misconfiguration (Known issue #12's remedy paragraph applies verbatim).
+**Since T-040 the tracked driving workflow carries the note's number:**
+`.zcode/workflows/ticket-implement.dwf.ts` runs the full tier at
+`timeoutMs: 2700000` (45 min — the 35-min inner ceiling + the fast tier,
+plus the measured verifier overhead the tier now carries; see the
+2026-10-22 follow-up under Known issue #12 for the kill that calibrated
+it). The wrapper is repo content and lanes may raise it when their
+change-set legitimately grows the tier — never shrink the tier's own
+assertions to fit a wrapper.
 
 Required when touching `src/runner.ts`, any adapter, gates, workspace handling, or
 anything that changes report shape. Fast tier alone does not clear you here.
@@ -3802,6 +3810,37 @@ landing in T-017's Landed section).
     `main` in `worktree list`, no `swarm/*` branches, clean status;
     evidence kept — dispatch.jsonl, both diff.patch, worker/reviewer logs,
     c02's review.json).
+    **2026-10-22 second budget kill (T-040 review round 1) — this time the
+    change-set itself legitimately grew the tier, and the remedy landed
+    in-repo.** The driving wrapper killed `npm run verify:full` at its own
+    1500000ms budget (25 min) while the run was HEALTHY — the teed log
+    (`C:\swarm\verify-red\T-040-gate2-full.log`) shows the fast tier green,
+    round 1 complete (planner 32s; workers 264s/283s; verifiers 429s/299s —
+    each with one bounded repair; reviews 89s/76s), round 2's workers done
+    (187s/51s), c02-r2's verifier done (284s), and c01-r2's verifier
+    mid-repair at the kill: no report.json, because the T-040 change-set
+    added `--verifier-model zai-coding-plan/glm-5.3-flash` to the full tier
+    (its ticketed Gate 2 shape), and four real verifier dispatches put the
+    honest path at ~30 min — above a wrapper calibrated before the tier
+    carried a verifier. Debris (4 registered worktrees, 4 `swarm/*`
+    branches, 1 stale lock) disposed through the house path (`npm run clean
+    -- --run 20261022193232 --run-root C:\swarm\verify --force --force-lock`;
+    8 removed, 0 refused, 0 failed; fixture verified pristine after: only
+    `main` in `worktree list`, no `swarm/*` branches, clean status; evidence
+    kept — dispatch.jsonl, planner logs, per-candidate diff/review/verifier
+    files). Remedy, per this issue's own T-027 record ("raise
+    `opts.timeoutMs` ... or narrow the work" — narrowing was refused there
+    and stays refused): the TRACKED driving workflow
+    (`.zcode/workflows/ticket-implement.dwf.ts`, repo content) raised its
+    Gate 2 `timeoutMs` 1500000 → **2700000 (45 min)** in the T-040 lane,
+    restoring the wrapper-budget invariant (wrapper above the inner 35-min
+    ceiling plus the fast tier, with the measured verifier overhead on
+    top). That T-027 record's closing claim — the budget "no lane
+    change-set can set" — is hereby marked obsolete: the workflow file is
+    tracked, and the T-040 lane set it under the reviewer's explicit
+    mandate. The kill was the wrapper's own misconfiguration, not a red of
+    any assertion: nothing in the change-set was implicated, and the lane's
+    fast tier was and stays green.
 13. **The first auto-revert: a post-merge fast-tier red that never
     reproduced, with the red output lost (observed once, 2026-10-21,
     T-032 lane, driving run `dwfrun-b35d1c1a`).** T-032 (adversarial

@@ -148,6 +148,34 @@ which the driving workflow executes after this commit; the implementer did
 not run it (model tokens are the driver's budget — the ask's division of
 labor). **Gate 3 n/a** (no adapter file touched).
 
+**Review round 1 (2026-10-22), addressed in this change-set:** the
+driving Gate 2 came back RED — `WorkflowError: world.run 'node' timed out
+after 1500000ms`, exit -1 — and the teed log
+(`C:\swarm\verify-red\T-040-gate2-full.log`) shows the run was HEALTHY at
+the kill: fast tier green, round 1 complete (planner 32s; workers
+264s/283s; verifiers 429s/299s, each with one bounded repair; reviews
+89s/76s), round 2's workers done (187s/51s), c02-r2's verifier done
+(284s), c01-r2's verifier mid-repair. Diagnosis: this change-set's
+`--verifier-model` addition (the ticketed Gate 2 shape) put the honest
+path at ~30 min — above a wrapper budget calibrated before the tier
+carried a verifier, violating the repo's own wrapper-budget invariant
+(VERIFICATION.md Gate 2: the wrapper must sit ABOVE the inner 35-min
+ceiling plus the fast tier). No assertion red; nothing in the change-set
+implicated. Fixes, both in this change-set per the reviewer's mandate
+("raise opts.timeoutMs or narrow the work"; narrowing is refused by
+Known issue #12's own T-027 record): (1) the tracked driving workflow
+(`.zcode/workflows/ticket-implement.dwf.ts`) raised its Gate 2
+`timeoutMs` 1500000 → **2700000 (45 min)** with the calibration
+commented; (2) the killed run's debris (4 worktrees, 4 `swarm/*`
+branches, 1 stale lock) disposed through the house path (`npm run clean
+-- --run 20261022193232 --run-root C:\swarm\verify --force --force-lock`;
+8 removed, 0 refused, 0 failed; fixture verified pristine after: only
+`main` in `worktree list`, no `swarm/*` branches, clean status; evidence
+kept). VERIFICATION.md records the calibration (Gate 2 wrapper note +
+a dated Known issue #12 follow-up marking T-027's "no lane change-set
+can set it" obsolete — the workflow file is tracked). The lane fast tier
+was re-run green after these edits.
+
 ## Verification
 
 Gate 0 throughout. **Gate 1.27** — token-free fake-adapter drives, wired
