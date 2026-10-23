@@ -3,7 +3,9 @@
 // src/clean.ts's lock-serialized, dirty-refusing disposal loop
 // (src/disposal.ts) — only what is provably orphaned. Spec §16 makes worktrees
 // leased resources whose branches carry no unique evidence (workers never
-// commit — the diff is captured to diff.patch first); §34 Milestone 3 names
+// commit — the diff is captured to diff.patch first; enforced, not assumed,
+// since T-044: a branch beyond the run's baseSha is refused as evidence);
+// §34 Milestone 3 names
 // the GC build item; §29's recovery step 5 stops at validate — this command
 // is the dispose half, separate from recover (which stays report-only,
 // VERIFICATION.md Gate 1.11).
@@ -41,11 +43,14 @@
 // swarm/wt-<id> branches in the target repo). For the repo of each terminal
 // run (class 3 or 4), list swarm/* branches (list-form `git branch --list`)
 // and delete exactly those that (a) have no worktree currently registered on
-// them and (b) are attributable to the terminal run via its dispatch records'
+// them, (b) are attributable to the terminal run via its dispatch records'
 // branch fields, its report candidates (branchForLeaseId('wt/<id>'), retry
-// legs swarm/wt-<id>-a<n> included), or its wt/ entry names. Branches
-// attributable to no terminal run are reported unowned and never deleted;
-// branches on registered worktrees are never deleted.
+// legs swarm/wt-<id>-a<n> included), or its wt/ entry names, and (c) sit at
+// the run's recorded baseSha — a branch beyond it carries worker commits,
+// which removeBranch's guard REFUSES (T-044; the report's baseSha is the
+// expected tip). Branches attributable to no terminal run are reported
+// unowned and never deleted; branches on registered worktrees are never
+// deleted.
 //
 // Never touched, by construction: wt/int-* worktrees (integration-replay
 // leftovers, dirty by construction — spec §16.1 integration retention class)
@@ -295,10 +300,15 @@ function ownedBranches(
  * The repo-side branch sweep: delete exactly the swarm/* branches that have
  * no registered worktree and are attributable to a terminal run; report the
  * unowned ones and keep them; keep anything a registered worktree holds.
- * Workers never commit (the diff is captured first), so a swarm/* branch
- * carries no unique evidence — only the base-SHA pointer the lease created.
+ * A branch whose tip sits beyond the run's baseSha carries worker commits —
+ * evidence, refused by removeBranch's guard (T-044). The "workers never
+ * commit" premise of the old comment is now ENFORCED here, not assumed: the
+ * diff capture pins baseSha (src/workspace/worktree.ts), so a committing
+ * worker's work survives in diff.patch and its branch is refused, never
+ * silently shredded. A run with no recorded baseSha keeps the pre-T-044
+ * sweep behavior.
  */
-function sweepBranches(repo: string, owned: Set<string>, res: RunResult): void {
+function sweepBranches(repo: string, owned: Set<string>, res: RunResult, expectedBaseSha: string | null = null): void {
   const registeredBranches = new Set(
     [...registeredWorktrees(repo).values()].filter((b): b is string => b !== null),
   )
@@ -318,7 +328,7 @@ function sweepBranches(repo: string, owned: Set<string>, res: RunResult): void {
       continue
     }
     if (owned.has(branch)) {
-      removeBranch(repo, branch, res)
+      removeBranch(repo, branch, res, { expectedBaseSha })
     } else {
       console.log(`unowned swarm/* branch — never deleted (no terminal run attributes it): ${branch}`)
     }
@@ -376,6 +386,11 @@ function gcRunDir(runDir: string, opts: Options, totals: ClassTotals): RunResult
     }
   }
 
+  // The run's recorded base (report baseSha): the tip every lease branch
+  // sits at unless a worker committed — removeBranch's T-044 guard reads it
+  // (null for crashed-reconciled runs, which carry no report.json).
+  const expectedBaseSha = typeof report?.baseSha === 'string' && report.baseSha !== '' ? report.baseSha : null
+
   try {
     if (!hasReport && !hasRecovery) {
       totals.unreconciled++
@@ -393,12 +408,12 @@ function gcRunDir(runDir: string, opts: Options, totals: ClassTotals): RunResult
       }
       const { targets, held } = collectTargets(runDir, ev, recovery)
       for (const h of held) console.log(`held (wt/int-* integration-replay worktree — human disposition, spec §16.1): ${h}`)
-      disposeTargets(repo, targets, false, res)
+      disposeTargets(repo, targets, false, res, expectedBaseSha)
       try { rmdirSync(wtDir) } catch { /* still has contents — fine */ }
       if (res.refused > 0) {
         console.error(`gc never discards changes (no --force) — to dispose the refused worktree(s): npm run clean -- --run ${runId} --force`)
       }
-      sweepBranches(repo, ownedBranches(runDir, report, ev, recovery), res)
+      sweepBranches(repo, ownedBranches(runDir, report, ev, recovery), res, expectedBaseSha)
       return res
     }
 
@@ -408,7 +423,7 @@ function gcRunDir(runDir: string, opts: Options, totals: ClassTotals): RunResult
       console.log(`no target repo determinable — branch sweep skipped`)
       return res
     }
-    sweepBranches(repo, ownedBranches(runDir, report, ev, recovery), res)
+    sweepBranches(repo, ownedBranches(runDir, report, ev, recovery), res, expectedBaseSha)
     return res
   } finally {
     if (lockPath) releaseCheckoutLock(lockPath)

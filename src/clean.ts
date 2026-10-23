@@ -124,7 +124,7 @@ function cleanRunDir(runDir: string, force: boolean, forceLock: boolean, runRoot
       throw e
     }
 
-    disposeTargets(repo, targets, force, res)
+    disposeTargets(repo, targets, force, res, report?.baseSha ?? null)
 
     try { rmdirSync(wtDir) } catch { /* still has contents — fine */ }
     return res

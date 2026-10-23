@@ -1,6 +1,6 @@
 # T-044 — Evidence-destruction guard: diff capture pins baseSha (not HEAD) + `swarm/*` branch deletion refuses non-base tips
 
-**Status:** proposed
+**Status:** done
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 2
 **Depends on:** —
@@ -88,6 +88,72 @@ its inertness for honest runs is provable byte-for-byte.
       trigger analysis recorded at landing. **Gate 3 n/a**.
 
 ## Landed
+
+Landed 2026-10-23, lane `ticket/T-044-diff-against-basesha`.
+
+**Code** — exactly the two changes the ticket names, no ride-alongs:
+
+- `src/workspace/worktree.ts` — `diff()` keeps `git add -A
+  --intent-to-add .` and now runs `git diff <lease.baseSha> --binary`
+  (was `HEAD`). A committing worker's work is captured; NO-OP means "no
+  change relative to the pinned base"; byte-identical for every
+  non-committing worker (each lease checks out at baseSha, so
+  HEAD === baseSha until a commit moves it).
+- `src/disposal.ts` — `removeBranch` gains `BranchGuard
+  {expectedBaseSha, force}` and refuses `git branch -D` on tip !=
+  expectedBaseSha with the loud line `refused (branch <b> carries commits
+  beyond baseSha — evidence; re-run with --force to discard) tip=<12hex>
+  base=<12hex>` (refused++, never removed); `RunReportLike` gains
+  `baseSha`; `disposeTargets(..., expectedBaseSha)` threads the report's
+  base + the existing `--force` into both its removeBranch sites.
+- Plumbing: `src/clean.ts` passes `report?.baseSha ?? null`;
+  `src/gc.ts` computes the same per-run expected base and passes it to
+  `disposeTargets` and `sweepBranches` (gc never passes force — a refusal
+  there points at `npm run clean -- --run <id> --force`, its existing
+  pointer posture). Comment updates at gc.ts's sweep/header where the
+  "workers never commit" premise is now stated as enforced. No runner,
+  ladder, store, types, or adapter change — the NO-OP ladder expression
+  is untouched.
+
+**Checks** — new `scripts/check-diff-basesha.mjs` (Gate 1.30, 20
+assertions, wired into `scripts/verify.mjs` fast tier): C1 committed work
+captured + ladder sees diffBytes > 0 · C2 removeBranch refusal + loud
+line + `--force` bypass · C3 commit-then-revert still an honest NO-OP ·
+C4 inertness byte-compare (`git diff HEAD` ≡ `git diff <baseSha>` on one
+identical tree: tracked edit + untracked file + binary edit) · C5
+report-driven clean refuses the commit-carrying branch (exit 1, branch
+survives, clean sibling still disposed, "1 refused, 0 failed") and
+`--force` finishes (exit 0). `scripts/check-gc.mjs` (Gate 1.18) extended
+with pass C: gc's finished-lane sweep refuses an attributable,
+unregistered, beyond-base branch with the loud line, exit 1, branch
+survives; its A3/A4 fixtures now record the sandbox's REAL baseSha (the
+field was a never-read `'0'.repeat(40)` placeholder; the guard consumes
+it) — every existing gc assertion unchanged and green. verify.mjs's
+`captureDiff` mirror now diffs the recorded base like the engine
+(byte-identical for its detached-at-HEAD makers), keeping its "exactly
+like src/workspace/worktree.ts" claim true — every T-026 binary
+round-trip face rides green unchanged.
+
+**Red bar (AGENTS #8), recorded before any engine change** — the lane at
+main (7c36d6e) running the landed check: 10 failures, exit 1 (C1 ×2:
+empty capture/NO-OP mislabel; C2 ×3: removeBranch shredded the
+commit-carrying branch; C5 ×5: clean exited 0 and destroyed the commit
+end to end; C3/C4 green pre-change — they pin preserved semantics). Green
+post-change: 20/20, exit 0.
+
+**Gates measured:** Gate 0 typecheck exit 0 · `node node_modules/tsx/dist/
+cli.mjs scripts/check-diff-basesha.mjs` ALL GREEN (Gate 1.30) · `node
+node_modules/tsx/dist/cli.mjs scripts/check-gc.mjs` ALL GREEN incl. pass C
+(Gate 1.18) · full fast tier `node scripts/verify.mjs fast` — `=== verify
+(fast) complete: ALL GREEN ===`, exit 0 (Gate 0+1+0.5+1.5…1.30, T-026
+binary round-trip faces included). **Gate 2 owed** (src/ changed:
+`workspace/worktree.ts` — the diff seam every candidate's evidence flows
+through — plus `disposal.ts`/`clean.ts`/`gc.ts`; the driving full-tier run
+exercises the new capture and post-run clean path; byte-inert for
+non-committing workers per C4, so the run's shape is unchanged — trigger
+analysis in VERIFICATION.md Gate 1.30). **Gate 3 n/a** (no adapter
+change). No existing check weakened; the only fixture edits are the gc
+baseSha fidelity fix and the additive pass C, both asserted above.
 
 ## Verification
 

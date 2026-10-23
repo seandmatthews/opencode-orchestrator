@@ -2045,14 +2045,21 @@ scout-reproduced end-to-end, recorded in T-020's Why). For each terminal
 run's repo (class 3 or 4; from the report's `repo` field, falling back to
 the dispatch header's, then `sniffRepo` — the clean/recover pattern), list
 `swarm/*` branches (list-form `git branch --list 'swarm/*'`) and delete
-exactly those that (a) have no worktree currently registered on them and
+exactly those that (a) have no worktree currently registered on them,
 (b) are attributable to the terminal run via its dispatch records' `branch`
 fields, its report candidates (`branchForLeaseId('wt/<id>')`, retry legs
-`wt/<id>-a<n>` → `swarm/wt-<id>-a<n>` included), or its `wt/` entry names.
-Branches attributable to no terminal run are reported unowned and never
-deleted; branches on registered worktrees are reported and never deleted
-(workers never commit — the diff is captured to `diff.patch` first — so a
-`swarm/*` branch carries no unique evidence). `wt/int-*` integration-replay
+`wt/<id>-a<n>` → `swarm/wt-<id>-a<n>` included), or its `wt/` entry names,
+and (c) sit at the run's recorded `baseSha`. Branches attributable to no
+terminal run are reported unowned and never deleted; branches on registered
+worktrees are reported and never deleted. Since T-044 the old sweep's
+"workers never commit — the diff is captured to `diff.patch` first, so a
+`swarm/*` branch carries no unique evidence" premise is ENFORCED, not
+assumed: a branch whose tip sits beyond the baseSha carries worker commits
+— evidence — and the shared `removeBranch` refuses it with the loud
+carries-commits-beyond-baseSha line (Gate 1.30; the report's `baseSha` is
+the expected tip; a run with no recorded baseSha keeps the pre-T-044 sweep
+behavior — crashed-reconciled runs carry no report.json).
+`wt/int-*` integration-replay
 worktrees (spec §16.1 `integration` retention class, dirty by construction)
 are excluded from every target set and reported held for human disposition.
 Evidence files (`report.json`, `dispatch.jsonl`, `recovery.json`,
@@ -2096,7 +2103,16 @@ classification plus focused passes, all through the real CLI, token-free:
   `--force-lock` override proceeds and disposes (parity with clean) and
   releases the lock afterward; the end state keeps exactly the
   deliberately-kept worktrees (main + the unreconciled c02 + the
-  registered c04 + the held int-c06) and branches (c02, c04, ghost).
+  registered c04 + the held int-c06) and branches (c02, c04, ghost);
+- **C** (T-044) — a finished run owning an attributable, unregistered
+  branch whose tip sits beyond the report's `baseSha` (the committing
+  worker, worktree already gone — the `--clean` leak shape): the sweep
+  REFUSES it with the loud carries-commits-beyond-baseSha line naming tip
+  and base, exit 1, and the branch — the only copy of the committed work —
+  survives into the end-state census (c02, c04, c08, ghost). The A3/A4
+  fixtures now record the sandbox's REAL baseSha in report.json (the guard
+  consumes the field; the old `'0'.repeat(40)` placeholder was never read)
+  — every existing gc assertion is unchanged and green.
 
 The reproduced leak is additionally pinned red-before/green-after inside
 the existing Gate 1.17 S5 sandbox (`scripts/check-machine-worker.mjs`):
@@ -3727,6 +3743,102 @@ baseline leg (build+test green on the fresh demo fixture) before its
 planner dispatch — additive stdout lines only, the fixture's own baseline
 being what Gate 1 regenerates green every fast-tier run. **Gate 3 — n/a**
 (no adapter touched).
+
+## Gate 1.30 — evidence-destruction guard: diff pins baseSha, branch deletion refuses non-base tips (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-diff-basesha.mjs
+```
+
+Pins T-044 (the 2026-10-23 adversarial review's F5 — the leading instance
+of "invariants that gate destruction are documented, not enforced"): the
+old chain let one worker `git commit` (a natural LLM action; the builder
+prompt's "do not create git commits" line is a prompt rule, and prompts
+reinforce, never implement, policy — spec §3.6) silently destroy its own
+evidence. `WorktreeProvider.diff`'s `git diff HEAD` reads EMPTY once HEAD
+moves (tree === HEAD), the ladder records `diffBytes === 0` → the NO-OP
+elimination (src/runner.ts:1201, src/store/index.ts:1433), the worktree
+now reads CLEAN so disposal's dirty-refusal never fires, the worktree is
+removed, and `removeBranch`'s `git branch -D` destroys the commit — the
+only copy of the work, silently, with the candidate mislabeled a no-op.
+Two mechanical changes make the "evidence is captured before disposal"
+invariant true by mechanism instead of premise:
+
+1. **Diff against the lease's recorded `baseSha`, not HEAD**
+   (`src/workspace/worktree.ts`): `git diff <lease.baseSha> --binary`
+   after the unchanged `git add -A --intent-to-add .` (the T-026
+   untracked/binary posture rides as is). A committing worker's work then
+   appears in the captured diff and NO-OP comes to mean its honest
+   semantics — "no change relative to the pinned base". Structurally
+   inert for every non-committing worker: each lease checks out at
+   baseSha, so HEAD === baseSha until a commit moves it and the bytes are
+   identical. The NO-OP ladder expression itself is untouched — its input
+   becomes honest.
+2. **The branch guard** (`removeBranch`, `src/disposal.ts`): gains the
+   expected base (the report's `baseSha`, plumbed through
+   `RunReportLike`/`readReport` and `disposeTargets` into both clean and
+   gc — the shared T-020 internals) and REFUSES `git branch -D` when the
+   branch tip != baseSha, with the loud line naming branch, tip, and base
+   ("carries commits beyond baseSha — evidence; re-run with --force to
+   discard"). Bypass = the existing `--force`, the dirty-refusal posture
+   (clean's flag; gc deliberately never passes it — a gc refusal points at
+   `npm run clean -- --run <id> --force`). A run with no recorded baseSha
+   (no report.json — the `wt/`-discovery paths, gc's crashed-reconciled
+   lane) keeps the pre-T-044 behavior.
+
+Legs, zero model tokens (one scratch repo; the REAL `WorktreeProvider`,
+`removeBranch`, and clean CLI — the check-probe/check-gate-retry import
+pattern):
+
+- **C1 — capture**: a simulated committing worker (edit + `git commit`
+  inside the lease) — `diff()` returns the committed work (non-empty,
+  containing the commit's change), so the ladder's `diffBytes > 0` sees
+  real work and no NO-OP mislabel;
+- **C2 — guard**: `removeBranch` refuses the commit-carrying branch
+  (refused++, removed stays 0, branch survives) with the loud line naming
+  branch, tip, base, and the `--force` bypass; `--force` still removes it;
+- **C3 — true no-op preserved**: commit-then-revert (HEAD two commits
+  beyond base, tree back at base content) captures an EMPTY diff and the
+  ladder still records the NO-OP verdict for an all-pass gate set;
+- **C4 — inertness**: on a non-committing worktree (tracked edit +
+  untracked new file + binary edit) the new `git diff <baseSha>` capture
+  is byte-identical to the old `git diff HEAD` form, compared on one
+  identical tree;
+- **C5 — clean plumbing**: a report-driven `npm run clean` (baseSha in
+  report.json) refuses the commit-carrying branch (exit 1, the loud line
+  naming branch + both SHAs, branch survives, the now-clean worktree
+  still disposed, tallies exactly "1 refused, 0 failed") while the
+  at-base sibling's branch is removed un-refused in the same pass;
+  `--force` finishes the job (exit 0).
+
+**Red bar (AGENTS.md #8), recorded BEFORE the change landed** — the lane
+at main (7c36d6e, engine untouched) running this same check: 10 failures,
+exit 1. C1's two capture assertions red (diff() EMPTY for the committing
+worker — the NO-OP mislabel), C2's three guard assertions red
+(removeBranch deleted the commit-carrying branch), C5's five clean
+assertions red (clean exited 0 and shredded the branch — the destruction
+chain end to end); C3/C4 were green pre-change (they pin preserved
+semantics, not the fix). Post-change: all 20 assertions green, exit 0.
+
+Riding the same guard: Gate 1.18's check gained pass C (gc's finished-lane
+sweep refuses a commit-carrying branch — see its C bullet), and verify.mjs's
+`captureDiff` mirror (the Gate 1.5 integrate fixtures) now diffs the
+recorded base exactly like the engine — byte-identical for its
+detached-at-HEAD makers, so every T-026 binary round-trip face rides green
+unchanged.
+
+Not pinned here and carved by the ticket: no verdict-semantics change (the
+ladder expression is untouched), no decisions.md change (this enforces the
+existing "evidence before disposal" rule rather than any new verdict
+semantics), no dispatch-header baseSha plumbing (the guard reads the
+REPORT's baseSha only), no in-run dispose change (the runner still never
+deletes branches — the `--clean` leak stays gc's business). **Gate 2 —
+owed** (`src/workspace/worktree.ts` — the diff seam every candidate's
+evidence flows through — plus `src/disposal.ts`/`src/clean.ts`/`src/gc.ts`
+changed; trigger list, Gate 2's section): the standard real e2e run's diff
+capture and post-run clean ride the new path, byte-inert for
+non-committing workers (C4), so the run's shape is unchanged. **Gate 3 —
+n/a** (no adapter change).
 
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 

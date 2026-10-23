@@ -27,6 +27,10 @@
 //       and lock path, removing nothing, exit 0 (healthy); the documented
 //       --force-lock override proceeds (parity with clean) and disposes;
 //       the lock is released on every path.
+//   C   finished run owning a branch whose tip is beyond the report's
+//       baseSha (the committing worker, worktree already gone — the --clean
+//       leak shape, T-044): the sweep REFUSES the attributable, unregistered
+//       branch with the loud evidence line; exit 1; branch survives.
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -65,6 +69,10 @@ git('init', '-b', 'main')
 writeFileSync(join(repo, 'file.txt'), 'baseline\n')
 git(...IDENTITY, 'add', '-A')
 git(...IDENTITY, 'commit', '-m', 'baseline')
+// The run base every lease branch sits at (T-044: the report's baseSha is
+// the expected tip removeBranch's guard compares against — the fixture
+// records the REAL base, exactly like src/cli.ts's report writer).
+const BASE = git('rev-parse', 'HEAD').trim()
 
 const swarmBranches = () => git('branch', '--list', 'swarm/*').split('\n').map((l) => l.replace(/^[*+]\s*/, '').trim()).filter(Boolean).sort().join(',')
 const worktreeCount = () => git('worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).length
@@ -111,7 +119,7 @@ function writeRecovery(runId, workspaces) {
 
 function writeFinishedReport(runId, candidates) {
   writeFileSync(join(runs, runId, 'report.json'), JSON.stringify({
-    runId, repo, baseSha: '0'.repeat(40), goal: 'gc check', model: 'm',
+    runId, repo, baseSha: BASE, goal: 'gc check', model: 'm',
     startedAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T00:03:00.000Z', candidates,
   }, null, 2))
 }
@@ -297,11 +305,36 @@ t('B: --force-lock takes the lock and disposes c07 (parity with clean)',
 t('B: the lock was released on the --force-lock path — no residual lock files',
   lockFilesIn(locksDir).length === 0)
 
+// ---------- C (T-044): the sweep refuses a commit-carrying branch ----------
+// A finished run owning a branch whose tip sits beyond the report's baseSha —
+// the committing worker, worktree already gone (the --clean leak shape). The
+// branch is attributable (report candidate c08), unregistered, and STILL
+// never deleted: it carries commits, which are evidence.
+const cLease = leaseWorktree('20260101000008', 'c08')
+writeFileSync(join(cLease.wt, 'file.txt'), 'committed beyond base\n')
+run('git', ['-C', cLease.wt, ...IDENTITY, 'add', '-A'])
+run('git', ['-C', cLease.wt, ...IDENTITY, 'commit', '-m', 'worker commit'])
+git('worktree', 'remove', '--force', cLease.wt) // the in-run dispose — branch left behind
+writeFinishedReport('20260101000008', [{ id: 'c08', workspacePath: null, attempts: [{ number: 1, state: 'succeeded' }] }])
+const C08_TIP = git('rev-parse', 'swarm/wt-c08').trim()
+t('C setup: the branch carries a commit beyond the run base', C08_TIP !== BASE)
+
+const c = runGc([], 'pass C (commit-carrying branch)')
+t('C: exits 1 — the commit-carrying branch was refused', c.code === 1)
+t('C: classification census — 8 run dirs, 1 crashed-unreconciled, 4 crashed-reconciled, 3 finished',
+  c.out.includes('8 run dir(s)') && c.out.includes('1 crashed-unreconciled') && c.out.includes('4 crashed-reconciled') && c.out.includes('3 finished'))
+t('C: the sweep REFUSES swarm/wt-c08 with the loud evidence line naming tip and base',
+  c.out.includes('carries commits beyond baseSha') && c.out.includes('swarm/wt-c08')
+  && c.out.includes(C08_TIP.slice(0, 12)) && c.out.includes(BASE.slice(0, 12)))
+t('C: the branch — the only copy of the committed work — survives the sweep',
+  swarmBranches().includes('swarm/wt-c08'))
+t('C: no residual lock files after pass C', lockFilesIn(locksDir).length === 0)
+
 // end state: exactly what GC must leave for a human remains.
 t('end state: exactly the deliberately-kept worktrees remain — main, the unreconciled c02, the kept c04, the held int-c06',
   worktreeCount() === 4 && git('worktree', 'list', '--porcelain').includes('wt-c02')
   && git('worktree', 'list', '--porcelain').includes('wt-c04') && git('worktree', 'list', '--porcelain').includes('int-c06'))
-t('end state: exactly the deliberately-kept branches remain — c02 (unreconciled), c04 (registered), ghost (unowned)',
-  swarmBranches() === 'swarm/wt-c02,swarm/wt-c04,swarm/wt-ghost')
+t('end state: exactly the deliberately-kept branches remain — c02 (unreconciled), c04 (registered), c08 (carries commits — evidence), ghost (unowned)',
+  swarmBranches() === 'swarm/wt-c02,swarm/wt-c04,swarm/wt-c08,swarm/wt-ghost')
 
 rmSync(sandbox, { recursive: true, force: true })

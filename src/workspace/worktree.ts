@@ -74,14 +74,23 @@ export class WorktreeProvider implements WorkspaceProvider {
   }
 
   diff(lease: WorkspaceLease): string {
-    // --intent-to-add makes untracked new files appear in `git diff`;
-    // diffing against HEAD also captures anything the worker staged.
-    // --binary (T-026) records binary hunks as `GIT binary patch` literal
-    // sections carrying the full 40-hex index lines git apply requires,
-    // instead of the lossy "Binary files … differ" stub that can never
-    // replay. Output stays printable ASCII + newlines — still a string.
+    // --intent-to-add makes untracked new files appear in `git diff`.
+    // The diff target is the lease's recorded baseSha, NOT HEAD (T-044): a
+    // worker that commits (violating the prompt rule — prompts reinforce,
+    // never implement, policy, spec §3.6) moves HEAD, and `git diff HEAD`
+    // then reads EMPTY — the commit got mislabeled a NO-OP and the only
+    // copy of the work destroyed at disposal. Diffing the pinned base makes
+    // NO-OP mean its honest semantics — "no change relative to the base" —
+    // and is structurally inert for every non-committing worker: each lease
+    // checks out at baseSha, so HEAD === baseSha until a commit moves it,
+    // and the bytes are identical (the parse-repair precedent of changing
+    // nothing for every input that was already fine). --binary (T-026)
+    // records binary hunks as `GIT binary patch` literal sections carrying
+    // the full 40-hex index lines git apply requires, instead of the lossy
+    // "Binary files … differ" stub that can never replay. Output stays
+    // printable ASCII + newlines — still a string.
     git(lease.path, ['add', '-A', '--intent-to-add', '.'])
-    return git(lease.path, ['diff', 'HEAD', '--binary'])
+    return git(lease.path, ['diff', lease.baseSha, '--binary'])
   }
 
   dispose(lease: WorkspaceLease): void {
