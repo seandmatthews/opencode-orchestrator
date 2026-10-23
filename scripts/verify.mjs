@@ -324,14 +324,18 @@ const REPORT_GATES = [
 ]
 const CLI_GATES = ['--gate', 'check-a=node -e "process.exit(0)"', '--gate', 'check-b=node -e "process.exit(0)"']
 
-// Capture a diff exactly like src/workspace/worktree.ts: add -A --intent-to-add, diff HEAD --binary.
+// Capture a diff exactly like src/workspace/worktree.ts (T-044: diff the
+// recorded base, not HEAD — for this detached-at-HEAD maker HEAD === base,
+// so the bytes are identical to the pre-T-044 HEAD form): add -A
+// --intent-to-add, diff <base> --binary.
 function captureDiff(modifier) {
   const maker = join(intRoot, 'wt-maker')
-  igit('worktree', 'add', maker, '--detach', 'HEAD')
+  const base = igit('rev-parse', 'HEAD').trim()
+  igit('worktree', 'add', maker, '--detach', base)
   try {
     modifier(maker)
     run('git', ['-C', maker, 'add', '-A', '--intent-to-add', '.'])
-    return run('git', ['-C', maker, 'diff', 'HEAD', '--binary'])
+    return run('git', ['-C', maker, 'diff', base, '--binary'])
   } finally {
     igit('worktree', 'remove', '--force', maker)
   }
@@ -950,6 +954,16 @@ try {
   ok(true, 'baseline-gate self-check exit 0')
 } catch (e) {
   fail(`baseline-gate self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
+// ---------- Gate 1.30: evidence-destruction guard (T-044) ----------
+section('Gate 1.30 — evidence-destruction guard (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-diff-basesha.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'diff-basesha self-check exit 0')
+} catch (e) {
+  fail(`diff-basesha self-check failed: ${e.status ?? e.message}`)
   finish()
 }
 

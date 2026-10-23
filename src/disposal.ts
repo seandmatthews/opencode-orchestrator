@@ -26,6 +26,9 @@ function errorMessage(e: unknown): string {
 
 export interface RunReportLike {
   repo?: string
+  /** The run's pinned base (report baseSha): the tip every worker lease
+   *  branch sits at unless a worker committed (T-044's guard reads it). */
+  baseSha?: string
   candidates?: { id: string; workspacePath: string | null }[]
 }
 
@@ -44,11 +47,32 @@ export interface RunResult {
   failed: number
 }
 
-export function removeBranch(repo: string, branch: string, res: RunResult): void {
+/** The T-044 branch guard: a `swarm/*` branch whose tip sits beyond the
+ *  run's baseSha carries worker commits — evidence, refused without force.
+ *  `expectedBaseSha` null/absent (no report, no recorded base) leaves the
+ *  pre-T-044 behavior untouched; `force` is the same explicit human
+ *  override the dirty-refusal honors (clean's --force; gc never passes it). */
+export interface BranchGuard {
+  expectedBaseSha?: string | null
+  force?: boolean
+}
+
+export function removeBranch(repo: string, branch: string, res: RunResult, guard: BranchGuard = {}): void {
   try {
     if (git(repo, ['branch', '--list', branch]).trim() === '') {
       console.log(`branch already gone: ${branch}`)
       return
+    }
+    if (typeof guard.expectedBaseSha === 'string' && guard.expectedBaseSha !== '') {
+      const tip = git(repo, ['rev-parse', branch]).trim()
+      if (tip !== guard.expectedBaseSha && !guard.force) {
+        console.error(
+          `refused (branch ${branch} carries commits beyond baseSha — evidence; re-run with --force to discard)` +
+          ` tip=${tip.slice(0, 12)} base=${guard.expectedBaseSha.slice(0, 12)}`,
+        )
+        res.refused++
+        return
+      }
     }
     git(repo, ['branch', '-D', branch])
     console.log(`removed branch: ${branch}`)
@@ -59,12 +83,16 @@ export function removeBranch(repo: string, branch: string, res: RunResult): void
   }
 }
 
-/** Per-worktree disposal loop — the T-002 semantics, unchanged. */
+/** Per-worktree disposal loop — the T-002 semantics, unchanged except the
+ *  T-044 branch guard: `expectedBaseSha` (the report's baseSha, when a run
+ *  has one) makes every removeBranch below refuse a branch whose tip sits
+ *  beyond the base — a committing worker's evidence, not garbage. */
 export function disposeTargets(
   repo: string,
   targets: { path: string; fallbackBranch: string | null }[],
   force: boolean,
   res: RunResult,
+  expectedBaseSha: string | null = null,
 ): void {
   const registered = registeredWorktrees(repo)
   for (const t of targets) {
@@ -74,7 +102,7 @@ export function disposeTargets(
     if (observed === undefined) {
       if (!existsSync(t.path)) {
         console.log(`already gone: ${t.path}`)
-        if (branch) removeBranch(repo, branch, res)
+        if (branch) removeBranch(repo, branch, res, { expectedBaseSha, force })
         continue
       }
       console.error(`refused (exists but is not a registered git worktree — inspect manually): ${t.path}`)
@@ -114,6 +142,6 @@ export function disposeTargets(
       console.log(`removed worktree (pruned stale registration): ${t.path}`)
       res.removed++
     }
-    if (branch) removeBranch(repo, branch, res)
+    if (branch) removeBranch(repo, branch, res, { expectedBaseSha, force })
   }
 }
