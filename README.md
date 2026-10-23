@@ -275,4 +275,5 @@ decided.
 - [docs/ROADMAP.md](docs/ROADMAP.md) — milestone status and what is next
 - [docs/decisions.md](docs/decisions.md) — decisions that are settled; cite them, don't relitigate them
 - [docs/tickets/](docs/tickets/README.md) — the work queue and the record of past work
+- [docs/adversarial-review-2026-10-23.md](docs/adversarial-review-2026-10-23.md) — the 2026-10-23 adversarial review: top findings in T-042..T-048, everything else recorded here with dispositions
 - [docs/spec/inference-refinery-v2.md](docs/spec/inference-refinery-v2.md) — the full V2 architecture spec this repo implements piece by piece
