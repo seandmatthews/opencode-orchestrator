@@ -124,9 +124,37 @@ existing fast-tier fixtures whose real-CLI gates were red at their own
 bases followed the contract (base-state content committed; every
 assertion at full strength, re-measured green): Gate 1.17 S5, Gate 1.19,
 Gate 1.21 S3, Gate 1.24 G5b/G5c, Gate 1.25 S6. Full fast tier ALL GREEN
-(1641 ok). Gate 2 owed (the run pipeline entry changed — the standard
-e2e now runs the baseline leg over the demo fixture's green base,
-additive stdout only); Gate 3 n/a (no adapter touched).
+(1641 ok). Gate 3 n/a (no adapter touched).
+
+**Gate 2, review round 1 (2026-10-23, run `20261023204747`): one red
+assertion, disposition a re-run — the recorded worker NO-OP class, not
+this change.** The real e2e (baseline leg green over the demo fixture's
+base — `baseline-check.json` in the run dir records build+test PASS,
+outcome green — then a full 2-round `--gate-retry --verifier-model` run)
+went red on exactly one assertion: `c02-r2: diff non-empty (0 bytes)`.
+Diagnosis from the surviving evidence: the worker was properly leased
+and based, read its OWN lease (`worker.log`: package.json/calc.js/
+build.js/test.js at `wt\c02-r2\`), was handed a round-2 brief asserting
+the repo has `vec3.js` — a file that exists only in round-1 c02's
+survivor diff (`c02/diff.patch` creates it), not at the shared base
+round 2 re-leases at (T-030's design) — `Read vec3.js` failed, and the
+model exited 0 in 530s having edited nothing. The machinery worked: 0
+-byte diff → NO-OP elimination, no retry (a zero-byte diff is banned
+from `--gate-retry`), gates green on the untouched green base; the
+sibling c01-r2 (same composition, 13,026-byte diff, survivor) shows the
+loop itself ran, and it was the tier's ONLY failing assertion
+(`=== verify (full) complete: 1 failure(s) ===`) — every other
+candidate, loop, and hygiene/disposal assertion passed on the same run.
+T-043 independence:
+the change-set touches `src/cli.ts` only (its baseline lease fully
+completes and disposes before `runSkeleton`); `src/runner.ts` and
+`src/rounds.ts` — the composition and diff-capture paths — are
+untouched, and the false premise was authored by the round-2 planner
+model over the composed survivor packet. Recorded as the 2026-10-23
+worker-class observation under Known issue #6 (distinct mechanism:
+brief-premise mismatch, not permission auto-reject). Disposition, the
+T-038/T-040 class discipline: a re-run, no code change, no weakened
+assertion.
 
 ## Verification
 

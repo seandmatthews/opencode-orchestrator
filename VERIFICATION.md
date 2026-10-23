@@ -3955,6 +3955,41 @@ landing in T-017's Landed section).
      are model-behavior variance, and the remedy is a re-run (the T-038
      run-1 → run-2 precedent), not a weakening of the NO-OP rule or a
      relitigation of the blind-reroll ban (decisions.md 2026-10-21).
+     **2026-10-23 worker-class observation, distinct mechanism (run
+     20261023204747, the T-043 lane's driving Gate 2 red): a round-2 brief
+     whose PREMISE does not hold at the shared base.** One worker (c02-r2)
+     — properly leased, properly based, and reading its OWN lease this
+     time (`worker.log`: `Read package.json`/`calc.js`/`build.js`/
+     `test.js` at `wt\c02-r2\`) — was handed a planner-composed round-2
+     brief describing the repo "with: vec3.js exposing
+     add/sub/scale/dot/cross/…" (the T-030 composition feeding the
+     round-2 planner round-1 survivor evidence); `vec3.js` exists only in
+     round-1 c02's SURVIVOR DIFF (`c02/diff.patch` creates `b/vec3.js`),
+     not at the base round 2 re-leases at — so `Read vec3.js` failed
+     (`File not found: …wt\c02-r2\vec3.js`), the worker gave up WITHOUT
+     editing, and exited 0 in 530s with zero edits. The ladder worked
+     exactly as designed: 0-byte diff → NO-OP elimination
+     (`passedAllGates: false`, no `--gate-retry` — a zero-byte diff has no
+     failure output to feed back and is banned from retrying,
+     decisions.md 2026-10-21), gates green on the untouched green base —
+     and it was the tier's ONLY failing assertion (`c02-r2: diff
+     non-empty`; `verify (full) complete: 1 failure(s)`), every other
+     candidate, loop, and hygiene/disposal assertion green on the same
+     run. Composition
+     provenance: the false premise was authored by the round-2 planner
+     model over the composed survivor packet — `src/rounds.ts` and
+     `src/runner.ts` are untouched by the T-043 change-set (src/cli.ts
+     only, whose baseline lease fully completes and disposes before
+     `runSkeleton`), and the sibling round-2 candidate (c01-r2, same
+     composition, 13,026-byte diff, survivor) demonstrates the loop
+     itself ran. Same disposition as every observation in this class: no
+     code change, nothing weakened — the remedy is a re-run. The recorded
+     hazard for the rounds successor: a planner may present
+     survivor-CREATED files as base state; whether the composed packet
+     should carry an explicit "round 2 re-leases at the SAME base —
+     survivor files are NOT present" framing is a T-030/T-031-successor
+     question (the loop stays capped at 2 and its improvement-signal
+     question stays open, decisions.md 2026-10-20).
    - Output-content threats (e.g. a planner brief containing a hostile
      path) are a *different* threat class — §14 governs execution
      capability, not output content; sanitization is carved (T-023).
