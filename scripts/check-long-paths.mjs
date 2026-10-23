@@ -140,8 +140,12 @@ function main() {
     '  process.exit(1)',
     '}',
   ].join('\n') + '\n')
-  // The deep file itself, at the planned depth, committed at baseline.
-  write(DEEP_REL, 'deep baseline\n')
+  // The deep file itself, at the planned depth, committed at baseline. T-043:
+  // the baseline content already carries the gate's marker line so the
+  // deep-file gate is green on the untouched base (pre-T-043 it only became
+  // green after the worker's append); the append still changes the file, so
+  // the diff stays non-empty.
+  write(DEEP_REL, 'deep baseline\nlong-path gate line\n')
 
   git('init', '-b', 'main')
   git(...IDENTITY, 'add', '-A')

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,7 +10,7 @@ import type { ResolvedJob } from './runner.js'
 import { parseJobsSpec, commandPairingRefusal } from './scheduler.js'
 import type { JobsSpec } from './scheduler.js'
 import { ingest } from './store/index.js'
-import type { WorkerAdapter } from './types.js'
+import type { GateResult, WorkerAdapter } from './types.js'
 import { WorktreeProvider } from './workspace/worktree.js'
 import { OpenCodeWorker } from './worker/opencode.js'
 import { MachineWorker } from './worker/machine.js'
@@ -97,6 +97,15 @@ Options:
   --run-root <path>        Where runs live (default: C:\\swarm)
   --force-lock             Take the checkout lock even if another (suspected-
                            stale) holder still owns it
+  --allow-red-base         Proceed over a base whose own gates fail (T-043).
+                           Before any dispatch the run leases one worktree at
+                           the base SHA and proves every distinct gate the
+                           run will use green on that untouched tree; a red
+                           base refuses before any planner/worker tokens are
+                           spent. This flag is the one explicit human
+                           override (the --force-lock posture, not a knob):
+                           with it the run proceeds and the red-base evidence
+                           rides <runDir>/baseline-check.json.
   --db <path>              SQLite DB for durable run records (default:
                            C:\\swarm\\refinery.db)
   --timeout-min <n>        Per-worker wall-clock limit in minutes (default: 15)
@@ -155,6 +164,8 @@ interface Options {
   base: string
   runRoot: string
   forceLock: boolean
+  /** T-043: the one explicit human override of a red baseline check. */
+  allowRedBase: boolean
   db: string
   timeoutMs: number
   maxAttempts: number
@@ -205,6 +216,7 @@ function parseArgs(argv: string[]): Options {
     base: 'HEAD',
     runRoot: 'C:\\swarm',
     forceLock: false,
+    allowRedBase: false,
     db: 'C:\\swarm\\refinery.db',
     timeoutMs: 15 * 60_000,
     maxAttempts: 1,
@@ -269,6 +281,13 @@ function parseArgs(argv: string[]): Options {
       case '--base': opts.base = value(); break
       case '--run-root': opts.runRoot = value(); break
       case '--force-lock': opts.forceLock = true; break
+      case '--allow-red-base':
+        // T-043: a run-level boolean override — the --force-lock posture (a
+        // named human override, not a knob). Parsed here so the whole argv is
+        // read first; the check itself runs after baseSha resolution, under
+        // the checkout lock, before runSkeleton.
+        opts.allowRedBase = true
+        break
       case '--db': opts.db = value(); break
       case '--timeout-min': opts.timeoutMs = Number(value()) * 60_000; break
       case '--max-attempts': {
@@ -484,6 +503,159 @@ async function main(): Promise<void> {
   }
 }
 
+/**
+ * T-043: the reserved baseline lease id. Every job-derived lease id is
+ * `wt/<jobId>` (plus `-a<n>` on retries), and job ids are validated against
+ * SPEC_ID_PATTERN (`[a-z0-9][a-z0-9-]*`, src/scheduler.ts:39) — candidate ids
+ * `c01..cNN` included, and rounds' `-r2` suffixes stay inside the charset.
+ * The underscore is outside that charset, so `wt/_baseline` can never collide
+ * with any job's lease or branch, by construction rather than by reservation
+ * list. Its branch is `swarm/wt--baseline` (branchForLeaseId).
+ */
+const BASELINE_LEASE_ID = 'wt/_baseline'
+
+/**
+ * The distinct gates the run will use (T-043): the run-level set in default
+ * mode; the deduplicated union across jobs in --jobs mode — a job's `gates`
+ * REPLACE the run-level set (src/scheduler.ts's JobSpec contract, mirrored by
+ * resolveJobs's `j.gates ?? opts.gates`), so the union is over each job's
+ * effective set. Dedup key is name+command (two gates sharing a name with
+ * different commands are distinct checks); first-seen order is kept.
+ */
+function distinctGatesFor(opts: Options, jobsSpec: JobsSpec | null): { name: string; command: string }[] {
+  const specs = jobsSpec ? jobsSpec.jobs.flatMap((j) => j.gates ?? opts.gates) : opts.gates
+  const seen = new Set<string>()
+  const distinct: { name: string; command: string }[] = []
+  for (const g of specs) {
+    const key = `${g.name}\u0000${g.command}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    distinct.push(g)
+  }
+  return distinct
+}
+
+/** The T-043 refusal/override artifact — written on every path (green, red
+ *  refusal, red override), the report.json-shape-is-for-completed-runs rule
+ *  being why this is its own file. Gates are GateResult[] verbatim (the
+ *  CommandGate stamp carries each command, T-027). */
+interface BaselineCheckRecord {
+  baseSha: string
+  /** The reserved baseline lease; null when the run carried no gates (the
+   *  vacuous check — nothing was leased or run). */
+  lease: { id: string; branch: string } | null
+  gates: GateResult[]
+  /** green = every gate passed on the untouched base (or none to run); red =
+   *  at least one failed. */
+  outcome: 'green' | 'red'
+  /** True only when --allow-red-base overrode a red outcome and the run
+   *  proceeded — recorded so a report can never silently mean "passed gates
+   *  over a red base". */
+  overridden: boolean
+  checkedAt: string
+}
+
+/**
+ * T-043 baseline gate sanity: prove the run's gates green on the UNTOUCHED
+ * base before runSkeleton — zero planner/worker tokens are spent on a red
+ * base. Leases one worktree at baseSha through the same WorktreeProvider the
+ * candidates will use, runs every distinct gate sequentially with the
+ * standard gate timeout (the CommandGate default the run's own gates run
+ * under), under the checkout lock main() already holds. The worktree and its
+ * swarm/* branch are disposed on every path before returning or throwing.
+ *
+ * NO-OP symmetry (AGENTS.md #7): gates on an untouched tree prove nothing
+ * ABOUT A WORKER — but they are the only thing that proves the base itself is
+ * green; without them a gate FAIL is uninterpretable (candidate-broke-it vs
+ * base-was-always-broken). A red base refuses (the thrown block below, exit 1
+ * through main's catch) unless --allow-red-base was given — the one explicit
+ * human override ("repair a red base" is a legitimate goal; the --force-lock
+ * posture: named override, not a knob). Either way the evidence rides
+ * <artifactsDir>/baseline-check.json.
+ */
+async function checkBaselineGates(
+  opts: Options,
+  gates: { name: string; command: string }[],
+  artifactsDir: string,
+  baseSha: string,
+): Promise<BaselineCheckRecord> {
+  const checkedAt = new Date().toISOString()
+  const artifactPath = join(artifactsDir, 'baseline-check.json')
+  if (gates.length === 0) {
+    // Vacuous: a run with no gates has nothing to verify about its base (the
+    // ladder's own vacuous-pass posture). Recorded honestly, nothing run.
+    const record: BaselineCheckRecord = { baseSha, lease: null, gates: [], outcome: 'green', overridden: false, checkedAt }
+    writeFileSync(artifactPath, JSON.stringify(record, null, 2))
+    console.log('baseline: no gates on this run — the base check is vacuous')
+    return record
+  }
+  console.log(`baseline: proving the run's ${gates.length} distinct gate${gates.length > 1 ? 's' : ''} green on the untouched base @ ${baseSha.slice(0, 12)}`)
+  const workspaces = new WorktreeProvider(opts.repo, artifactsDir)
+  const lease = workspaces.lease(BASELINE_LEASE_ID, baseSha)
+  const results: GateResult[] = []
+  try {
+    for (const g of gates) {
+      // The standard gate object: same command, same default timeout the
+      // candidates' gates run under (src/gate/command.ts).
+      const r = await new CommandGate(g.name, g.command).run(lease.path)
+      results.push(r)
+      console.log(`[baseline] gate ${r.name}: ${r.passed ? 'PASS' : 'FAIL'} (${(r.durationMs / 1000).toFixed(1)}s)`)
+    }
+  } finally {
+    // Dispose on every path — the lease is scaffolding, never evidence. Both
+    // steps are attempted even if the first fails: a leftover swarm/wt--
+    // baseline branch would make the NEXT run's baseline lease refuse
+    // (`git worktree add -b` refuses an existing branch), so a disposal
+    // failure is loud and aborts the run rather than poisoning the repo.
+    let disposalError: unknown = null
+    try {
+      workspaces.dispose(lease)
+    } catch (e) {
+      disposalError = e
+    }
+    try {
+      execFileSync('git', ['branch', '-D', lease.branch], { cwd: opts.repo, stdio: 'ignore', windowsHide: true })
+    } catch (e) {
+      disposalError ??= e
+    }
+    if (disposalError !== null) {
+      throw new Error(`baseline worktree disposal failed (${disposalError instanceof Error ? disposalError.message : String(disposalError)}) — remove the leftover ${lease.branch} branch (npm run clean -- --run <runId>, or git branch -D ${lease.branch}) before the next run`)
+    }
+  }
+  const failed = results.filter((r) => !r.passed)
+  const record: BaselineCheckRecord = {
+    baseSha,
+    lease: { id: lease.id, branch: lease.branch },
+    gates: results,
+    outcome: failed.length > 0 ? 'red' : 'green',
+    overridden: failed.length > 0 && opts.allowRedBase,
+    checkedAt,
+  }
+  writeFileSync(artifactPath, JSON.stringify(record, null, 2))
+  if (failed.length === 0) {
+    console.log(`baseline: green — all ${results.length} gate${results.length > 1 ? 's' : ''} pass on the base commit`)
+    return record
+  }
+  // The loud per-gate block, printed on both faces: the refusal points at the
+  // override; the override names itself.
+  const block = [
+    `BASELINE ${record.overridden ? 'RED (OVERRIDDEN)' : 'GATE FAILURE'} — the base commit itself fails ${failed.length} of the run's ${results.length} gate${results.length > 1 ? 's' : ''}:`,
+    ...failed.map((r) => `  gate ${r.name}: FAIL${r.exitCode !== null ? ` (exit ${r.exitCode})` : ''} — command: ${r.command}`),
+    ...failed.flatMap((r) => (r.outputTail.trim() === '' ? [] : [`    output tail: ${r.outputTail.trim().split('\n').join('\n    ')}`])),
+  ]
+  if (record.overridden) {
+    console.log(block.join('\n'))
+    console.log(`baseline: proceeding over the red base (--allow-red-base) — the evidence rides ${artifactPath}`)
+    return record
+  }
+  throw new Error([
+    block.join('\n'),
+    `Every candidate would fail these gates for reasons unrelated to its work; refusing before any dispatch.`,
+    `baseline evidence: ${artifactPath}`,
+    `Re-run with --allow-red-base to proceed over a red base (a named human override — the refusal is the default).`,
+  ].join('\n'))
+}
+
 async function runPipeline(opts: Options, jobsSpec: JobsSpec | null): Promise<void> {
   if (opts.gates.length === 0) {
     console.warn('warning: no --gate given; every candidate passes vacuously')
@@ -515,6 +687,15 @@ async function runPipeline(opts: Options, jobsSpec: JobsSpec | null): Promise<vo
   console.log(`workers:  ${opts.model} (worker: ${opts.workerId}${rolesText ? `, ${rolesText}` : ''})`)
   console.log(`goal:     ${opts.goal || (jobsSpec ? '(none — briefs come from the jobs spec)' : '')}`)
   console.log(`artifacts: ${artifactsDir}`)
+  console.log('')
+
+  // T-043 baseline gate sanity: prove the run's distinct gates green on the
+  // untouched base BEFORE runSkeleton — zero planner/worker tokens spent on a
+  // red base, under the checkout lock main() already holds. Throws the
+  // refusal (exit 1 through main's catch, lock released by its finally)
+  // unless --allow-red-base was given; either way the evidence rides
+  // <artifactsDir>/baseline-check.json.
+  await checkBaselineGates(opts, distinctGatesFor(opts, jobsSpec), artifactsDir, baseSha)
   console.log('')
 
   const report = await runSkeleton({

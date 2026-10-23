@@ -1,6 +1,6 @@
 # T-043 — Baseline gate sanity: gates proven green on the untouched base before any dispatch; `--allow-red-base` override
 
-**Status:** proposed
+**Status:** done 2026-10-23
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 2
 **Depends on:** —
@@ -62,36 +62,71 @@ refuse to interpret FAILs against a base it never verified.
 
 ## Acceptance criteria
 
-- [ ] **Red bar recorded first** (AGENTS #8): a real CLI run (machine-worker
+- [x] **Red bar recorded first** (AGENTS #8): a real CLI run (machine-worker
       composition acceptable — the trigger analysis records the choice)
       against a fixture whose base is red (break `test.js` at the base
       commit) proceeds to dispatch candidates today; the recorded run dir +
       report is the red evidence — referenced from this ticket.
-- [ ] Green, refusal: the same red-base fixture, post-change — the run
+- [x] Green, refusal: the same red-base fixture, post-change — the run
       refuses before any dispatch (zero planner/worker dispatch evidence in
       the run dir), exits non-zero, prints the per-gate failure block, and
       writes `baseline-check.json` naming gate name/command/exitCode —
       pinned by a new fast-tier check (token-free, real CLI invocation with
       a stub/machine composition).
-- [ ] Green, override: the same run with `--allow-red-base` dispatches
+- [x] Green, override: the same run with `--allow-red-base` dispatches
       candidates AND carries the recorded baseline block in the run dir —
       pinned by the same check.
-- [ ] Green-base runs are unchanged: against the standard demo fixture the
+- [x] Green-base runs are unchanged: against the standard demo fixture the
       baseline gates pass, the run proceeds, and the report.json is
       shape-identical to today's (additive `baseline-check.json` aside) —
       pinned by the existing Gate 1 fixture check riding green.
-- [ ] `--jobs` mode: per-job gate sets are checked (deduplicated union) —
+- [x] `--jobs` mode: per-job gate sets are checked (deduplicated union) —
       pinned by the check script with a two-job spec carrying disjoint
       gates, one red.
-- [ ] The baseline worktree is disposed on every path (pass, refusal,
+- [x] The baseline worktree is disposed on every path (pass, refusal,
       override) and its `swarm/*` branch removed — pinned by the check
       script asserting no residual worktree/branch after each path.
-- [ ] VERIFICATION.md extended in the same change-set (AGENTS #6) — pinned
+- [x] VERIFICATION.md extended in the same change-set (AGENTS #6) — pinned
       by the full fast tier ALL GREEN.
-- [ ] **Gate 2 owed** (`src/cli.ts`/runner path changed); trigger analysis
+- [x] **Gate 2 owed** (`src/cli.ts`/runner path changed); trigger analysis
       recorded at landing. **Gate 3 n/a** (no adapter touched).
 
 ## Landed
+
+`src/cli.ts` only — `runPipeline` now runs `checkBaselineGates` after
+`baseSha` resolution and before `runSkeleton`: one lease at the reserved
+id `wt/_baseline` (underscore outside the job-id charset — SPEC_ID_PATTERN
+`[a-z0-9][a-z0-9-]*` — so no job lease can ever collide), every DISTINCT
+gate (name+command dedup; the run-level set in default mode, the
+deduplicated union of per-job effective sets in `--jobs` mode) run
+sequentially with the standard CommandGate timeout, worktree removed and
+`swarm/wt--baseline` branch deleted on every path (a disposal failure
+aborts loudly — a leftover branch would refuse the next run's baseline
+lease), and `<runDir>/baseline-check.json` written on every path
+(green/refusal/override, plus the vacuous no-gates record). Red base ⇒ the
+loud per-gate block thrown (exit 1, zero planner/worker tokens, lock
+released by main's finally) unless `--allow-red-base` (the --force-lock
+posture) proceeds with the `BASELINE RED (OVERRIDDEN)` block printed and
+`overridden: true` recorded. No verdict, ladder, or report.json change.
+
+Red bar (pre-change tree = main at 2106975, machine-worker composition —
+the trigger analysis: a red base is a run-pipeline property, not an
+adapter property): run `20261023201554` at
+`C:\swarm\verify-red\T-043-redbar\runs\20261023201554` — exit 0, both
+candidates dispatched and burned, reported as bad candidates over a base
+that was always broken (report.json + dispatch.jsonl kept as the
+evidence).
+
+Pinned by **Gate 1.29** (`scripts/check-baseline-gate.mjs`, wired into
+`scripts/verify.mjs` fast tier): 38 ok, ALL GREEN — refusal/union/override/
+green-inertness/run-level-set/vacuous faces, per-path disposal. Five
+existing fast-tier fixtures whose real-CLI gates were red at their own
+bases followed the contract (base-state content committed; every
+assertion at full strength, re-measured green): Gate 1.17 S5, Gate 1.19,
+Gate 1.21 S3, Gate 1.24 G5b/G5c, Gate 1.25 S6. Full fast tier ALL GREEN
+(1641 ok). Gate 2 owed (the run pipeline entry changed — the standard
+e2e now runs the baseline leg over the demo fixture's green base,
+additive stdout only); Gate 3 n/a (no adapter touched).
 
 ## Verification
 

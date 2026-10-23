@@ -509,6 +509,10 @@ async function main() {
     const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', windowsHide: true })
     git('init', '-b', 'main')
     writeFileSync(join(repo, 'README.md'), 'verifier e2e sandbox\n')
+    // T-043: base-state marker so the marker gate is green on the untouched
+    // base (pre-T-043 the file only existed after the worker ran); the worker
+    // writes different content, so the diff stays non-empty.
+    writeFileSync(join(repo, 'marker-a.txt'), 'verifier base state\n')
     git('-c', 'user.name=check-verifier', '-c', 'user.email=verifier@local', 'add', '-A')
     git('-c', 'user.name=check-verifier', '-c', 'user.email=verifier@local', 'commit', '-m', 'baseline')
 

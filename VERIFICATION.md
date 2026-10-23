@@ -3610,6 +3610,124 @@ harness reports the override target — the quirk is intact and the
 adapter's PWD/OLDPWD pinning remains load-bearing; the transport change
 is invisible to the probe.
 
+## Gate 1.29 — baseline gate sanity: red base refuses before dispatch (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-baseline-gate.mjs
+```
+
+Pins T-043: the run pipeline (`runPipeline`, src/cli.ts) proves the run's
+gates green on the UNTOUCHED base before `runSkeleton` — zero planner/worker
+tokens spent on a red base, under the checkout lock main() already holds.
+The NO-OP rule's inverse (AGENTS.md #7): gates on an untouched tree prove
+nothing ABOUT A WORKER, but they are the only thing that proves the BASE
+itself is green — without them a gate FAIL is uninterpretable
+(candidate-broke-it vs base-was-always-broken), which is exactly how the
+T-042-era review's F9 class (dependency-blind runs over a broken base)
+burned whole runs. The mechanics: after `baseSha` resolution, one worktree
+is leased at the base SHA through the same `WorktreeProvider` under the
+RESERVED lease id `wt/_baseline` (branch `swarm/wt--baseline`) — reserved by
+charset, not by list: job ids are validated against SPEC_ID_PATTERN
+`[a-z0-9][a-z0-9-]*` (src/scheduler.ts:39, candidate ids `c01..cNN` and
+rounds' `-r2` suffixes included) and every job lease is `wt/<jobId>` (+
+`-a<n>` on retries), so an underscore can never collide with a job-derived
+lease; every DISTINCT gate the run will use (name+command dedup key) runs
+sequentially there with the standard CommandGate default timeout — the
+run-level set in default mode, the deduplicated union across jobs'
+effective sets (`j.gates ?? opts.gates`) in `--jobs` mode; then the
+worktree is removed AND the branch deleted on every path (a leftover
+`swarm/wt--baseline` would make the NEXT run's baseline lease refuse, so
+a disposal failure aborts the run loudly instead of poisoning the repo).
+The evidence rides `<runDir>/baseline-check.json` on EVERY path — its own
+artifact because the report.json shape is for completed runs and a refusal
+never produces one: `{baseSha, lease, gates: GateResult[] (the T-027
+command stamp included), outcome: green|red, overridden, checkedAt}`.
+A red base throws the loud per-gate block (name, command, exitCode,
+outputTail, and the override hint) — exit 1 through main's catch, the
+lock released by its finally — unless `--allow-red-base` was given: the
+one explicit human override (the `--force-lock` posture — a named
+override, not a knob), under which the run proceeds, the block still
+prints with a `BASELINE RED (OVERRIDDEN)` header, and the record carries
+`overridden: true` so a report can never silently mean "passed gates over
+a red base". A no-gates run records the vacuous check honestly (no lease,
+empty gates, outcome green). Legs, zero model tokens (real CLI, `machine`
+workers, fresh throwaway repo per face):
+
+- **R0** — `--help` documents `--allow-red-base`.
+- **R1 — the refusal**: red base (test.js exits 1 at the base commit) →
+  exit 1, the loud block with gate name/command/exitCode/outputTail/override
+  hint, baseline-check.json naming baseSha, the reserved lease, and every
+  gate's name+command+exitCode; ZERO dispatch evidence in the run dir (no
+  dispatch.jsonl, no report.json, no candidate evidence dir — the refusal
+  precedes runSkeleton); the worktree disposed and `swarm/*` branch gone.
+- **R2 — the deduplicated union**: two disjoint-gated jobs, one red, plus
+  a shared name+command pair in both → 4 raw entries check as 3 distinct
+  gates in first-seen order; the refusal names ONLY the red one; disposal
+  held.
+- **R3 — the override**: the same red base with `--allow-red-base` →
+  exit 0, candidates dispatched (dispatch.jsonl + report.json), the red
+  block printed with the OVERRIDDEN header, the record carrying outcome
+  red + overridden true + every command, and the gates still deciding the
+  candidate's verdict over the red base (eliminated, never silently
+  passed).
+- **R4 — green-base inertness**: green base → the run proceeds, the
+  baseline leg visible and green on stdout, the record green with the
+  reserved lease named, report.json keeps today's top-level key set (no
+  baseline key — additive baseline-check.json aside; the same
+  shape-identity posture Gate 1.21 S1b pins field-by-field), and no
+  residual baseline worktree or `swarm/wt--baseline` branch.
+- **R5 — the run-level set**: jobs without per-job gates default to the
+  run-level `--gate` flags, and that is exactly what the baseline checks
+  (the red run-level gate refuses).
+- **R6 — vacuous**: a no-gates run records `{lease: null, gates: [],
+  outcome: green}` and leases nothing.
+
+**Red bar (AGENTS.md #8), recorded BEFORE the change landed** — pre-change
+tree (the lane at 2106975 = main, engine untouched), a real CLI run against
+a red-base fixture (machine-worker composition, the ticket-sanctioned
+token-free choice; the trigger analysis: a red base is a property of the
+run pipeline, not of any adapter, so the machine composition exercises the
+real dispatch path without spending tokens): run `20261023201554` at
+`C:\swarm\verify-red\T-043-redbar\runs\20261023201554` — exit 0, both
+candidates dispatched (2 dispatch lines in dispatch.jsonl), both burned
+their worker+gate cycles and were reported as bad candidates
+(`build PASS, test FAIL => FAIL`), the honest report reading "2 bad
+candidates" instead of "the base is red". Post-change the same fixture
+refuses (R1's shape, smoke-verified at
+`C:\swarm\verify-red\T-043-postchange` before the faces above were built).
+
+**Existing checks — updated to follow the contract, none weakened
+(AGENTS.md #8, the T-042 precedent):** five fast-tier fixtures drove real
+CLI runs whose gates were RED on their own untouched bases — marker-file
+gates that only pass after the worker runs (`accessSync('marker-a.txt')`
+and kin) and the deep-file gate. Under the new contract those are
+deliberate repair-a-red-base runs and would refuse; the fixtures follow by
+committing base-state content that keeps their bases green, with the
+worked diff still non-empty and every discriminating assertion at full
+strength: Gate 1.17 S5 (check-machine-worker.mjs — base-state marker-a/b
+files, content differing from what the workers write), Gate 1.25 S6
+(check-verifier.mjs — base-state marker-a), Gate 1.21 S3
+(check-per-role-harness.mjs — base-state marker-a), Gate 1.24 G5b/G5c
+(check-gate-retry.mjs — marker.txt committed at base with a PASSING value
+`fixed content v0` that still differs from every value the worker writes,
+so attempt 1's broken marker still fails the gate, the retry still
+converts, and the retry's captured diff is still non-empty), and Gate 1.19
+(check-long-paths.mjs — the deep file's baseline content carries the
+gate's marker line; the append still changes the file). All five re-measured
+ALL GREEN after the follow; Gates 1.22/1.26/1.28's CLI drives were already
+base-green (vacuous/demo gates) and are untouched.
+
+Not pinned here and carved by the ticket: verdict changes (none — the
+refusal precedes any verdict), report.json schema changes (none), gate
+parallelization (the baseline runs sequentially by design), and new numeric
+knobs (the gates run under their own standard timeout). **Gate 2 — owed
+and carried by the full tier** (the run pipeline entry changed): the
+standard real 2-round `--gate-retry --verifier-model` e2e now runs the
+baseline leg (build+test green on the fresh demo fixture) before its
+planner dispatch — additive stdout lines only, the fixture's own baseline
+being what Gate 1 regenerates green every fast-tier run. **Gate 3 — n/a**
+(no adapter touched).
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash

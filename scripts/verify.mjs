@@ -943,6 +943,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.29: baseline gate sanity (T-043) ----------
+section('Gate 1.29 — baseline gate sanity (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-baseline-gate.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'baseline-gate self-check exit 0')
+} catch (e) {
+  fail(`baseline-gate self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
