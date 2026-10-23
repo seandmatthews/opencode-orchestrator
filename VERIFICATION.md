@@ -3840,6 +3840,97 @@ capture and post-run clean ride the new path, byte-inert for
 non-committing workers (C4), so the run's shape is unchanged. **Gate 3 —
 n/a** (no adapter change).
 
+## Gate 1.31 — post-kill settle deadline: bounded wait after the verified tree kill (~40s, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-settle-deadline.mjs
+```
+
+Pins T-046 (the 2026-10-23 adversarial review's F6 — the one degradation
+path that converted "noisy cleanup failure" into "machine wedged until a
+human arrives"): both timed-run cores resolved only on the child's close,
+so a kill that could not finish the job (an ACL-protected or suspended
+root; a descendant outside the `/T` tree; any survivor holding an
+inherited stdio pipe) left the attempt's promise pending FOREVER —
+`driveJobs` never drained, and because runs serialize per-repo through a
+lock nothing reaps (src/lock.ts), the target repo was unusable until a
+human killed processes by hand and `--force-lock`ed. The adversarial
+probe's ~20-case × full-gate-timeout amplifier made one argv-hanging
+target cost ~100 minutes with the lock held.
+
+The change, identical in shape at both sites
+(`src/worker/run-with-timeout.ts`, `src/probe.ts`'s
+`executeProbeCommand` — now exported for this pin, the `snapshotTree`
+precedent): expiry arms `KILL_SETTLE_WINDOW_MS` — an exported documented
+constant (15s; the ticket's illustrative 60s shrunk: the verified kill
+completes synchronously before the window is armed and close delivery
+after a verified kill is sub-second, Gate 1.12 S4, so 15s is a >10x
+margin while keeping this gate's two abandonment faces at seconds each),
+NEVER a CLI knob (the `MAX_RETRY_FINDINGS` pattern). Close inside the
+window: today's behavior byte-for-byte (pinned by Gate 1.12 S4 riding
+green unchanged — kill success line, `exitCode: null`, no abandonment
+line). Close never arriving: the wait is abandoned — `timedOut: true`,
+`exitCode: null` (never a guess), the loud `CLEANUP FAIL: child did not
+settle 15s after verified tree kill — abandoning the wait (evidence
+follows in the log)` line joining `cleanupFailures` (the T-011
+vocabulary, already flowing to GateResult/WorkerResult and the candidate
+report), and the stdio streams destroyed so no parent-side pipe handle
+outlives the run. The window is armed at expiry in EVERY branch
+(kill-fired or not): a child that already exited can still wedge the
+wait through a pipe-holding descendant, and that shape gets no kill at
+all. Evidence, never a verdict: the run proceeds.
+
+The check constructs the exact wedge shape (documented in its header): a
+stub root spawns a DETACHED long-sleep child that inherits the root's
+pipes, then exits — the escaper is outside any `/T` walk (no live root to
+walk from) while holding the pipe's write end, so close can never fire.
+Zero model tokens, real process tables, never a mock:
+
+- **A1-A9 — the worker core** (`runChildWithTimeout`, the Gate 1.12 S4
+  seam): settles inside `timeoutMs + window + slack` (the outer guard
+  converts the pre-change forever-hang into the RED), `timedOut: true`,
+  `exitCode: null`, the abandonment line in `cleanupFailures` AND the
+  log, the log's `$ exit code: null (timed out)` line, the wait actually
+  lasting the window (elapsed ≥ timeout + window − 500ms), the escaper
+  demonstrably STILL ALIVE at abandonment (the wedge was real — it
+  escaped the kill's reach), and both stdio streams destroyed (no parent
+  handle).
+- **B0-B6 — the probe core** (`executeProbeCommand`): the same red/green
+  pair against the same stub.
+- **C1-C3 — the constant**: exported positive integer ≥ 1s; the probe
+  core imports it from the worker core (single source); `src/cli.ts`
+  mentions no settle anything (never a knob).
+- The check's own exit is the last assertion: after the sweep reaps the
+  escapers (they are outside every kill's reach by design — only the
+  check can reap them, AGENTS.md #10), an unref'd watchdog converts a
+  leaked-handle hang into a red.
+
+**Red bar (AGENTS.md #8), recorded BEFORE the change landed, two
+states of the same check, token-free:** at pristine main (4c99300, lane
+start): 11 failures of 13, exit 1 — the worker core's A1 RED with the
+outer guard firing at 26014ms (the forever-hang), the escaper
+demonstrably alive (A5 green: the wedge shape held), plus the
+missing-export/constant faces (B0/C1/C2). At the export-only
+intermediate (one word: `executeProbeCommand` exported, no behavior
+change): 15 failures of 19, exit 1 — BOTH cores' never-settling faces
+RED (A1 guard at 26012ms, B1 guard at 26088ms), both escapers alive.
+Post-change: all 19 assertions green, exit 0, both faces settling at
+~16s (1s timeout + 15s window), the check process draining naturally.
+
+Not pinned here and carved by the ticket: no core unification (a
+refactor, not this slice), no kill-verification change (`src/kill-tree.ts`
+untouched), no verdict semantics (`passedAllGates` and the ladder are
+untouched; the abandonment line is cleanup-failure evidence). Normal-path
+byte-identity is Gate 1.12's own S4 riding green, not re-pinned here.
+**Gate 2 — owed and carried by the full tier** (`src/worker/run-with-timeout.ts`
+— the core under BOTH worker adapters' timed runs —
+and `src/probe.ts` changed; trigger list, Gate 2's section): the standard
+real e2e run's worker/probe legs ride the new bounded wait inertly (no
+healthy leg reaches expiry + window), so the run's shape is unchanged; a
+real-run abandonment is not asserted (it needs a real wedge) — the
+no-regression half is what Gate 2 pins. **Gate 3 — n/a** (no adapter
+change; the adapters' own files are untouched).
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
