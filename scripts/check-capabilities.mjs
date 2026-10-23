@@ -21,7 +21,10 @@
 //      records its real argv and env.PWD/OLDPWD. 'artifact-only' and
 //      'worktree-read' → argv contains `--agent plan`; 'worktree-write'
 //      and absent → it never appears; PWD/OLDPWD equal req.cwd in all four
-//      cases; the spawn log line reflects the actual argv. The stub is the
+//      cases; the spawn log line reflects the actual argv. Since T-042 the
+//      prompt never appears in argv (the stdin transport — Gate 1.28 pins
+//      the transport itself; this pin keeps tracking the argv shape the
+//      policy translation produces). The stub is the
 //      node executable itself with the recorder injected via
 //      NODE_OPTIONS=--require (the adapter's spawn is list-form, so the
 //      recorder sees exactly the argv the adapter built).
@@ -287,9 +290,13 @@ const main = async () => {
         // node resolves its entry-module argument to an absolute path before
         // a --require preload runs, so the adapter's bare 'run' arrives as
         // <cwd>/run — pin its basename, everything after it verbatim.
-        t(`S2 [${c.name}]: the stub saw the adapter's argv — 'run' first, '-m <model>', prompt last`,
+        // T-042: the prompt NEVER appears in argv (the stdin transport) —
+        // the pre-T-042 'prompt last' pin is replaced by the stronger
+        // 'prompt absent' pin; the model is the terminal argv element.
+        t(`S2 [${c.name}]: the stub saw the adapter's argv — 'run' first, '-m <model>' last, prompt never in argv (T-042 stdin transport)`,
           basename(argv[1] ?? '').toLowerCase() === 'run' && argv.includes('-m') && argv.includes('fake/stub-model')
-          && argv[argv.length - 1] === 'the composed prompt')
+          && argv[argv.length - 1] === 'fake/stub-model'
+          && !JSON.stringify(argv).includes('the composed prompt'))
         if (c.restricted) {
           t(`S2 [${c.name}]: argv contains --agent plan`,
             agentIdx !== -1 && argv[agentIdx + 1] === 'plan')

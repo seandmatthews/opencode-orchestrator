@@ -933,6 +933,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.28: prompt transport off argv (T-042) ----------
+section('Gate 1.28 — prompt transport off argv (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-prompt-transport.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'prompt-transport self-check exit 0')
+} catch (e) {
+  fail(`prompt-transport self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
