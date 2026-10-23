@@ -419,6 +419,11 @@ const main = async () => {
     const fgit = (...args) => run('git', ['-C', fixtureRepo, ...args])
     fgit('init', '-b', 'main')
     writeFileSync(join(fixtureRepo, 'base.txt'), 'baseline\n')
+    // T-043: marker.txt committed at base WITH a passing value (one that
+    // contains "fixed content") so check.js is green on the untouched base;
+    // base content differs from every value the worker writes, so each
+    // attempt's captured diff stays non-empty (the retry's diff included).
+    writeFileSync(join(fixtureRepo, 'marker.txt'), 'fixed content v0\n')
     writeFileSync(join(fixtureRepo, 'check.js'), [
       'const fs = require("fs")',
       'const c = fs.readFileSync("marker.txt", "utf8")',
@@ -491,6 +496,8 @@ const main = async () => {
     const fgit2 = (...args) => run('git', ['-C', fixtureRepo2, ...args])
     fgit2('init', '-b', 'main')
     writeFileSync(join(fixtureRepo2, 'base.txt'), 'baseline\n')
+    // T-043: same base-green marker follow as the flagged fixture above.
+    writeFileSync(join(fixtureRepo2, 'marker.txt'), 'fixed content v0\n')
     writeFileSync(join(fixtureRepo2, 'check.js'), [
       'const fs = require("fs")',
       'const c = fs.readFileSync("marker.txt", "utf8")',

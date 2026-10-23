@@ -79,7 +79,7 @@ Rules:
 | T-040 | Verifier findings ride the retry brief: the pre-retry verifier call site + the composition seam joining T-038/T-039; gates stay the only verdict input (spec §24:1462, §9.2) | medium | done 2026-10-22 |
 | T-041 | The ratchet: finding→gate promotion — human-owned, ticket-carried, never same-run; convention + one cross-run fixture proof (spec §32) | medium | done 2026-10-21 |
 | T-042 | Prompt transport off argv: OpenCode adapter stops passing prompts as a command-line argument (Windows 32,767-char spawn ceiling kills large retry briefs) | high | done 2026-10-23 |
-| T-043 | Baseline gate sanity: gates proven green on the untouched base before dispatch; `--allow-red-base` override (red-base runs refuse before any model tokens) | high | proposed |
+| T-043 | Baseline gate sanity: gates proven green on the untouched base before dispatch; `--allow-red-base` override (red-base runs refuse before any model tokens) | high | done 2026-10-23 |
 | T-044 | Evidence-destruction guard: diff capture pins baseSha not HEAD + `swarm/*` branch deletion refuses non-base tips (a worker `git commit` no longer becomes a silent NO-OP + branch −D) | high | proposed |
 | T-045 | Gate/diff overlap evidence: flag when a candidate diff touches files its gate commands execute (evaluator-tampering signal, never a verdict) | medium | proposed |
 | T-046 | Post-kill settle deadline: bounded wait after the verified tree kill — loud abandonment instead of a wedged run + never-reaped lock (worker core + probe core) | high | proposed |

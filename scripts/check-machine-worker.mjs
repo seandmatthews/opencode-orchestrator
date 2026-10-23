@@ -239,7 +239,11 @@ async function main() {
   // ---------- S5: token-free REAL-CLI --jobs end-to-end (the Gate 1.5
   // ---------- sandbox pattern) ----------
   {
-    const repo = makeRepo('s5', { 'README.md': 'machine e2e sandbox\n' })
+    // T-043: the base carries base-state marker files so the marker gates are
+    // GREEN on the untouched base (the pre-T-043 fixture was red at base —
+    // the files only appeared after the workers ran). Base content differs
+    // from what the workers write, so every diff stays non-empty.
+    const repo = makeRepo('s5', { 'README.md': 'machine e2e sandbox\n', 'marker-a.txt': 'base state a\n', 'marker-b.txt': 'base state b\n' })
     const runs = join(sandbox, 's5', 'runs')
     const specPath = join(sandbox, 's5', 'spec.json')
     const cmdA = [NODE, '-e', "require('fs').writeFileSync('marker-a.txt', 'machine-a\\n')"]
