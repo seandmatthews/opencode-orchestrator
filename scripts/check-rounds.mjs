@@ -41,10 +41,11 @@
 //       The opencode worker tier is exercised token-free through the
 //       existing --opencode-bin override pointed at node with the stub
 //       committed AS the repo-root file `run` — the adapter spawns
-//       `<bin> run -m <model> <prompt>` in the leased worktree, and node
-//       resolves the entry `run` against its cwd, so the fixture repo's own
-//       committed stub executes in every candidate worktree. No adapter file
-//       is touched; the engine stays harness-agnostic.
+//       `<bin> run -m <model>` in the leased worktree (the prompt rides
+//       stdin since T-042, never argv), and node resolves the entry `run`
+//       against its cwd, so the fixture repo's own committed stub executes
+//       in every candidate worktree. No adapter file is touched; the
+//       engine stays harness-agnostic.
 //   D — CLI refusals, exit 1 with zero side effects (no artifacts dir, no
 //       locks/ — each through the real CLI with a non-git --repo so the
 //       refusal provably precedes repo validation): --rounds 0 / 3 / 1.5 /
@@ -372,13 +373,15 @@ writeFileSync(reviewerScript, [
   '',
 ].join('\n'))
 // The opencode stub: committed AS the repo-root file `run`. The adapter
-// spawns `<bin> run -m <model> <prompt>` with cwd = the leased worktree, and
-// node resolves the entry `run` against its cwd — the fixture repo's own
-// stub executes in every candidate worktree, token-free.
+// spawns `<bin> run -m <model>` with cwd = the leased worktree, and node
+// resolves the entry `run` against its cwd — the fixture repo's own stub
+// executes in every candidate worktree, token-free. Since T-042 the prompt
+// arrives on STDIN (never argv), so the stub reads fd 0 to EOF — the same
+// bytes the pre-T-042 argv positional carried.
 const stubContent = [
   '// T-030 Gate 1.22 fixture: the committed opencode stub (token-free).',
   'const fs = require(\'node:fs\')',
-  'const prompt = process.argv[4] ?? \'\'',
+  'const prompt = (() => { try { return fs.readFileSync(0, \'utf8\') } catch { return \'\' } })()',
   'if (prompt.includes(\'change nothing\')) { console.log(\'no-op by brief\'); process.exit(0) }',
   'const brief = (prompt.split(\'GOAL: \')[1] ?? \'\').split(\'\\n\')[0]',
   'fs.writeFileSync(\'feature.txt\', \'implemented: \' + brief + \'\\n\')',

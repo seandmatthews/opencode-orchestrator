@@ -3484,6 +3484,132 @@ full tier now passes `--verifier-model` so the driving run is a real
 `--goal --gate-retry --verifier-model` run end-to-end. Gate 3 n/a (no
 adapter change; the verifier's posture was settled by T-039).
 
+## Gate 1.28 — prompt transport off argv (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-prompt-transport.mjs
+```
+
+Pins T-042: `src/worker/opencode.ts` — the only OpenCode-aware file — no
+longer passes the composed prompt as a command-line argument. **The
+ceiling:** Windows caps the whole spawned command line at 32,767 UTF-16
+chars and Node's `spawn` throws `ENAMETOOLONG` SYNCHRONOUSLY above it
+(`node:internal/child_process`), verified on this machine (2026-10-23
+adversarial-review session, node 22.23.1, win32 10.0.26200; re-run as the
+gate's C0 leg on every fast-tier run). Nothing on the old path bounded
+prompt size: `composeGateRetryBrief` (src/runner.ts) composes brief +
+30,000-char diff cap + 12,000-char worker summary (`RESPONSE_TAIL_CHARS`)
++ each failing gate's 4,000-char `outputTail` + up to 5 findings × 2,000 +
+2,000 — ≈70K chars against a ~32.7K ceiling, so the T-038/T-040
+feedback-retry failed at spawn exactly when the candidate had a real diff
+and real gate failures, while `runJob`'s catch mislabeled the throw a
+mechanical `error`. **The transport:** the prompt streams over STDIN
+(`stdio[0]` 'ignore' → 'pipe'; `child.stdin.end(prompt)` — `end()` never
+blocks, Node buffers what the child has not read; an EPIPE on an
+undraining harness is swallowed by a mandatory error listener so a write
+failure never masquerades as a worker verdict — the exit path owns the
+outcome). **Step 0, probe before transport** (AGENTS #9, the
+`diag-pwd.mjs`/`diag-execute.mjs` precedent): `scripts/diag-stdin.mjs`
+spent one real token-cheap call establishing that the vendored opencode-ai
+1.19.3 reads piped stdin as the message when no message positional is
+given — observed 2026-10-23 against a throwaway git dir:
+`argv ["run","-m","zai-coding-plan/glm-5.3-flash"]`, 70 chars fed to
+stdin, stdout `STDIN-PROBE-OK-4177`, exit 0 → **STDIN-SUPPORTED**; the
+ticket's `-f/--file` fallback (documented in `opencode run --help`) was
+not needed and is not implemented. Side benefit, now pinned: no goal,
+brief, or retry-diff bytes ride argv, so none are visible to local process
+listings. The gate drives the REAL adapter with a stub binPath
+(constructor-injected; binPath = the node executable, the stub injected
+via `NODE_OPTIONS --require` — the check-capabilities S2 pin face,
+extended: the stub reads ALL of fd 0 synchronously so its record exists
+before node would fail to resolve the adapter's bare `run` entry arg, and
+`process.exit(0)` in the preload makes it a faithful 'harness consumed the
+prompt and succeeded' stand-in). Legs, zero model tokens:
+
+- **C0 — the platform ceiling, the recorded red bar re-run verbatim**: a
+  32,000-char argv element spawns fine (exit 0); 33,000 exceeds the
+  ceiling and `spawnSync` reports `ENAMETOOLONG` with status null. The OS
+  fact that motivated the ticket — green on the pre-change tree too.
+- **T1 — the red-bar size** (>32,767): a 33,000-char prompt spawns, the
+  child receives the FULL prompt verbatim (exact text + byte count),
+  exits 0, `ok: true`; onSpawn fired once and `result.pid` equals it.
+- **T2 — both policies take the new transport**: 40,000 chars through
+  `'worktree-read'` (the plan agent): verbatim receipt; argv is EXACTLY
+  `[exe, run, --agent, plan, -m, model]`; `PWD`/`OLDPWD` pinned to
+  `req.cwd` (unchanged by the transport); `worker.log` records
+  `$ opencode run --agent plan -m <model> <prompt: 40000 chars>`.
+- **T3 — 100,000 chars**: verbatim receipt (byte count asserted), exit 0,
+  `ok: true` — the ceiling class is removed, not trimmed to fit.
+- **T4 — the composed-retry-brief ceiling** (≈70K): a prompt built to the
+  T-038/T-040 composition recipe's documented sizes (30K diff + 12K
+  summary + 2 gates × 4K tails + 5 findings × 2K + 2K + framing;
+  `composeGateRetryBrief` is module-private, so the check composes the
+  same-shaped text — 70,749 chars measured green) survives a real spawn
+  with verbatim receipt.
+- **T5 — byte-shape at normal size** (<1K): the model-facing bytes are the
+  EXACT prompt text; `responseTail` collection unchanged (the stub's
+  stdout marker rides the result); spawn contract intact;
+  `worker.log` records `$ opencode run -m <model> <prompt: N chars>` —
+  the `<prompt: N chars>` elision marker is byte-identical to the
+  pre-T-042 format, so Gate 2's round-growth regex (planner.log vs
+  planner-r2.log) reads it unchanged.
+- Every adapter leg also asserts a per-leg canary token embedded in the
+  prompt NEVER appears in the child's argv — no prompt bytes in argv.
+
+**Red bar (AGENTS.md #8), recorded BEFORE the transport landed** — this
+check run on the pre-change tree (lane `ticket/T-042-prompt-transport-stdin`
+at f256184, adapter untouched): C0 green; **every adapter leg RED, exit 1,
+6 reported failures** — T1/T2/T3/T4 each with `execute() rejected — spawn
+ENAMETOOLONG` and no stub record (no child ever ran), T5 with the prompt
+arriving in argv (canary present) and the stub's stdin empty, while the
+unchanged faces (responseTail, spawn contract, PWD pinning, log-line
+format) were green on the same run — the byte-shape baseline T-042 keeps.
+Green after the change: 30 ok, `check-prompt-transport: ALL GREEN`, exit 0.
+
+**Existing checks — updated, none weakened or deleted (AGENTS #8):** two
+checks stub the OpenCode adapter and had to follow the transport, with
+every assertion kept at least as strong. Gate 1.20's S2 stub-bin argv pin
+(check-capabilities.mjs) previously asserted `prompt last` in argv; the
+transport is this ticket's subject, so the pin now asserts the prompt
+NEVER appears in argv with the model as the terminal element — a strictly
+stronger assertion of the new contract. Its other S2 assertions are
+unchanged (all four policy faces re-measured green: `--agent plan` exactly
+where expected, PWD/OLDPWD pinning, and the spawn log line —
+byte-identical output, since the new `args.join(' ')` equals the old
+`args.slice(0, -1).join(' ')`). Gate 1.22's leg-C committed `run` stub
+(check-rounds.mjs) read the prompt from `process.argv[4]`; it now reads
+fd 0 to EOF — the same bytes the argv positional carried — with its
+no-op-by-brief and GOAL-parsing logic and every assertion untouched (the
+first fast-tier run after the adapter change caught this exactly: leg C's
+NO-OP elimination went red because the stub's empty argv prompt always
+wrote feature.txt; fixed by the stub's prompt acquisition alone).
+`runChildWithTimeout` is untouched (Gate 1.12's own pins stand);
+`MachineWorker` never passed the prompt through argv (prompt is
+provenance-only, src/worker/machine.ts) — out of scope by the ticket's
+own note.
+
+Not pinned here and carved by the ticket: any prompt-size bound on the
+composition side (the ceiling class is removed at the transport, not
+trimmed at the composer — the caps keep their T-038/T-040 values);
+`-f/--file` fallback transport (step 0 answered stdin-supported; the
+fallback is documented in the ticket, unimplemented); non-Windows
+platforms (the repo is Windows-first — decisions.md 2026-10-10 — and C0
+pins the win32 ceiling); stdin-content negotiation beyond 'pipe + end'
+(the harness consumes or errors; both are the exit path's business).
+**Gate 2 — owed and carried by the full tier** (an adapter is on Gate 2's
+trigger list): the driving run is the standard real 2-round
+`--gate-retry --verifier-model` e2e, which now exercises the stdin
+transport on every planner/worker/reviewer/verifier dispatch; whether a
+real `--gate-retry` leg fires is read off the run's `gateRetry` blocks
+(the T-038/T-040 precedent — no candidate failed a gate in any recorded
+proof run, recorded honestly if it still does not). **Gate 3 — run once
+at landing** (an adapter changed): both faces re-measured 2026-10-23 in
+the lane — no override: the harness reports the inherited-PWD directory
+(the Known issue #1 demonstration); override to an existing git dir: the
+harness reports the override target — the quirk is intact and the
+adapter's PWD/OLDPWD pinning remains load-bearing; the transport change
+is invisible to the probe.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
