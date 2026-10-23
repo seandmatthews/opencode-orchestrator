@@ -109,7 +109,7 @@ if (lockDirty.exitCode !== 0) {
   await world.run("git", ["-C", repo, "checkout", "main"]);
   const m = await world.run("git", [...IDENTITY, "merge", "--no-ff", b, "-m", "merge: deps — pending package-lock.json change"]);
   if (m.exitCode !== 0) throw new Error("chore merge failed: " + (m.stdout + m.stderr).slice(-500));
-  const post = await world.run("node", [...TEE, REDLOG + "/chore-post-merge-fast.log", repo + "/scripts/verify.mjs", "fast"], { timeoutMs: 300000 });
+  const post = await world.run("node", [...TEE, REDLOG + "/chore-post-merge-fast.log", repo + "/scripts/verify.mjs", "fast"], { timeoutMs: 1800000 });
   if (post.exitCode !== 0) throw new Error("fast tier red on main after the chore merge — aborting before any ticket lane: " + (post.stdout + post.stderr).slice(-800));
   await world.run("git", ["-C", repo, "branch", "-d", b]);
   choreNote = "pending package-lock.json change merged to main, fast tier green";
@@ -175,7 +175,7 @@ for (const t of queue) {
 
     let fast;
     try {
-      fast = await world.run("node", [...TEE, REDLOG + "/" + t.id + "-lane-fast.log", laneDir + "/scripts/verify.mjs", "fast"], { timeoutMs: 300000 });
+      fast = await world.run("node", [...TEE, REDLOG + "/" + t.id + "-lane-fast.log", laneDir + "/scripts/verify.mjs", "fast"], { timeoutMs: 1800000 });
     } catch (e) {
       fast = { exitCode: -1, stdout: "", stderr: "gate spawn/timeout: " + String(e) };
     }
@@ -264,7 +264,12 @@ for (const t of queue) {
     continue;
   }
   const mergeSha = await world.run("git", ["-C", repo, "rev-parse", "--short", "HEAD"]);
-  const post = await world.run("node", [...TEE, REDLOG + "/" + t.id + "-post-merge-fast.log", repo + "/scripts/verify.mjs", "fast"], { timeoutMs: 300000 });
+  // 2026-10-23: raised 300000 -> 1800000. Batch dwfrun-7768f532 died here —
+  // the T-042 post-merge fast tier rejected at the default 300s (this call has
+  // no catch by design: a red main must stop the batch), after a healthy merge.
+  // The fast tier under a rate-limited, loaded machine needs the headroom the
+  // full tier already has (3600000 above).
+  const post = await world.run("node", [...TEE, REDLOG + "/" + t.id + "-post-merge-fast.log", repo + "/scripts/verify.mjs", "fast"], { timeoutMs: 1800000 });
   if (post.exitCode !== 0) {
     const rv = await world.run("git", [...IDENTITY, "revert", "-m", "1", "--no-edit", mergeSha.stdout.trim()]);
     if (rv.exitCode !== 0) {
@@ -282,7 +287,7 @@ for (const t of queue) {
   landedIds.push(t.id);
   log(t.id + " merged as " + mergeSha.stdout.trim() + ", main green");
 
-  await world.run("node", ["-e", "require('fs').rmSync(process.argv[1],{recursive:true,force:true})", laneDir + "/node_modules"]);
+  await world.run("node", ["-e", "require('fs').rmSync(process.argv[1],{recursive:true,force:true})", laneDir + "/node_modules"], { timeoutMs: 600000 });
   await world.run("git", ["-C", repo, "worktree", "remove", "--force", laneDir]);
   await world.run("git", ["-C", repo, "branch", "-d", branch]);
 }
