@@ -4331,6 +4331,113 @@ including Gate 1.5's clean/disposal scenarios and Gate 1.18's gc lane)
 re-runs green against the new predicate. **Gate 3 n/a** (no adapter
 change).
 
+## Gate 1.35 — round-2 brief-premise guard: composer framing + mechanical brief annotation (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-brief-premise.mjs
+```
+
+Pins T-050 — the Known issue #6 successor (the 2026-10-23 mechanism, run
+20261023204747): the rounds composer renders survivor evidence into the
+round-2 planner prompt, and that planner wrote a brief asserting
+`vec3.js` exists — a file only a round-1 SURVIVOR DIFF creates, absent
+from the shared base round 2 re-leases at. The worker's read failed, it
+exited 0 with zero edits, and the NO-OP ladder eliminated a candidate
+whose brief lied about the workspace (the ladder behaved perfectly; the
+brief was wrong). Two deterministic changes, both verdict-silent:
+
+1. **Composer framing fix** (`src/rounds.ts`): the rendered block's fixed
+   framing gains explicit premise lines (exported `ROUND_PREMISE_LINES`,
+   pinned verbatim): survivor diffs are CHANGES against the same base, not
+   base state; round 2 re-leases at the SAME baseSha; files created by
+   survivor diffs DO NOT exist in a round-2 worktree; every brief must be
+   implementable at the base commit alone. The lines are framing, not
+   record content — no ArtifactRecord changes, so the packet and its
+   fingerprint are byte-identical (pinned: no record content and no packet
+   field carries them; legs B/C still recompute the fingerprint over the
+   new block). Round-1 prompts (no block) are byte-identical to today —
+   pinned in both this check and Gate 1.22's extended leg A/B.
+2. **The mechanical guard** (`src/premise.ts`, wired in `src/runner.ts`):
+   before PLANNER-AUTHORED briefs become jobs — rounds 1 AND 2 (the
+   round-1 planner is repo-blind and can hallucinate paths just as
+   easily) — each brief is scanned for path-shaped tokens (the T-045
+   `commandTokens` extraction; a token is path-shaped when its final
+   dot-suffix is in the curated `PATH_TOKEN_EXTENSIONS` list); each token
+   naming a file ABSENT at `baseSha` (`git cat-file -e` against the
+   recorded base, no lease needed) gets a fixed engine note APPENDED to
+   the brief — the survivor-created reason when the path is in a round-1
+   survivor's changed paths (the T-045 `WorkspaceProvider.changedPaths`
+   seam, recorded per candidate in-run where the T-045 overlap block
+   already derives them), the distinct base-commit-absent note otherwise.
+   The ANNOTATED brief dispatches (hashed into that attempt's
+   `promptVersion` — one composition, two consumers, the T-029/T-038
+   precedent); the planner's UNANNOTATED brief is preserved verbatim in
+   `brief-premise.txt` (before/after) riding the attempt's
+   `outputArtifacts`, and `CandidateReport.brief` keeps the planner's
+   text (the retry-brief precedent). Bounded at the exported
+   `MAX_PREMISE_NOTES` (5, the MAX_RETRY_FINDINGS pattern), first-mention
+   order. `--jobs` briefs are operator-owned and NEVER touched — and so
+   are planner-fallback raw-goal briefs and `--no-planner` briefs (the
+   goal is operator text; pinned). A HEURISTIC, honestly named one (the
+   T-045 posture): extensionless names (`Dockerfile`), directory-only
+   paths (`src/utils`), suffixes outside the list, and prose identifiers
+   (`Math.sqrt`, `console.log` — also why 'log' is not in the list) are
+   honest misses; false positives are impossible by construction (every
+   flagged token is probed against the base tree first). Never-break-a-run
+   posture: an unresolvable base commit throws, the runner logs once per
+   brief and dispatches unannotated (today's exact behavior).
+
+Legs (P1–P8 + F, 43 assertions, zero model tokens — fake WorkerAdapters +
+the real WorktreeProvider + the real runner; module-direct legs for the
+bound and determinism): P1 the Known-issue mechanism replayed — vec3.js
+exists only in a recorded survivor diff, the round-2 brief says "extend
+vec3.js …", and the dispatched prompt carries the fixed survivor-created
+note, `brief-premise.txt` records before/after byte-identically to an
+independent recomputation through the same changedPaths seam,
+`promptVersion` equals the dispatched prompt's sha256 and DIFFERS from
+the unannotated text's, `brief` keeps the planner's text; P2 the distinct
+absent-at-base note for a path in no survivor evidence (never the
+survivor reason, never another brief's note); P3 inertness — all-tokens-
+at-base briefs dispatch byte-identical prompts (recomputed
+`builderPrompt` equality), no evidence file, today's exact candidate key
+set, no note bytes; P4 `--jobs` carve (byte-identical dispatch on an
+absent-naming brief); P5 the bound (8 absent tokens → at most
+MAX_PREMISE_NOTES notes, first-mention order); P6 verdict inertness both
+directions (annotated + real change → passes exactly by gates; annotated
+no-op → eliminated exactly by the diffBytes leg, evidence file still
+written); P7 round-1 annotation plus the fallback/`--no-planner`
+operator-owned carve; P8 module contract and determinism. F legs pin the
+framing from a real 2-round drive. Gate 1.22's check (rounds) is extended
+in the same change-set with five framing assertions (leg A: the lines
+verbatim, inside the framing, absent from records and packet; leg B: the
+round-2 planner prompt carries them, the round-1 prompt carries none) —
+63 assertions ALL GREEN.
+
+**Red bar (AGENTS.md #8), recorded BEFORE the change landed** — the lane
+at main (96a2a81, engine untouched) running this same check: 13 failures
+of 38, exit 1 — the guard legs (no note in the dispatched prompt, no
+`brief-premise.txt`, no promptVersion split, no round-1 note, no evidence
+file on the annotated no-op, module/constant missing) and the three
+framing legs (no `ROUND_PREMISE_LINES` export, not in the block, not in
+the framing position). The 25 green faces pin preserved semantics:
+inertness, the `--jobs`/fallback/`--no-planner` carves, verdicts by
+gates alone, `brief` keeping the planner's text, and the block-in-
+round-2-prompt-only separation. Post-change: all 43 assertions green,
+exit 0, and the full fast tier (Gates 0 through 1.35) ALL GREEN with
+every pre-existing assertion intact.
+
+**Gate 2 owed** — trigger analysis: the change-set touches `src/runner.ts`
+(the brief→job path both rounds, the attempt dispatch brief, the
+changed-paths threading) and `src/rounds.ts` (the composed block every
+round-2 planner prompt embeds), and the round-2 e2e leg is the real
+exercise of the guard — a real planner-authored round-2 brief over real
+survivor evidence, annotated or honestly inert, observable in the
+dispatched attempt's `promptVersion` and any `brief-premise.txt` under
+the run dir. Whether a real run's round-2 planner actually names a
+survivor-created file is model-behavior variance, recorded honestly
+either way (the Known issue #6 disposition posture). **Gate 3 n/a** (no
+adapter change).
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
@@ -4593,6 +4700,18 @@ landing in T-017's Landed section).
      survivor files are NOT present" framing is a T-030/T-031-successor
      question (the loop stays capped at 2 and its improvement-signal
      question stays open, decisions.md 2026-10-20).
+     **2026-10-24 follow-up (T-050, landed): the successor question is
+     answered YES, two ways** — the composed block's framing now carries
+     the explicit premise lines verbatim (`ROUND_PREMISE_LINES`,
+     src/rounds.ts), and a mechanical brief-annotation guard
+     (src/premise.ts, Gate 1.35) scans every PLANNER-authored brief
+     (rounds 1 and 2) for path tokens absent at baseSha, appending the
+     survivor-created or base-commit-absent note to the dispatched brief
+     (before/after evidence in `brief-premise.txt`; the report's `brief`
+     and every verdict expression untouched). The NO-OP ladder is
+     unchanged — it was right; the brief was wrong, and now the brief
+     gets corrected. Whether this moves the round-2 no-op rate is T-049's
+     yield instrument's question, not this change's.
      **2026-10-24 worker-class observation, third distinct mechanism (run
      20261024021432, the T-047 lane's driving Gate 2 red): the worker
      mis-transcribed its OWN lease path.** One worker (c02-r2) — properly

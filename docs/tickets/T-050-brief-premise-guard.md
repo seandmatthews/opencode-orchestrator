@@ -1,6 +1,6 @@
 # T-050 — Round-2 brief-premise guard: composer framing fix + a mechanical brief-annotation guard (the Known issue #6 successor)
 
-**Status:** proposed
+**Status:** done
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 2
 **Depends on:** —
@@ -93,6 +93,53 @@ correctly eliminated the result.
       landing. **Gate 3 n/a.**
 
 ## Landed
+
+2026-10-24. Exactly the ticket's two changes, no ride-alongs:
+
+- **Composer framing fix** — `src/rounds.ts`: exported
+  `ROUND_PREMISE_LINES` (4 fixed lines: survivor diffs are CHANGES
+  against the same base, not base state; round 2 re-leases at the SAME
+  base commit; survivor-created files DO NOT exist in a round-2 worktree;
+  every brief must be implementable at the base commit alone), embedded
+  by `renderRoundBlock` after the header, before the first survivor
+  body. Framing, not record content — the packet and its fingerprint are
+  byte-identical (pinned). Round-1 prompts untouched.
+- **The mechanical guard** — new `src/premise.ts`
+  (`annotateBriefPremise`, `briefPathTokens`, `MAX_PREMISE_NOTES = 5`,
+  `PATH_TOKEN_EXTENSIONS`, the two fixed note messages), wired in
+  `src/runner.ts`: planner-authored briefs only (rounds 1 AND 2;
+  `--jobs`, planner-fallback raw-goal, and `--no-planner` briefs are
+  operator-owned and never touched — pinned); tokens whose final
+  dot-suffix is in the curated list are probed with list-form
+  `git cat-file -e <baseSha>:<path>` against the target repo (no
+  lease); absent paths get the survivor-created note when in the
+  round-1 survivors' changed paths (the T-045 seam, recorded in-wave
+  where the overlap block already derives them — one derivation, two
+  consumers), the distinct base-commit-absent note otherwise; bounded
+  at `MAX_PREMISE_NOTES`, first-mention order; the annotated brief
+  dispatches on every attempt (`promptVersion` hashes it — one
+  composition, two consumers), before/after evidence in
+  `<candidateDir>/brief-premise.txt` riding the attempt's
+  `outputArtifacts`, `CandidateReport.brief` keeps the planner's text;
+  verdict expressions untouched (both directions pinned). An
+  unresolvable base commit degrades loudly to unannotated dispatch
+  (never-break-a-run).
+
+**Red bar (AGENTS #8):** the lane at main (96a2a81, engine untouched)
+running the new check: **13 failures of 38, exit 1**; post-change
+**43/43 green**. **Gates measured:** Gate 0 green; full fast tier
+(`node scripts/verify.mjs fast`) **ALL GREEN, exit 0** — including the
+new **Gate 1.35** (`scripts/check-brief-premise.mjs`, 43 assertions)
+and Gate 1.22's `check-rounds.mjs` extended with five framing assertions
+(63 assertions ALL GREEN). **Gate 2 owed** (src/runner.ts + src/rounds.ts
+touched; the round-2 e2e leg is the real exercise of the guard — trigger
+analysis in VERIFICATION.md Gate 1.35); **Gate 3 n/a** (no adapter
+change). VERIFICATION.md extended in the same change-set (Gate 1.35
+section + the Known issue #6 2026-10-23 disposition follow-up naming
+this ticket). Heuristic honestly recorded: extensionless names,
+directory-only paths, out-of-list suffixes, and prose identifiers
+(`Math.sqrt`, `console.log`) are honest misses; false positives are
+impossible by construction.
 
 ## Verification
 

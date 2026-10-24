@@ -65,6 +65,28 @@ import type { CandidateReport } from './types.js'
 const BLOCK_HEADER = '=== ROUND %ROUND% SURVIVOR EVIDENCE (composed context; fingerprint %FP%) ==='
 const BLOCK_FOOTER = '=== END SURVIVOR EVIDENCE ==='
 
+/** T-050: the fixed premise lines embedded in every rendered block's framing
+ *  — the composer-side half of the Known issue #6 (2026-10-23, run
+ *  20261023204747) fix. That run's round-2 planner read the survivor
+ *  evidence below as a description of the workspace and wrote a brief
+ *  asserting `vec3.js` exists — a file only a round-1 survivor's DIFF
+ *  creates, absent from the base round 2 re-leases at; the worker's read
+ *  failed, it exited 0 with zero edits, and the NO-OP ladder eliminated a
+ *  candidate whose brief lied about the workspace. These lines state the
+ *  premises the evidence silently rests on: the diffs are CHANGES against
+ *  the shared base (not base state), round 2 re-leases at the SAME baseSha,
+ *  survivor-created files DO NOT exist in a round-2 worktree, and every
+ *  brief must be implementable at the base commit alone. Prompt text, never
+ *  capability (the T-030 posture) — the mechanical brief-annotation guard
+ *  (src/premise.ts) is the symptom-side backstop when a planner ignores the
+ *  framing. Exported verbatim for the pinning gates (1.22 leg A, 1.35). */
+export const ROUND_PREMISE_LINES: readonly string[] = [
+  'PREMISES — read before using the evidence below:',
+  '- The survivor evidence below describes CHANGES against the run\'s base commit. It is not a description of the repository\'s base state.',
+  '- Round 2 re-leases every worktree at that SAME base commit. A file CREATED by a survivor\'s diff DOES NOT exist in a round-2 worktree.',
+  '- Every brief must be implementable at the base commit alone: if a change needs a file a survivor\'s diff created, the brief must create that file itself.',
+]
+
 /** Fixed token-budget margin over the evidence content itself. The mandatory
  *  layer must fit the cap (a plan whose mandatory layer alone exceeds
  *  `maxInputTokens` is refused), so the composer sizes the cap FROM the
@@ -180,10 +202,14 @@ export function composeRoundPacket(input: RoundComposerInput): RoundComposition 
 }
 
 /** Renders the packet into the fixed-framing text block: header naming the
- *  finished round and the packet fingerprint, then every included entry's
- *  evidence content in packet order (Layer 1 → 4), then the footer. Pure —
- *  a function of (packet, records, finishedRound) only; the packet carries
- *  ids/hashes, not content, so the composer's own records supply the text. */
+ *  finished round and the packet fingerprint, the fixed premise lines
+ *  (T-050 — see ROUND_PREMISE_LINES), then every included entry's evidence
+ *  content in packet order (Layer 1 → 4), then the footer. Pure — a
+ *  function of (packet, records, finishedRound) only; the packet carries
+ *  ids/hashes, not content, so the composer's own records supply the text.
+ * The premise lines are framing, not record content: they change no
+ * ArtifactRecord, so the packet and its fingerprint are byte-identical with
+ * or without them (provenance over prompt text). */
 export function renderRoundBlock(packet: ContextPacket, records: readonly ArtifactRecord[], finishedRound: number): string {
   const contentById = new Map(records.map((r) => [r.id, r.content]))
   const header = BLOCK_HEADER
@@ -197,5 +223,5 @@ export function renderRoundBlock(packet: ContextPacket, records: readonly Artifa
       }
       return content
     })
-  return [header, '', ...bodies.flatMap((b) => [b, '']), BLOCK_FOOTER, ''].join('\n')
+  return [header, '', ...ROUND_PREMISE_LINES, '', ...bodies.flatMap((b) => [b, '']), BLOCK_FOOTER, ''].join('\n')
 }

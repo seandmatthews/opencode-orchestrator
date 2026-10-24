@@ -58,7 +58,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { composeRoundPacket } from '../src/rounds.ts'
+import { composeRoundPacket, ROUND_PREMISE_LINES } from '../src/rounds.ts'
 import { runSkeleton } from '../src/runner.ts'
 import { SPEC_ID_PATTERN } from '../src/scheduler.ts'
 import { WorktreeProvider } from '../src/workspace/worktree.ts'
@@ -172,6 +172,19 @@ const fakeGate = {
     && r1.renderedBlock.includes(r1.packet.fingerprint.hash)
     && r1.renderedBlock.includes('candidate c01 (round 1 survivor)')
     && r1.renderedBlock.trimEnd().endsWith('=== END SURVIVOR EVIDENCE ==='))
+  // T-050 framing: the composer's premise lines ride every rendered block —
+  // the Known issue #6 (2026-10-23) cause-side fix. The lines are FRAMING,
+  // not record content: they change no ArtifactRecord, so the packet and its
+  // fingerprint (asserted above and recomputed in legs B/C) are unchanged.
+  t('A (T-050): the rendered block carries EVERY fixed premise line verbatim — changes-not-base-state, same-base re-lease, survivor-created files absent, base-implementable briefs',
+    ROUND_PREMISE_LINES.length >= 4
+    && ROUND_PREMISE_LINES.every((line) => r1.renderedBlock.includes(line)))
+  t('A (T-050): the premise lines sit inside the framing — after the header, before the first survivor body',
+    r1.renderedBlock.indexOf(ROUND_PREMISE_LINES[0]) > r1.renderedBlock.indexOf('=== ROUND 1 SURVIVOR EVIDENCE')
+    && r1.renderedBlock.lastIndexOf(ROUND_PREMISE_LINES[ROUND_PREMISE_LINES.length - 1]) < r1.renderedBlock.indexOf('candidate c01 (round 1 survivor)'))
+  t('A (T-050): the premise lines are framing, not record bytes — no record content and no packet field carries them',
+    r1.records.every((rec) => !ROUND_PREMISE_LINES.some((line) => rec.content.includes(line)))
+    && !JSON.stringify(r1.packet).includes('PREMISES'))
   t('A: fingerprint reconciliation (the src/context.ts:101-104 duty) — the composer documents the relationship to input_context_hash at source level, and the context module header records the discharge',
     read(join(root, 'src', 'rounds.ts')).includes('input_context_hash')
     && read(join(root, 'src', 'context.ts')).includes('discharged by T-030'))
@@ -270,6 +283,10 @@ async function drive(name, { rounds, candidateIds = ['c01', 'c02'] }) {
     && plannerBlockReqs[0]?.prompt.includes('fake reviewer saw the marker diff'))
   t('B: the round-1 planner prompt carries no survivor-evidence section (the block is round-2 input only)',
     !plannerPlainReqs[0]?.prompt.includes('SURVIVOR EVIDENCE'))
+  t('B (T-050): the round-2 planner prompt carries every premise line (they rode the composed block verbatim above)',
+    ROUND_PREMISE_LINES.every((line) => plannerBlockReqs[0]?.prompt.includes(line) === true))
+  t('B (T-050): the round-1 planner prompt carries NONE of the premise lines — round-1 prompts are byte-identical to today',
+    !ROUND_PREMISE_LINES.some((line) => plannerPlainReqs[0]?.prompt.includes(line)))
 
   t('B: report on disk — top-level keys exactly today\'s plus the additive rounds block',
     eq(sortedKeys(JSON.parse(read(join(artifactsDir, 'report.json')))),
