@@ -93,6 +93,18 @@ export class WorktreeProvider implements WorkspaceProvider {
     return git(lease.path, ['diff', lease.baseSha, '--binary'])
   }
 
+  changedPaths(lease: WorkspaceLease): string[] {
+    // T-045: the path projection of diff() — same pinned base (T-044's
+    // `git diff <baseSha>`, never HEAD), same intent-to-add staging riding
+    // the call order (the runner calls this after diff(), so untracked
+    // files the captured diff already shows appear here too). `-z`: NUL
+    // separation, paths with spaces stay whole. Evidence only — the
+    // gate/diff overlap signal's input, never a verdict input.
+    return git(lease.path, ['diff', lease.baseSha, '--name-only', '-z'])
+      .split('\0')
+      .filter((p) => p !== '')
+  }
+
   dispose(lease: WorkspaceLease): void {
     git(this.repo, ['worktree', 'remove', '--force', lease.path])
   }

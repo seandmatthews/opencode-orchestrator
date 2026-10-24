@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { parseBriefs, parseReview } from './parse.js'
 import { evidenceBundlePath, failedBundle, writeEvidenceBundle } from './probe.js'
 import type { Probe } from './probe.js'
+import { computeGateCommandOverlap } from './gate/overlap.js'
 import { composeRoundPacket } from './rounds.js'
 import { buildEarlyStops, buildSchedule, earlyStopMet, readyJobs } from './scheduler.js'
 import type { EarlyStopPolicy, PhaseSpec } from './scheduler.js'
@@ -1199,6 +1200,35 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
       }
       base.gates = attemptGates
       base.passedAllGates = base.gates.length > 0 && base.gates.every((g) => g.passed) && base.diffBytes > 0
+
+      // T-045: gate/diff overlap evidence — the final attempt's changed
+      // paths (re-derived in the lease, riding T-044's pinned-base
+      // semantics) intersected with the path-shaped tokens of each gate's
+      // RECORDED command (GateResult.command, T-027). Produced beside the
+      // ladder, never read by it (the cleanupFailures pattern): the verdict
+      // line above was already computed from `passed`/`diffBytes` alone,
+      // and nothing below feeds this block back into any verdict
+      // (decisions.md 2026-10-10: gates decide survival). A HEURISTIC,
+      // documented as one: transitive loads are invisible (`node build.js`
+      // can require anything), and npm/make-style commands with no path
+      // tokens yield no overlap by construction. Absent when nothing
+      // overlaps (the producer-only optional-field pattern). The overlap
+      // computation itself must never break a run (the probes/verifier
+      // posture): a failure logs loudly and records nothing.
+      if (diffCaptured) {
+        try {
+          const overlap = computeGateCommandOverlap(attemptGates, opts.workspaces.changedPaths(lease), lease.path)
+          if (overlap.length > 0) {
+            base.gateCommandOverlap = overlap
+            for (const o of overlap) {
+              const g = attemptGates.find((x) => x.name === o.gate)
+              console.log(`[${id}] gate ${o.gate}: ${g?.passed ? 'PASS' : 'FAIL'} — NOTE: diff touches files this gate executes: ${o.touched.join(', ')}`)
+            }
+          }
+        } catch (e) {
+          console.log(`[${id}] gate/diff overlap computation failed: ${errorMessage(e)}`)
+        }
+      }
 
       // T-015: probes ride beside the ladder as a parallel evidence seam —
       // run on the final completed attempt immediately after the gate loop,

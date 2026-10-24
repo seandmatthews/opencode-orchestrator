@@ -455,9 +455,19 @@ async function main() {
       && !read(join(runDir, 'codemod', 'worker.log')).includes(JSON.stringify(plannerCmd)))
     t('S3: the candidate diff captured its own marker-file change',
       read(join(runDir, 'codemod', 'diff.patch')).includes('marker-a.txt'))
-    t('S3: report shape unchanged — candidate keys exact with review present (no adapter-id fields added)',
+    // T-045: this drive is a TRUE overlap positive — the gate command
+    // (`node -e "require('fs').accessSync('marker-a.txt')"` names
+    // marker-a.txt, and the worker's machine command changed it — so the
+    // candidate legitimately carries the gate/diff overlap block. The key
+    // set gains exactly that ticketed producer (still no adapter-id
+    // fields, the assertion's T-025 intent), and the block's content is
+    // pinned as the true positive it is.
+    t('S3: the overlap block is the true positive (gate marker-a executes the changed marker-a.txt), never a verdict input',
+      eq(candidate?.gateCommandOverlap, [{ gate: 'marker-a', touched: ['marker-a.txt'] }])
+      && candidate?.passedAllGates === true)
+    t('S3: report shape unchanged — candidate keys exact with review present (no adapter-id fields added; gateCommandOverlap is T-045\'s ticketed producer, present as the true positive above)',
       eq(sortedKeys(candidate),
-        ['attempts', 'brief', 'diffBytes', 'diffPath', 'gates', 'id', 'model', 'passedAllGates', 'review', 'workerDurationMs', 'workerId', 'workerOk', 'workerTimedOut', 'workspacePath']))
+        ['attempts', 'brief', 'diffBytes', 'diffPath', 'gateCommandOverlap', 'gates', 'id', 'model', 'passedAllGates', 'review', 'workerDurationMs', 'workerId', 'workerOk', 'workerTimedOut', 'workspacePath']))
   }
 
   rmSync(sandbox, { recursive: true, force: true })

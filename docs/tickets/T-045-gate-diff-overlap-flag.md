@@ -1,6 +1,6 @@
 # T-045 — Gate/diff overlap evidence: flag when a candidate diff touches files its gate commands execute
 
-**Status:** proposed
+**Status:** done (landed 2026-10-23)
 **Category:** engine
 **Value (1-5):** 3 · **Risk (1-5):** 1
 **Depends on:** —
@@ -85,6 +85,88 @@ heuristic.
       recorded at landing. **Gate 3 n/a**.
 
 ## Landed
+
+Landed 2026-10-23, lane `ticket/T-045-gate-diff-overlap-flag`.
+
+**Code** — exactly the three changes the ticket names, no ride-alongs:
+
+- `src/gate/overlap.ts` (new) — the deterministic computation:
+  `commandTokens` (split on whitespace + the shell command separators
+  `& ; | ( )`, strip one wrapping quote pair), `overlapTouched` (a token
+  is path-shaped when it resolves to a file/directory in the worktree —
+  absolute tokens inside the worktree fold to repo-relative — or exactly
+  matches a changed path, the clause that keeps diff-DELETED files
+  visible; a path-shaped token overlaps on equality or directory
+  prefix), and `computeGateCommandOverlap` (one `{gate, touched}` entry
+  per overlapping gate, in gate order; gates without a recorded command
+  never overlap). Matching is Windows-forward (backslashes folded,
+  case-insensitive — the normPath posture). Redirect operators are
+  deliberately not separators: a glued `>out.txt` token drops out.
+- `src/runner.ts` — after the final attempt's ladder line, gated on the
+  diff having been captured: `computeGateCommandOverlap(attemptGates,
+  opts.workspaces.changedPaths(lease), lease.path)`; when non-empty, the
+  block lands on the candidate report and one loud NOTE line prints per
+  overlapping gate (`[c01] gate test: PASS — NOTE: diff touches files
+  this gate executes: test.js`, verdict-embedded, printed regardless of
+  the gate's PASS/FAIL). A computation failure logs loudly and records
+  nothing (the probes/verifier posture). No ladder line reads the block.
+- `src/integrate.ts` — when the candidate carries the block, the replay
+  prints the note BEFORE any gate output and records the block verbatim
+  in the verdict JSON (`IntegrateVerdict.gateCommandOverlap`, on both
+  verdict write paths); the exit code stays gate-determined.
+- Plumbing: `src/types.ts` — `GateCommandOverlap` +
+  `CandidateReport.gateCommandOverlap?` (producer-only: absent when
+  nothing overlaps, so clean reports keep the exact pre-T-045 key set)
+  and the `WorkspaceProvider.changedPaths` seam method;
+  `src/workspace/worktree.ts` — `changedPaths` = `git diff <baseSha>
+  --name-only -z` in the lease (T-044's pinned-base semantics, called
+  after `diff()` so the intent-to-add posture matches); `src/cli.ts` —
+  the RUN SUMMARY marker (`  gate-overlap:test(test.js)`).
+
+**Checks** — new `scripts/check-gate-overlap.mjs` (Gate 1.32, 35
+assertions, wired into `scripts/verify.mjs` fast tier): O1 the tampering
+core (real CommandGates, real execution: weakened test.js passes every
+gate, block + NOTE line + verdict unchanged) · O2 clean-negative (no
+block, no note, pre-T-045 key set, no `gateCommandOverlap` bytes in the
+serialized report) · O3 verdict inertness fail-direction (overlap on a
+passing AND a failing gate, verdict FAIL by gates alone, NOTE prints for
+both) · O4 multi-token (`npx eslint src/` directory-prefix flags,
+`npm run build` never flags, `node gone.js` flags a deleted file, the
+`changedPaths` seam pinned directly) · O5 the real CLI (machine worker,
+`--jobs`: gate-step NOTE + RUN SUMMARY marker on stdout, block in
+on-disk report.json, exit 0) · O6 integrate surfacing (overlap survivor
+replay exit 0 + note + block in `<id>.json`; failing-gate replay exit 1
+with note + block still recorded; clean survivor replay: no note, no
+block key).
+
+**Red bar (AGENTS #8), recorded before any engine change** — the lane at
+main (33db211) running the landed check: 16 failures of 35, exit 1,
+exactly the new-behavior faces (O1 ×3, O3 ×2, O4 ×4, O5 ×3, O6 ×4); the
+19 green faces pin preserved semantics (verdict machinery, clean-negative
+shape, gate-determined exits), and the ticket's premise was confirmed
+empirically at main: the weakened evaluator passed every gate and the
+tampering was visible in the captured diff with no machine trace. Green
+post-change: 35/35, exit 0.
+
+**Gates measured:** Gate 0 typecheck exit 0 · `node node_modules/tsx/dist/cli.mjs
+scripts/check-gate-overlap.mjs` ALL GREEN (Gate 1.32) · full fast tier
+`node scripts/verify.mjs fast` — `=== verify (fast) complete: ALL GREEN ===`,
+exit 0 (Gate 0+1+0.5+1.5…1.32). **Gate 2 owed** (src/runner.ts +
+report shape + src/cli.ts + src/integrate.ts + src/workspace/worktree.ts
+changed — trigger list, Gate 2's section; the real e2e run rides the
+computation on every candidate's final attempt, expected block-free for
+source-only candidates, so the run's shape is unchanged — trigger
+analysis in VERIFICATION.md Gate 1.32). **Gate 3 n/a** (no adapter
+change). One existing check edited, strengthened not weakened:
+`scripts/check-per-role-harness.mjs` (Gate 1.21) S3 — its real-CLI drive
+is a TRUE overlap positive (the gate command
+`node -e "require('fs').accessSync('marker-a.txt')"` names the very file
+the worker's machine command changes), so the candidate legitimately
+carries the block; the expected key set gains exactly the ticketed
+`gateCommandOverlap` producer (the assertion's T-025 intent — no
+adapter-id fields — unchanged), and a NEW assertion pins the block as
+the true positive it is. Every other existing assertion unchanged and
+green.
 
 ## Verification
 
