@@ -4067,6 +4067,143 @@ shape is unchanged; whether a real candidate ever produces a block is
 read off the run's reports, never asserted. **Gate 3 — n/a** (no adapter
 change).
 
+## Gate 1.33 — ignored-path parity evidence: ignored-tree snapshot per attempt + integrate parity note (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-ignored-paths.mjs
+```
+
+Pins T-047 (the 2026-10-23 adversarial review's F2, with the ticket's
+recorded scratch-repo repro): `WorktreeProvider.diff` respects
+`.gitignore` — a file written under `node_modules/`, `dist/`, or any
+ignored path appears in NEITHER the captured `diff.patch` (the
+`git add -A --intent-to-add .` + `git diff` capture never sees it) NOR
+`git status`'s ordinary output — while the gates execute in the live
+worktree where those files DO exist. Two consequences the engine
+recorded nothing about: a worker (or derailing cheap model) can make
+gates pass via changes in ignored paths — the promoted diff contains
+none of it, so the run's survivor and the replayed artifact measure
+different trees — and, legitimately, any gate that installs
+dependencies creates a large ignored tree per worktree, so RUN gates
+and REPLAY gates (a fresh worktree holding only HEAD + diff.patch)
+execute in systematically different environments, with the replay's
+failure recorded as an ordinary gate FAIL, indistinguishable from a bad
+candidate.
+
+The change — the mechanical first slice, VISIBILITY ONLY (the
+`cleanupFailures`/`gateCommandOverlap` pattern: produced beside the
+ladder, never read by it; no decisions.md change — the 2026-10-10
+machine-gates decision stands untouched):
+
+1. **Snapshot** (`src/runner.ts`, after the final attempt's gate loop so
+   gate-installed trees are included — they are the parity-relevant
+   set; before probes/review/dispose): `git status --porcelain
+   --ignored` in the lease through the new `WorkspaceProvider.
+   ignoredStatus` seam (`src/workspace/worktree.ts`; default untracked
+   mode, so an ignored directory collapses to one `!! node_modules/`
+   line), written verbatim to the attempt's evidence dir as
+   `ignored-paths.txt` and recorded among the attempt's
+   `outputArtifacts` (the diff.patch precedent) — ONLY when the `!!`
+   set is non-empty. Summarized on the report as the additive,
+   producer-only `CandidateReport.ignoredPaths?: IgnoredPathsSummary
+   { count, entries }` (`src/types.ts`): count = the FULL pre-cap total
+   of the porcelain `!!` set, entries = its first MAX_IGNORED_PATHS
+   paths in porcelain order (repo-relative, forward slashes; the cap
+   exported from `src/runner.ts`, the MAX_RETRY_FINDINGS pattern,
+   asserted against the engine's own export so docs and code cannot
+   drift). The cap bounds the report summary only — the evidence file
+   keeps every `!!` line. A loud console line at the evidence step.
+   The snapshot can never break a run (the probes/verifier posture): a
+   failure logs loudly and records nothing.
+2. **Integrate note** (`src/integrate.ts`): replaying a candidate whose
+   report carries a non-empty summary prints the parity note BEFORE any
+   gate output (the T-045 posture) — "the run environment held ignored
+   trees the replay tree lacks: node_modules/, … — gate parity is not
+   established" — and records the summary verbatim in the verdict JSON
+   (`IntegrateVerdict.ignoredPaths`, both verdict write paths). The
+   exit code stays gate-determined: a passing replay still exits 0, a
+   failing gate still exits 1, the note neither vetoes nor forces.
+
+**The carve, stated:** this ticket only stops the asymmetry from being
+invisible. Dependency provisioning for worktrees (spec §13's manifest —
+a real design decision with cost/supply-chain tradeoffs), pristine gate
+environments, and tamper DETECTION for ignored paths (mtimes/hashes) are
+carved non-goals needing a decision, not a slice. What the snapshot does
+give the §13 question is its data: once runs record what ignored trees
+their gates needed, the manifest decision has measurements instead of
+guesses.
+
+Legs, zero model tokens (fake WorkerAdapter + REAL CommandGates against
+scratch repos, the real WorktreeProvider + runner, the real integrate
+CLI — the check-gate-overlap import pattern):
+
+- **F0 — the cap export**: `MAX_IGNORED_PATHS` is exported and equals
+  50 (namespace import, so the pre-change red bar is behavioral, not a
+  module-link crash);
+- **I1 — the ignored-write core (the red-bar face)**: the ticket's
+  2026-10-23 repro — a worker writes a tracked change PLUS files under
+  `node_modules/` and `dist/`. The blindness premise is pinned as it
+  lands (the captured diff contains NONE of the ignored writes while
+  the files exist in the lease the gates executed in), then the new
+  evidence: `ignored-paths.txt` holds the full porcelain snapshot, the
+  report summary is exactly `{count: 2, entries: ["dist/",
+  "node_modules/"]}` (porcelain order), the attempt records the file
+  among its output artifacts, the console line prints, and
+  `passedAllGates` is untouched (pass direction). The
+  `ignoredStatus` seam contract pinned directly on the drive's lease
+  (raw porcelain: `!!` entries + the tracked modification);
+- **I2 — gate-installed trees (the placement pin)**: the worker writes
+  NO ignored file; a real gate (`node install-fixture.js`, the
+  npm-install shape) creates `node_modules/x/` itself — the snapshot
+  records it, proving it runs AFTER the gate loop (a pre-gate snapshot
+  would record nothing);
+- **I3 — the cap pin**: 60 ignored entries record count 60, entries
+  exactly the FIRST 50 in porcelain order (top-N, not a sample), the
+  evidence file keeps all 60 `!!` lines, and the console line names the
+  remainder (+10 more);
+- **I4 — clean-negative**: a `.gitignore` exists but nothing ignored
+  is on disk — NO block, NO snapshot file, NO console line, no
+  `ignoredPaths` bytes anywhere in the serialized report, and the
+  candidate report's key set exactly the pre-T-047 list
+  (byte-identical shape, the producer-only pattern);
+- **I5 — verdict inertness (fail direction)**: ignored paths present
+  AND a failing gate — the verdict follows the gates alone (FAIL), the
+  block still records the ignored set (evidence rides the verdict
+  either way; ignored-path presence eliminated nothing, promoted
+  nothing);
+- **I6 — integrate parity note**: a summary-carrying survivor's replay
+  exits 0 with the note printed (ignored trees named, "gate parity is
+  not established") and the summary recorded verbatim in `<id>.json`;
+  the same shape with a failing replay gate exits 1 (gate-determined,
+  the note forced nothing) with note and block still recorded; a clean
+  survivor's replay prints no note and records no key (the
+  producer-only pattern at the replay surface); a capped summary's
+  note names the remainder (+10 more).
+
+**Red bar (AGENTS.md #8), recorded BEFORE the change landed** — the
+lane at main (ce0d65f, engine untouched) running this same check: 20
+failures of 41, exit 1 — exactly the new-behavior faces (F0; I1's
+snapshot/summary/key/artifact/console/seam ×6; I2's block+file; I3's
+count/entries/file/remainder; I5's block; I6's note+block on the pass,
+fail, and capped faces ×6). The 21 green faces pin preserved semantics
+(the blindness premise itself, the verdict machinery in both
+directions, the clean-negative shape, the gate-determined replay
+exits). Post-change: all 41 assertions green, exit 0.
+
+Not pinned here and carved by the ticket: no verdict-semantics change
+(the ladder expression is untouched — the block is produced after it
+and nothing downstream reads it), no decisions.md change, no run
+summary marker (the ticket names the integrate note, not a CLI marker),
+no store schema change (the store ingests verdicts only; the block
+rides the report artifact). **Gate 2 — owed** (`src/runner.ts` — the
+gate loop's verdict-adjacent code — plus `src/types.ts` report shape
+and `src/integrate.ts`; trigger list, Gate 2's section): the standard
+real e2e run rides the snapshot on every candidate's final attempt —
+the demo fixture carries no ignored trees (no `npm install`-style
+gate), so no block is expected and the run's shape is unchanged;
+whether a real candidate ever produces a block is read off the run's
+reports, never asserted. **Gate 3 — n/a** (no adapter change).
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash

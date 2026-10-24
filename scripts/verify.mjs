@@ -987,6 +987,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.33: ignored-path parity evidence (T-047) ----------
+section('Gate 1.33 — ignored-path parity evidence (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-ignored-paths.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'ignored-paths self-check exit 0')
+} catch (e) {
+  fail(`ignored-paths self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

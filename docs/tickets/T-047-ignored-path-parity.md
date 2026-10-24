@@ -1,6 +1,6 @@
 # T-047 — Ignored-path parity evidence: ignored-tree snapshot per attempt + integrate parity note
 
-**Status:** proposed
+**Status:** done 2026-10-23
 **Category:** engine
 **Value (1-5):** 3 · **Risk (1-5):** 1
 **Depends on:** T-044 (the snapshot rides the same diff-vs-baseSha capture point; land after or with it)
@@ -60,39 +60,85 @@ measurements instead of guesses.
 
 ## Acceptance criteria
 
-- [ ] **Red bar recorded first** (AGENTS #8), token-free scratch-repo
+- [x] **Red bar recorded first** (AGENTS #8), token-free scratch-repo
       check (the 2026-10-23 repro, re-run): a lease whose worker wrote into
       an ignored dir — today's report carries no trace of it; the check
       asserts the absence on main as the red bar.
-- [ ] Green: the same scenario post-change — `ignored-paths.txt` exists in
+- [x] Green: the same scenario post-change — `ignored-paths.txt` exists in
       the attempt evidence dir, and the report summary names the ignored
       entry with its count — pinned by the same check.
-- [ ] Cap pin: a fixture producing more ignored entries than the constant
+- [x] Cap pin: a fixture producing more ignored entries than the constant
       records exactly the constant's count and the cap is documented
       (exported for the gate, the `MAX_RETRY_FINDINGS` pattern) — pinned by
       the same check.
-- [ ] Clean-negative: a run with no ignored files produces NO block and a
+- [x] Clean-negative: a run with no ignored files produces NO block and a
       byte-identical report shape to today — pinned by the same check.
-- [ ] Integrate note: replaying a candidate with a non-empty summary
+- [x] Integrate note: replaying a candidate with a non-empty summary
       prints the parity note and records it in `<id>.json`; exit code
       unchanged by the note (a passing replay still exits 0) — pinned by
       the check's replay leg.
-- [ ] Verdict inertness pinned: the snapshot and summary never enter any
+- [x] Verdict inertness pinned: the snapshot and summary never enter any
       ladder expression (the check asserts `passedAllGates` is unaffected
       by ignored-path presence).
-- [ ] VERIFICATION.md extended in the same change-set (AGENTS #6), stating
+- [x] VERIFICATION.md extended in the same change-set (AGENTS #6), stating
       the carve (visibility, not provisioning/detection) — pinned by the
       full fast tier ALL GREEN.
-- [ ] **Gate 2 owed** (report shape + runner/src change); trigger analysis
+- [x] **Gate 2 owed** (report shape + runner/src change); trigger analysis
       recorded at landing. **Gate 3 n/a**.
 
 ## Landed
 
+2026-10-23, Gate 1.33 (`scripts/check-ignored-paths.mjs`, wired into
+`scripts/verify.mjs` fast tier).
+
+- `WorkspaceProvider.ignoredStatus` seam (`src/types.ts`, implemented in
+  `src/workspace/worktree.ts`): the lease's raw `git status --porcelain
+  --ignored` output — ignored directories collapse to one `!! dir/` line
+  (default untracked mode).
+- `src/runner.ts`: `MAX_IGNORED_PATHS = 50` exported (the
+  MAX_RETRY_FINDINGS pattern); after the final attempt's gate loop — so
+  gate-installed trees are included, the parity-relevant set — the
+  porcelain snapshot is written to the attempt's evidence dir as
+  `ignored-paths.txt`, recorded among the attempt's `outputArtifacts`
+  (the diff.patch precedent), and summarized as the additive,
+  producer-only `CandidateReport.ignoredPaths {count, entries}`
+  (`IgnoredPathsSummary`, `src/types.ts`): count = the full pre-cap
+  `!!` total, entries = the first 50 in porcelain order. Producer-only:
+  an empty `!!` set writes nothing and the report shape is
+  byte-identical to pre-T-047. A loud console line; a snapshot failure
+  logs and records nothing (never breaks a run).
+- `src/integrate.ts`: replaying a candidate with a non-empty summary
+  prints, before any gate output, "the run environment held ignored
+  trees the replay tree lacks: node_modules/, … — gate parity is not
+  established" (the "+N more" remainder when capped) and records the
+  summary verbatim in the verdict JSON (`IntegrateVerdict.ignoredPaths`,
+  both verdict write paths). Exit code stays gate-determined.
+- Verdict inertness: the block is produced after the ladder line and no
+  ladder expression reads it — pinned behaviorally in both directions
+  (pass and fail) by Gate 1.33 legs I1/I4/I5.
+
+Gates measured: red bar at the lane on main (ce0d65f, engine untouched)
+running the landed check — 20 failures of 41, exit 1 (exactly the
+new-behavior faces; the 21 green faces are the preserved semantics);
+post-change `node node_modules/tsx/dist/cli.mjs
+scripts/check-ignored-paths.mjs` — 41/41 green, exit 0; Gate 0
+(`npm run typecheck`) exit 0; full fast tier (`node scripts/verify.mjs
+fast`) ALL GREEN. **Gate 2 owed** (report shape + `src/runner.ts` +
+`src/integrate.ts` are on the trigger list): the standard real e2e run
+rides the snapshot on every candidate's final attempt — the demo
+fixture carries no ignored trees, so no block is expected and the run's
+shape is unchanged; whether a real candidate ever produces a block is
+read off the run's reports, never asserted. **Gate 3 n/a** (no adapter
+change). No ride-alongs: no CLI summary marker (the ticket names the
+integrate note only), no store schema change (the store ingests
+verdicts only), no decisions.md change.
+
 ## Verification
 
-New fast-tier check (next free gate number at landing): ignored-write red
-bar, snapshot green, cap, clean-negative, integrate note, verdict
-inertness. Gate 0, full fast tier ALL GREEN; Gate 2 owed and recorded.
+Gate 1.33 (`scripts/check-ignored-paths.mjs`, fast tier): ignored-write
+red bar, snapshot green, gate-installed placement, cap, clean-negative,
+integrate note, verdict inertness. Gate 0, full fast tier ALL GREEN;
+Gate 2 owed and recorded (see Landed).
 
 ## References
 

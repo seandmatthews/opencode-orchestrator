@@ -49,7 +49,7 @@ import { CommandGate } from './gate/command.js'
 import { acquireCheckoutLock, CheckoutLockRefused, releaseCheckoutLock } from './lock.js'
 import { diffArtifactId, recordIntegrateVerdict, verifyRunArtifacts } from './store/index.js'
 import type { ArtifactVerification } from './store/index.js'
-import type { CandidateReport, GateCommandOverlap, GateResult, RunReport } from './types.js'
+import type { CandidateReport, GateCommandOverlap, GateResult, IgnoredPathsSummary, RunReport } from './types.js'
 
 const usage = `Integration replay: re-verify a surviving candidate's diff at current HEAD.
 
@@ -187,6 +187,16 @@ interface IntegrateVerdict {
    * say so. Evidence only: the exit code stays gate-determined.
    */
   gateCommandOverlap?: GateCommandOverlap[]
+  /**
+   * T-047: copied verbatim from the candidate's recorded ignored-path
+   * summary when present — a replay of a summary-carrying survivor
+   * executes its gates in a fresh worktree holding only HEAD + diff.patch,
+   * which by construction lacks every ignored tree the run environment
+   * held (diff capture respects .gitignore), so gate parity between the
+   * run and this replay is not established. Evidence only: the exit code
+   * stays gate-determined.
+   */
+  ignoredPaths?: IgnoredPathsSummary
 }
 
 async function main(): Promise<number> {
@@ -297,6 +307,22 @@ async function replay(
     console.log(`integrate ${opts.candidate}: NOTE — the run flagged gate/diff overlap (this replay exercises evaluator files the candidate changed): ${candidate.gateCommandOverlap.map((o) => `gate ${o.gate} executes ${o.touched.join(', ')}`).join('; ')}`)
   }
 
+  // T-047: surface the run's ignored-path parity summary BEFORE any gate
+  // output (the T-045 posture): a replay tree holds only HEAD + diff.patch,
+  // and diff capture respects .gitignore — every ignored tree the run
+  // environment held (worker-written or gate-installed, e.g. an npm-install
+  // gate's node_modules/) is absent here by construction, so a replay
+  // PASS/FAIL of this candidate never established parity with the
+  // environment its run gates executed in. Fires only on a non-empty
+  // summary (the runner records the block only when the porcelain `!!` set
+  // is non-empty). Evidence only: the note changes no verdict; the exit
+  // code below stays gate-determined.
+  const ignoredSummary = candidate.ignoredPaths
+  if (ignoredSummary !== undefined && ignoredSummary.count > 0) {
+    const more = ignoredSummary.count > ignoredSummary.entries.length ? ` (+${ignoredSummary.count - ignoredSummary.entries.length} more)` : ''
+    console.log(`integrate ${opts.candidate}: NOTE — the run environment held ignored trees the replay tree lacks: ${ignoredSummary.entries.join(', ')}${more} — gate parity is not established`)
+  }
+
   // git apply is atomic: a rejecting patch leaves the tree untouched, so
   // there is no partial state to clean up.
   //
@@ -338,6 +364,7 @@ async function replay(
       passed: false,
       worktreePath,
       ...(candidate.gateCommandOverlap !== undefined ? { gateCommandOverlap: candidate.gateCommandOverlap } : {}),
+      ...(candidate.ignoredPaths !== undefined ? { ignoredPaths: candidate.ignoredPaths } : {}),
     })
     return 1
   }
@@ -363,6 +390,7 @@ async function replay(
     passed,
     worktreePath,
     ...(candidate.gateCommandOverlap !== undefined ? { gateCommandOverlap: candidate.gateCommandOverlap } : {}),
+    ...(candidate.ignoredPaths !== undefined ? { ignoredPaths: candidate.ignoredPaths } : {}),
   })
 
   const gateText = results.map((r) => `${r.name} ${r.passed ? 'PASS' : 'FAIL'}`).join(', ')
