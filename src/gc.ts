@@ -1,7 +1,7 @@
 // Worktree lease GC (T-020): walk the run root, classify every run directory
 // against the evidence the engine already produces, and dispose — through
-// src/clean.ts's lock-serialized, dirty-refusing disposal loop
-// (src/disposal.ts) — only what is provably orphaned. Spec §16 makes worktrees
+// src/clean.ts's lock-serialized, evidence-parity-refusing disposal loop
+// (src/disposal.ts, T-048) — only what is provably orphaned. Spec §16 makes worktrees
 // leased resources whose branches carry no unique evidence (workers never
 // commit — the diff is captured to diff.patch first; enforced, not assumed,
 // since T-044: a branch beyond the run's baseSha is refused as evidence);
@@ -31,8 +31,9 @@
 //                         records' worktreePath/branch fields, the
 //                         recovery.json workspaces, and wt/-discovery, fed
 //                         through clean's per-worktree disposal loop
-//                         (dirty-refusal, prune fallback, branch removal
-//                         after removal — src/disposal.ts, unchanged).
+//                         (evidence-parity refusal (T-048), prune fallback,
+//                         branch removal after removal — src/disposal.ts,
+//                         unchanged).
 //   finished              report.json present ⇒ the run completed; its
 //                         workspaces were disposed in-run or are clean's
 //                         ordinary business ⇒ no worktree disposal here;
@@ -58,8 +59,9 @@
 // (report.json, dispatch.jsonl, recovery.json, worker.log, diff.patch,
 // integrate/<id>.json); a held lock; a live run's lease.
 //
-// Deliberately NO --force: GC never discards uncommitted changes — a dirty
-// worktree is refused per-item, with a pointer at
+// Deliberately NO --force: GC never discards un-captured changes — a
+// worktree that differs from its stored diff.patch evidence (or holds
+// changes with none) is refused per-item, with a pointer at
 // `npm run clean -- --run <id> --force` (today's manual path for exactly
 // that case). The per-repo checkout lock is taken inside the per-run pass and
 // released in a finally on every path. Every git subprocess is list-form,
@@ -94,13 +96,15 @@ convention) and classifies every run dir: live (checkout lock held — the run
 may be live; skip, name the holder, remove nothing), crashed-unreconciled
 (no report.json, no recovery.json — run \`npm run recover\` first; remove
 nothing), crashed-reconciled (recovery.json present — worktrees + swarm/*
-branches disposed through clean's dirty-refusing disposal loop), or finished
+branches disposed through clean's evidence-parity-refusing disposal
+loop), or finished
 (report.json present — branch sweep only). The branch sweep deletes only
 swarm/* branches that have no registered worktree and are attributable to a
 terminal run; unowned branches are reported and never deleted.
 
-Deliberately no --force: GC never discards uncommitted changes — a dirty
-worktree is refused per-item, with a pointer at
+Deliberately no --force: GC never discards un-captured changes — a worktree
+that differs from its stored diff.patch evidence (or holds changes with
+none) is refused per-item, with a pointer at
 \`npm run clean -- --run <id> --force\`. wt/int-* integration-replay worktrees
 are never auto-disposed (reported as held). Evidence files are never deleted.
 Exit 0 when the sweep completed; 1 when any disposal item was refused or

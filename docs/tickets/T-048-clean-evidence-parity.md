@@ -1,6 +1,6 @@
 # T-048 — Clean's dirty predicate: refuse on uncaptured changes, not on captured evidence
 
-**Status:** proposed
+**Status:** done
 **Category:** ops
 **Value (1-5):** 3 · **Risk (1-5):** 2
 **Depends on:** T-044 (the predicate compares against the captured diff; its semantics are T-044's)
@@ -93,6 +93,90 @@ evidence was produced with.
       **Gate 3 n/a.**
 
 ## Landed
+
+Landed 2026-10-23, lane `ticket/T-048-clean-evidence-parity`.
+
+**Code** — exactly the predicate change the ticket names, no ride-alongs:
+
+- `src/disposal.ts` — the porcelain read in `disposeTargets` is replaced
+  by the evidence-parity check: re-run the capture form in the worktree
+  (`git add -A --intent-to-add .` + `git diff HEAD --binary`, the same
+  two list-form calls `WorktreeProvider.diff` makes), byte-compare
+  against the stored final-attempt `diff.patch`. Equal (or both empty)
+  ⇒ removable; empty re-capture ⇒ removable (no non-ignored changes
+  relative to the tree's own HEAD — nothing un-captured exists; a
+  committing worker's work lives on its branch, which the T-044 guard
+  refuses); stored missing/unreadable ⇒ refused ("worktree holds
+  un-captured changes — stored diff.patch missing or unreadable; re-run
+  with --force to discard"); different ⇒ refused ("worktree differs
+  from its captured evidence — post-capture changes; re-run with --force
+  to discard"). New exported `evidenceDiffPath` mirrors the runner's
+  evidence geometry (`wt/<id>` → `<runDir>/<id>/diff.patch`, retry legs
+  `wt/<id>-a<n>` → `<runDir>/<id>/attempt-<n>/diff.patch` — exact by
+  construction for every runner-produced lease, report or no report);
+  its one ambiguity (a job id literally ending in `-a<digits>`) is
+  documented and errs toward refusal, never a false pass. `--force`
+  bypasses unchanged; evidence is never deleted; the ITA-staging side
+  effect is untouched (this change only reads).
+- `src/clean.ts` / `src/gc.ts` — comment/usage wording only (the
+  refusal vocabulary the two commands document): "uncommitted changes"
+  → the evidence-parity wording. Zero call-site changes: both commands
+  drive the shared loop, so both get the new predicate by construction
+  (T-020).
+
+**Two documented precisions** (recorded here and in VERIFICATION.md
+Gate 1.34, not silent): (1) the re-capture diff target is the
+worktree's **HEAD**, not `report.baseSha` — byte-identical to the
+T-044 base-diff on every tree the comparison governs (each lease checks
+out at baseSha, so HEAD === baseSha until a commit moves it — Gate 1.30
+C4's inertness pin), while a base-relative diff on a non-lease worktree
+(an `int-*` replay detached at a drifted HEAD) would measure the drift,
+not the tree, and falsely refuse porcelain-clean replay trees Gate 1.5's
+sweep disposes without `--force`; (2) byte-comparison is line-ending
+stable (Known issue #5's CRLF class) because both passes run the
+identical capture form under the identical git config — pinned
+empirically by P5; no tolerant comparison was needed, none applied.
+
+**Checks** — new `scripts/check-clean-evidence.mjs` (Gate 1.34, 25
+assertions, wired into `scripts/verify.mjs` fast tier): P0 geometry
+export · P1 captured-green (the 2026-10-23 repro — tracked edit +
+untracked new file + binary edit, fully captured, porcelain provably
+dirty — removed by PLAIN clean, branch and all, evidence kept) · P2
+post-capture refusal both legs (refused without `--force`, survivors
+intact; `--force` still discards) · P3 missing-evidence refusal · P4
+both-empty no-op cleans · P5 CRLF cycle under `core.autocrlf=true` no
+false refusal · P6 retry-leg attempt-2 evidence geometry.
+`scripts/check-gc.mjs` (Gate 1.18) extended with pass D, both legs on
+gc's crashed-reconciled lane (captured-before-crash worktree disposed by
+the no-`--force` pass; post-capture edit refused per-item, survivors
+intact), and its A5 message pin updated to the new missing-evidence
+line (the refusal itself unchanged); end-state censuses updated for the
+new survivors. `scripts/verify.mjs`'s Gate 1.5 AC#2 comment updated to
+the evidence-parity wording — no existing assertion weakened; every
+pre-existing Gate 1.5/1.18 scenario rides green unchanged (the
+porcelain-clean trees the old predicate let through are the
+empty-recapture leg of the new one, byte-for-byte the same outcome).
+
+**Red bar (AGENTS #8), recorded before any engine change** — the lane
+at main (5b48eb2) running the landed check: 10 failures of 25, exit 1
+(P0 ×4: no geometry export; P1 ×2: the fully-captured worktree REFUSED
+by plain clean — the repro; P2/P3 message faces ×2: the old line names
+no reason; P5: the CRLF cycle false-refused; P6: the retry-leg captured
+worktree refused). The 15 green faces pin preserved semantics
+(premises, refusals still refusing, `--force` still discarding,
+both-empty cleaning, evidence never deleted). Green post-change:
+25/25, exit 0.
+
+**Gates measured:** Gate 0 typecheck exit 0 · `node node_modules/tsx/
+dist/cli.mjs scripts/check-clean-evidence.mjs` ALL GREEN (Gate 1.34) ·
+`node node_modules/tsx/dist/cli.mjs scripts/check-gc.mjs` ALL GREEN
+incl. pass D (Gate 1.18) · full fast tier `node scripts/verify.mjs
+fast` — `=== verify (fast) complete: ALL GREEN ===`, exit 0 (Gates
+0+0.5+1+1.5…1.34). **Gate 2 not owed** — trigger analysis, the T-041
+precedent: no `src/runner`, no adapter, no report shape — disposal only;
+the full fast tier re-runs green against the new predicate, and the
+full tier's own post-run clean rides `--force` (unchanged path).
+**Gate 3 n/a** (no adapter change).
 
 ## Verification
 

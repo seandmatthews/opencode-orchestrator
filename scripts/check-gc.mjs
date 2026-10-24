@@ -31,6 +31,12 @@
 //       baseSha (the committing worker, worktree already gone — the --clean
 //       leak shape, T-044): the sweep REFUSES the attributable, unregistered
 //       branch with the loud evidence line; exit 1; branch survives.
+//   D   T-048's evidence-parity predicate rides gc's crashed-reconciled
+//       lane (shared disposeTargets), both legs: a worktree whose changes
+//       were captured before the crash (stored diff.patch at the runner's
+//       evidence geometry) is DISPOSED by the no---force gc pass, and the
+//       same shape plus a post-capture edit is REFUSED per-item (worktree +
+//       branch + evidence survive); exit 1.
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -248,9 +254,11 @@ t('A4: no worktree disposal — the registered c04 worktree and its branch survi
 t('A4: the sweep reports why — branch held by a registered worktree',
   a.out.includes('branch held by a registered worktree') && a.out.includes('swarm/wt-c04'))
 
-// A5 — dirty worktree refused, per-item, with the clean --force pointer.
-t('A5: the dirty worktree is refused (GC takes no --force) with the per-item refusal',
-  a.out.includes(`refused (uncommitted changes; re-run with --force to discard): ${a5.wt}`))
+// A5 — changed worktree with no stored evidence refused, per-item, with the
+// clean --force pointer (T-048: the refusal names the un-captured changes and
+// the missing diff.patch — the evidence-first posture).
+t('A5: the changed, un-captured worktree is refused (GC takes no --force) with the per-item refusal',
+  a.out.includes(`refused (worktree holds un-captured changes — stored diff.patch missing or unreadable; re-run with --force to discard): ${a5.wt}`))
 t('A5: the refusal carries the clean --force pointer for the run',
   a.out.includes('gc never discards changes') && a.out.includes(`npm run clean -- --run 20260101000005 --force`))
 t('A5: worktree + branch intact after the refusal',
@@ -330,11 +338,58 @@ t('C: the branch — the only copy of the committed work — survives the sweep'
   swarmBranches().includes('swarm/wt-c08'))
 t('C: no residual lock files after pass C', lockFilesIn(locksDir).length === 0)
 
+// ---------- D (T-048): the evidence-parity predicate rides gc's lane ----------
+// Both legs, crashed-reconciled (the only gc class that disposes worktrees):
+// a worktree whose changes were captured before the crash — evidence written
+// exactly where the runner writes it, with the engine's own capture form —
+// is disposed by the no---force gc pass; the same shape plus a post-capture
+// edit is refused per-item. No report.json, so the parity comparison runs
+// against the worktree's HEAD (identical bytes to the base-diff capture on
+// a non-committing lease — HEAD === baseSha).
+const captureInto = (lease, runId, id) => {
+  run('git', ['-C', lease.wt, 'add', '-A', '--intent-to-add', '.'])
+  const diff = run('git', ['-C', lease.wt, 'diff', BASE, '--binary'])
+  mkdirSync(join(runs, runId, id), { recursive: true })
+  writeFileSync(join(runs, runId, id, 'diff.patch'), diff)
+  return diff
+}
+const d1 = leaseWorktree('20260101000009', 'c09')
+writeFileSync(join(d1.wt, 'file.txt'), 'captured before the crash\n')
+writeFileSync(join(d1.wt, 'extra-d1.txt'), 'new file, captured\n')
+const d1Diff = captureInto(d1, '20260101000009', 'c09')
+writeDispatch('20260101000009', [{ id: 'c09' }])
+writeRecovery('20260101000009', [{ path: d1.wt, branch: d1.branch }])
+t('D setup: the crashed-run capture is a real diff covering both changes',
+  d1Diff.includes('captured before the crash') && d1Diff.includes('extra-d1.txt'))
+
+const d2 = leaseWorktree('20260101000010', 'c10')
+writeFileSync(join(d2.wt, 'file.txt'), 'captured, then edited after\n')
+captureInto(d2, '20260101000010', 'c10')
+writeFileSync(join(d2.wt, 'file.txt'), 'captured, then edited after\nplus a post-capture line\n') // AFTER the capture
+writeDispatch('20260101000010', [{ id: 'c10' }])
+writeRecovery('20260101000010', [{ path: d2.wt, branch: d2.branch }])
+
+const d = runGc([], 'pass D (T-048 evidence parity)')
+t('D: exits 1 — the post-capture-edit worktree was refused', d.code === 1)
+t('D: classification census — 10 run dirs, 1 crashed-unreconciled, 6 crashed-reconciled, 3 finished',
+  d.out.includes('10 run dir(s)') && d.out.includes('1 crashed-unreconciled') && d.out.includes('6 crashed-reconciled') && d.out.includes('3 finished'))
+t('D leg 1: the captured-before-crash worktree was DISPOSED by the no---force gc pass, branch and all',
+  !existsSync(d1.wt) && !swarmBranches().includes('swarm/wt-c09')
+  && d.out.includes(`removed worktree: ${d1.wt}`) && d.out.includes('removed branch: swarm/wt-c09'))
+t('D leg 2: the post-capture edit is refused per-item with the evidence-parity line',
+  d.out.includes(`refused (worktree differs from its captured evidence — post-capture changes; re-run with --force to discard): ${d2.wt}`))
+t('D leg 2: worktree + branch + evidence survive the refusal',
+  existsSync(d2.wt) && swarmBranches().includes('swarm/wt-c10')
+  && existsSync(join(runs, '20260101000010', 'c10', 'diff.patch')))
+t('D: the refusal pointer still names the clean --force path', d.out.includes('gc never discards changes'))
+t('D: no residual lock files after pass D', lockFilesIn(locksDir).length === 0)
+
 // end state: exactly what GC must leave for a human remains.
-t('end state: exactly the deliberately-kept worktrees remain — main, the unreconciled c02, the kept c04, the held int-c06',
-  worktreeCount() === 4 && git('worktree', 'list', '--porcelain').includes('wt-c02')
-  && git('worktree', 'list', '--porcelain').includes('wt-c04') && git('worktree', 'list', '--porcelain').includes('int-c06'))
-t('end state: exactly the deliberately-kept branches remain — c02 (unreconciled), c04 (registered), c08 (carries commits — evidence), ghost (unowned)',
-  swarmBranches() === 'swarm/wt-c02,swarm/wt-c04,swarm/wt-c08,swarm/wt-ghost')
+t('end state: exactly the deliberately-kept worktrees remain — main, the unreconciled c02, the kept c04, the held int-c06, the refused c10',
+  worktreeCount() === 5 && git('worktree', 'list', '--porcelain').includes('wt-c02')
+  && git('worktree', 'list', '--porcelain').includes('wt-c04') && git('worktree', 'list', '--porcelain').includes('int-c06')
+  && git('worktree', 'list', '--porcelain').includes('wt-c10'))
+t('end state: exactly the deliberately-kept branches remain — c02 (unreconciled), c04 (registered), c08 (carries commits — evidence), c10 (post-capture changes — evidence parity refusal), ghost (unowned)',
+  swarmBranches() === 'swarm/wt-c02,swarm/wt-c04,swarm/wt-c08,swarm/wt-c10,swarm/wt-ghost')
 
 rmSync(sandbox, { recursive: true, force: true })

@@ -1,19 +1,19 @@
 // Shared disposal internals (T-020): the per-worktree disposal loop and the
 // evidence readers both `src/clean.ts` (T-002) and `src/gc.ts` (T-020) drive.
 // Extracted verbatim from src/clean.ts so both commands share one disposal
-// semantics — dirty-refusal, prune fallback, branch-removal-after-removal —
-// instead of a second diverging copy. Deliberately NOT
-// src/workspace/worktree.ts: that file is the WorkspaceProvider seam (the
-// lease/diff/dispose interface, decisions.md 2026-10-18); this module is
-// disposal policy over recorded evidence, a different concern with different
-// consumers.
+// semantics — evidence-parity refusal (T-048), prune fallback,
+// branch-removal-after-removal — instead of a second diverging copy.
+// Deliberately NOT src/workspace/worktree.ts: that file is the
+// WorkspaceProvider seam (the lease/diff/dispose interface, decisions.md
+// 2026-10-18); this module is disposal policy over recorded evidence, a
+// different concern with different consumers.
 //
 // Evidence files are never deleted here — only git worktrees and their
 // `swarm/*` branches (the T-002 rule). Every git subprocess is list-form,
 // never through a shell (AGENTS.md #4).
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { normPath, registeredWorktrees } from './workspace/worktree.js'
 
 function git(cwd: string, args: string[]): string {
@@ -57,6 +57,42 @@ export interface BranchGuard {
   force?: boolean
 }
 
+/** The stored final-attempt `diff.patch` for a lease-shaped worktree path —
+ *  the runner's own evidence geometry (src/runner.ts): attempt 1 leases
+ *  `wt/<id>` and captures to `<runDir>/<id>/diff.patch`; attempt n ≥ 2
+ *  leases `wt/<id>-a<n>` and captures to `<runDir>/<id>/attempt-<n>/
+ *  diff.patch` (the worktree sits at `<runDir>/wt/<name>`, so the mapping
+ *  is exact by construction for every runner-produced lease, report or no
+ *  report). Null for paths off the `wt/` convention (no evidence geometry
+ *  to read — e.g. a relocated worktree). Ambiguity note, documented rather
+ *  than resolved: a job id literally ending in `-a<digits>` would mis-map
+ *  to an attempt subdir — the mis-map reads a nonexistent file and refuses
+ *  (the conservative direction); it can never manufacture a false pass. */
+export function evidenceDiffPath(worktreePath: string): string | null {
+  const parent = dirname(worktreePath)
+  if (basename(parent) !== 'wt') return null
+  const name = basename(worktreePath)
+  const retry = name.match(/^(.*)-a(\d+)$/)
+  if (retry !== null && Number(retry[2]) >= 2) {
+    return join(dirname(parent), retry[1]!, `attempt-${retry[2]}`, 'diff.patch')
+  }
+  return join(dirname(parent), name, 'diff.patch')
+}
+
+/** The stored final-attempt diff bytes for a worktree, or null when the
+ *  evidence is missing/unreadable (no run dir, crashed before capture, a
+ *  deleted or corrupt file). Null is the refuse-side input of the parity
+ *  check — never a silent pass. */
+function readStoredDiff(worktreePath: string): string | null {
+  const p = evidenceDiffPath(worktreePath)
+  if (p === null) return null
+  try {
+    return readFileSync(p, 'utf8')
+  } catch {
+    return null
+  }
+}
+
 export function removeBranch(repo: string, branch: string, res: RunResult, guard: BranchGuard = {}): void {
   try {
     if (git(repo, ['branch', '--list', branch]).trim() === '') {
@@ -83,10 +119,11 @@ export function removeBranch(repo: string, branch: string, res: RunResult, guard
   }
 }
 
-/** Per-worktree disposal loop — the T-002 semantics, unchanged except the
- *  T-044 branch guard: `expectedBaseSha` (the report's baseSha, when a run
- *  has one) makes every removeBranch below refuse a branch whose tip sits
- *  beyond the base — a committing worker's evidence, not garbage. */
+/** Per-worktree disposal loop — the T-002 semantics with two guards: the
+ *  T-044 branch guard (`expectedBaseSha`, the report's baseSha when a run
+ *  has one, makes every removeBranch below refuse a branch whose tip sits
+ *  beyond the base — a committing worker's evidence, not garbage) and the
+ *  T-048 evidence-parity refusal below. */
 export function disposeTargets(
   repo: string,
   targets: { path: string; fallbackBranch: string | null }[],
@@ -111,16 +148,59 @@ export function disposeTargets(
     }
 
     if (existsSync(t.path)) {
-      let dirty: boolean
+      // T-048: the evidence-parity predicate — a worktree is removable
+      // without --force iff its current state matches what the captured
+      // evidence holds, or holds nothing at all. It replaces the porcelain
+      // read, which fired on 100% of normal operation: WorktreeProvider.diff
+      // runs `git add -A --intent-to-add .` on every attempt, so porcelain
+      // ALWAYS reads dirty for exactly the worktrees worth cleaning (the
+      // 2026-10-23 scratch repro: ` M build.js` / `A notes-new-file.md`) —
+      // a refusal that fires precisely when evidence EXISTS. Mechanically:
+      // re-run the capture form in the worktree (the same two list-form git
+      // calls worktree.ts makes), byte-compare against the run's stored
+      // final-attempt diff.patch (the geometry evidenceDiffPath mirrors):
+      //   equal (or both empty)      ⇒ captured    ⇒ removable;
+      //   empty re-capture           ⇒ the tree holds no non-ignored
+      //                                changes relative to its own HEAD —
+      //                                nothing un-captured exists (a
+      //                                committing worker's work lives on
+      //                                its branch, which the T-044 guard
+      //                                refuses);
+      //   stored missing/unreadable  ⇒ refuse — changes no evidence holds;
+      //   different bytes            ⇒ refuse — post-capture changes.
+      // The re-capture diff target is the worktree's HEAD: byte-identical
+      // to the T-044 base-diff on every tree the comparison governs (each
+      // lease checks out at baseSha, so HEAD === baseSha until a commit
+      // moves it — Gate 1.30 C4's inertness pin), while a base-relative
+      // diff on a non-lease worktree (an int-* replay detached at a
+      // drifted HEAD) would measure the drift, not the tree. Line endings:
+      // the comparison is byte-stable on CRLF-shaped trees (Known issue
+      // #5's class) because both passes run the identical capture form
+      // under the identical git config — pinned empirically by Gate 1.34
+      // P5; no tolerant comparison is needed, and none is applied.
+      let refusal: string | null = null
       try {
-        dirty = git(t.path, ['status', '--porcelain']).trim() !== ''
+        git(t.path, ['add', '-A', '--intent-to-add', '.'])
+        const recapture = git(t.path, ['diff', 'HEAD', '--binary'])
+        if (recapture !== '') {
+          const stored = readStoredDiff(t.path)
+          if (stored === null) {
+            refusal =
+              `refused (worktree holds un-captured changes — stored diff.patch missing or unreadable;` +
+              ` re-run with --force to discard): ${t.path}`
+          } else if (stored !== recapture) {
+            refusal =
+              `refused (worktree differs from its captured evidence — post-capture changes;` +
+              ` re-run with --force to discard): ${t.path}`
+          }
+        }
       } catch (e) {
-        console.error(`failed (status check on ${t.path}): ${errorMessage(e)}`)
+        console.error(`failed (evidence-parity check on ${t.path}): ${errorMessage(e)}`)
         res.failed++
         continue
       }
-      if (dirty && !force) {
-        console.error(`refused (uncommitted changes; re-run with --force to discard): ${t.path}`)
+      if (refusal !== null && !force) {
+        console.error(refusal)
         res.refused++
         continue
       }

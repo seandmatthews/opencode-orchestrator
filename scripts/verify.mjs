@@ -132,9 +132,12 @@ ok(swarmBranches() === '', 'recorded run: no swarm/* branches left')
 ok(!existsSync(join(cleanRuns, '20991010120000', 'wt', 'c01')), 'recorded run: worktree directories removed')
 ok(existsSync(join(cleanRuns, '20991010120000', 'report.json')), 'recorded run: evidence (report.json) survives cleanup')
 
-// AC#2 — dirty worktree refused without --force (clean sibling still disposed,
-// per-item result, non-zero exit), disposed with --force. No report.json, so
-// this also exercises wt/-discovery.
+// AC#2 — a changed worktree with no stored diff.patch evidence is refused
+// without --force (clean sibling still disposed, per-item result, non-zero
+// exit), disposed with --force. No report.json, so this also exercises
+// wt/-discovery. (Since T-048 the refusal is the evidence-parity predicate's
+// missing-evidence leg — before T-048 a plain porcelain read, which by
+// construction also refused every CAPTURED worktree.)
 makeCleanRun('20991010120001', { withReport: false, dirtyIds: ['c01'] })
 code = expectClean(1, 'dirty refusal', ['--run', '20991010120001', '--run-root', cleanRuns])
 ok(code === 1, `clean --run refuses a dirty worktree with exit 1 (got ${code})`)
@@ -994,6 +997,16 @@ try {
   ok(true, 'ignored-paths self-check exit 0')
 } catch (e) {
   fail(`ignored-paths self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
+// ---------- Gate 1.34: clean's evidence-parity predicate (T-048) ----------
+section('Gate 1.34 — clean evidence-parity predicate (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-clean-evidence.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'clean-evidence self-check exit 0')
+} catch (e) {
+  fail(`clean-evidence self-check failed: ${e.status ?? e.message}`)
   finish()
 }
 

@@ -84,4 +84,4 @@ Rules:
 | T-045 | Gate/diff overlap evidence: flag when a candidate diff touches files its gate commands execute (evaluator-tampering signal, never a verdict) | medium | done 2026-10-23 |
 | T-046 | Post-kill settle deadline: bounded wait after the verified tree kill — loud abandonment instead of a wedged run + never-reaped lock (worker core + probe core) | high | done 2026-10-23 |
 | T-047 | Ignored-path parity evidence: ignored-tree snapshot per attempt + integrate parity note (first slice of the .gitignore blindness; provisioning/detection carved) | medium | done 2026-10-23 |
-| T-048 | Clean's dirty predicate: refuse on uncaptured changes, not on captured evidence (evidence-parity comparison against the stored diff.patch) | medium | proposed |
+| T-048 | Clean's dirty predicate: refuse on uncaptured changes, not on captured evidence (evidence-parity comparison against the stored diff.patch) | medium | done 2026-10-23 |

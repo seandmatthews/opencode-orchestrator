@@ -86,9 +86,13 @@ npm run clean -- --all [--force] [--run-root <path>]
 ```
 
 Disposes a run's git worktrees and `swarm/*` branches (T-002). Never deletes
-evidence — `report.json`, `diff.patch`, logs survive. A worktree holding
-uncommitted changes is refused (non-zero exit, per-item message) unless `--force`:
-un-captured changes may be the only copy. `--all` cleans every run directory under
+evidence — `report.json`, `diff.patch`, logs survive. A worktree NOT covered by
+captured evidence is refused (non-zero exit, per-item message) unless `--force`:
+changes no stored `diff.patch` holds, or changes made after the capture, may be
+the only un-captured copy — T-048's evidence-parity predicate (Gate 1.34;
+before T-048 a plain porcelain read refused EVERY post-capture worktree, since
+the capture's `git add -A --intent-to-add .` staging always reads dirty).
+`--all` cleans every run directory under
 the run root except the newest (run directories are 14-digit timestamp names).
 Worktrees come from the run's `report.json` plus anything else discovered under its
 `wt/`; the target repo comes from the report's `repo` field, falling back to the
@@ -98,7 +102,8 @@ hazard.
 
 The fast tier pins this against a throwaway sandbox repo: a recorded run cleans
 with exit 0, leaving only `main` in `worktree list` and no `swarm/*` branches, with
-`report.json` intact; a dirty worktree is refused while its clean sibling is still
+`report.json` intact; a changed worktree with no stored evidence is refused while
+its clean sibling is still
 disposed (per-item results), and disposed under `--force` (no report.json, so the
 `wt/`-discovery path is exercised too); `--all` disposes the older run and leaves
 the newest untouched.
@@ -4207,6 +4212,123 @@ no candidate carried a block — the prediction held on a real run.**
 That run's one failing assertion is the Known issue #6 worker-no-op
 class (a c02-r2 path-transcription no-op), not this change-set — see
 that entry's 2026-10-24 observation. **Gate 3 — n/a** (no adapter
+change).
+
+## Gate 1.34 — clean's evidence-parity predicate: refuse on un-captured changes, not on captured evidence (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-clean-evidence.mjs
+```
+
+Pins T-048 (the 2026-10-23 adversarial review's F3, with the ticket's
+recorded scratch-repo repro): `disposeTargets` refused any worktree whose
+`git status --porcelain` was non-empty — but `WorktreeProvider.diff` runs
+`git add -A --intent-to-add .` on every attempt, so porcelain ALWAYS read
+dirty for exactly the worktrees worth cleaning (the repro: post-capture
+porcelain ` M build.js` / `A notes-new-file.md`). The refusal fired
+precisely when evidence existed, `npm run clean` without `--force`
+succeeded only for no-ops, the operator learned to always pass `--force`,
+and the protection's real target — changes made AFTER capture — was
+silently discarded too, because `--force` cannot tell the two apart.
+
+The change (`src/disposal.ts`, the shared loop clean and gc both drive —
+T-020): a worktree is removable without `--force` iff its CURRENT state
+matches what the captured evidence holds. Mechanically: re-run the capture
+form in the worktree (the same two list-form git calls
+`src/workspace/worktree.ts` makes — `git add -A --intent-to-add .`, then
+the diff), byte-compare against the run's stored final-attempt
+`diff.patch` (`evidenceDiffPath` mirrors the runner's evidence geometry:
+attempt 1 `<runDir>/<id>/diff.patch`, attempt n ≥ 2
+`<runDir>/<id>/attempt-<n>/diff.patch`, exact by construction for every
+runner-produced lease, report or no report):
+
+- **equal (or both empty)** ⇒ captured ⇒ removable — the false-positive
+  class dies: a fully-captured worktree cleans with plain `clean --run`;
+- **empty re-capture** ⇒ the tree holds no non-ignored changes relative
+  to its own HEAD — nothing un-captured exists (a committing worker's
+  work lives on its branch, which the T-044 guard refuses);
+- **stored patch missing/unreadable** ⇒ refuse — "worktree holds
+  un-captured changes — stored diff.patch missing or unreadable;
+  re-run with --force to discard" (the evidence-first posture);
+- **different bytes** ⇒ refuse — "worktree differs from its captured
+  evidence — post-capture changes; re-run with --force to discard".
+
+`--force` semantics unchanged (the explicit human override, never
+weakened); evidence is never deleted (unchanged); the ITA-staging side
+effect is untouched (T-044/capture territory — this change only reads).
+Two documented precisions, both load-bearing: the re-capture diff target
+is the worktree's **HEAD**, byte-identical to the T-044 base-diff on
+every tree the comparison governs (each lease checks out at baseSha, so
+HEAD === baseSha until a commit moves it — Gate 1.30 C4's inertness pin),
+while a base-relative diff on a non-lease worktree (an `int-*` replay
+detached at a drifted HEAD) would measure the drift, not the tree, and
+falsely refuse porcelain-clean replay trees Gate 1.5's sweep disposes
+without `--force`; and the comparison is **byte-stable on CRLF-shaped
+trees** (Known issue #5's class) because both passes run the identical
+capture form under the identical git config — pinned empirically, no
+tolerant comparison needed, none applied.
+
+Legs, zero model tokens (real `WorktreeProvider` leases + captures, the
+real `clean` CLI, scratch repos — the check-diff-basesha pattern):
+
+- **P0** — the geometry export: `evidenceDiffPath` maps `wt/<id>` →
+  `<runDir>/<id>/diff.patch`, `wt/<id>-a2` →
+  `<runDir>/<id>/attempt-2/diff.patch`, off-`wt/` paths → null (namespace
+  import, so the pre-change red bar is behavioral);
+- **P1 — captured-green (the red-bar face)**: the 2026-10-23 repro —
+  tracked edit + untracked new file + binary edit, fully captured by
+  `diff()`, porcelain provably dirty — removed by PLAIN `clean --run`
+  (exit 0, worktree + `swarm/*` branch gone, evidence kept);
+- **P2 — protection intact, both legs**: the same setup plus a
+  post-capture append REFUSED without `--force` (loud line names the
+  reason), worktree + branch + evidence survive; `--force` still
+  discards;
+- **P3 — missing-evidence refusal**: a changed worktree whose run dir
+  holds no stored `diff.patch` (the crashed-pre-capture shape) refused
+  with the un-captured-changes line;
+- **P4 — both-empty**: a no-op candidate (empty stored patch, tree at
+  base) cleans without `--force`;
+- **P5 — line-ending stability**: the whole captured-then-cleaned cycle
+  on a repo with `core.autocrlf=true` (baseline and worker bytes
+  CRLF-shaped on disk, asserted) — no false refusal;
+- **P6 — retry-leg geometry**: the attempt-2 lease `wt/<id>-a2` finds
+  its attempt-2 evidence and cleans green.
+
+The gc lane (the same predicate riding shared `disposeTargets`, T-020)
+is pinned by Gate 1.18's check extended with pass D, both legs: a
+crashed-reconciled worktree whose changes were captured before the crash
+is disposed by the no-`--force` gc pass (branch and all), and the same
+shape plus a post-capture edit is refused per-item with the
+evidence-parity line (worktree + branch + evidence survive, exit 1) —
+alongside A5, whose changed no-evidence worktree now refuses with the
+missing-evidence line (the pin updated to the new message; the refusal
+itself is unchanged).
+
+**Red bar (AGENTS.md #8), recorded BEFORE the change landed** — the lane
+at main (5b48eb2, engine untouched) running this same check: 10 failures
+of 25, exit 1 — P0 ×4 (no geometry export), P1 ×2 (the fully-captured
+worktree REFUSED by plain clean, branch surviving — the repro), P2/P3's
+message faces ×2 (the old line names no reason), P5 (the CRLF cycle
+false-refused), P6 (the retry-leg captured worktree refused). The 15
+green faces pin preserved semantics: the premises (post-capture
+porcelain dirty, real captures, CRLF bytes on disk), refusals still
+refusing, `--force` still discarding, the both-empty leg cleaning,
+evidence never deleted. Post-change: all 25 assertions green, exit 0,
+and Gate 1.18's extended check green with every pre-existing assertion
+intact.
+
+Not pinned here and carved by the ticket: `--force` semantics (never
+changed), evidence disposal (never — unchanged), the ITA-staging side
+effect itself (T-044/capture territory), tolerant line-ending
+comparison (not needed — P5 pins byte-stability under identical config;
+if a real-world drift class ever appears, it gets its own recorded repro
+and documented tolerance, never a silent one). **Gate 2 not owed** —
+trigger analysis, per the T-041 precedent: no `src/runner.ts`, no
+adapter, no report shape, no scheduler/store/dashboard surface — the
+change-set is disposal only (`src/disposal.ts` + the two commands'
+comment/usage wording), and the full fast tier (Gates 0 through 1.34,
+including Gate 1.5's clean/disposal scenarios and Gate 1.18's gc lane)
+re-runs green against the new predicate. **Gate 3 n/a** (no adapter
 change).
 
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
