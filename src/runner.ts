@@ -8,6 +8,7 @@ import { computeGateCommandOverlap } from './gate/overlap.js'
 import { annotateBriefPremise } from './premise.js'
 import type { BriefPremiseAnnotation } from './premise.js'
 import { composeRoundPacket } from './rounds.js'
+import { deriveRunYield } from './yield.js'
 import { buildEarlyStops, buildSchedule, earlyStopMet, readyJobs } from './scheduler.js'
 import type { EarlyStopPolicy, PhaseSpec } from './scheduler.js'
 import { DERIVED_PHASE_ID } from './store/index.js'
@@ -400,6 +401,20 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
   }
   if (rounds !== undefined) {
     report.rounds = rounds
+  }
+  // T-049: the yield block — the A2 measuring stick, derived mechanically
+  // from the finished report (src/yield.ts) AFTER every other block is
+  // attached, so the derivation sees the same report.json a reader will.
+  // Producer-only: no machine-known no-op elimination → no block, and the
+  // report shape is byte-identical to pre-T-049. Evidence only, never a
+  // verdict input (the probes/verifier posture): a derivation failure logs
+  // and records nothing — an instrument must never break the run it
+  // measures.
+  try {
+    const yieldBlock = deriveRunYield(report)
+    if (yieldBlock !== null) report.yield = yieldBlock
+  } catch (e) {
+    console.log(`yield derivation failed: ${errorMessage(e)}`)
   }
   writeFileSync(join(opts.artifactsDir, 'report.json'), JSON.stringify(report, null, 2))
   return report

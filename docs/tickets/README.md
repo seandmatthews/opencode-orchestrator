@@ -85,7 +85,7 @@ Rules:
 | T-046 | Post-kill settle deadline: bounded wait after the verified tree kill — loud abandonment instead of a wedged run + never-reaped lock (worker core + probe core) | high | done 2026-10-23 |
 | T-047 | Ignored-path parity evidence: ignored-tree snapshot per attempt + integrate parity note (first slice of the .gitignore blindness; provisioning/detection carved) | medium | done 2026-10-23 |
 | T-048 | Clean's dirty predicate: refuse on uncaptured changes, not on captured evidence (evidence-parity comparison against the stored diff.patch) | medium | done 2026-10-23 |
-| T-049 | Yield instrumentation: a machine-derived per-run yield block + evidence-only derailment markers — the A2 measuring stick (adversarial review 2026-10-23 §4) | high | proposed |
+| T-049 | Yield instrumentation: a machine-derived per-run yield block + evidence-only derailment markers — the A2 measuring stick (adversarial review 2026-10-23 §4) | high | done 2026-10-24 |
 | T-050 | Round-2 brief-premise guard: composer framing fix + mechanical brief annotation (the Known issue #6 2026-10-23 mechanism — briefs must not assume survivor-created files exist at base) | high | done 2026-10-24 |
 | T-051 | Dashboard write surface: Host/Origin validation + the approvals double-decide race closed by a guarded UPDATE (register R3) | medium | proposed |
 | T-052 | Lock release verifies ownership; recover's identity check fails closed — refuse-to-kill when identity cannot be established (register R4) | medium | proposed |

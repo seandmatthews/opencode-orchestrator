@@ -1020,6 +1020,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.36: yield instrumentation (T-049) ----------
+section('Gate 1.36 — yield instrumentation (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-yield.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'yield self-check exit 0')
+} catch (e) {
+  fail(`yield self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
