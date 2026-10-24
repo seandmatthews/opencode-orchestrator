@@ -52,7 +52,7 @@ and carried into report.json/the store/the dashboard. §14.4 covers
 orchestrator secrets, not target-tracked ones. **Disposition: fold a sentence
 into R1's trust-model entry.**
 
-### R3 — Dashboard approvals write surface: CSRF / DNS-rebinding + a double-decide race `ticket-later` · [subagent]
+### R3 — Dashboard approvals write surface: CSRF / DNS-rebinding + a double-decide race `ticketed T-051` · [subagent]
 
 `POST /approvals/decide` (`src/dashboard.ts:927-968`) has no Origin/Host
 validation, no CSRF token — any webpage the operator visits can flip a
@@ -66,7 +66,7 @@ percent-encoding yields a 500, not a 400. XSS was checked and is clean.
 **Disposition: small ticket — Host/Origin check, decide inside one
 transaction with a guarded UPDATE.**
 
-### R4 — Lock release never verifies ownership; recover's identity check fails open `ticket-later` · [code-read + subagent]
+### R4 — Lock release never verifies ownership; recover's identity check fails open `ticketed T-052` · [code-read + subagent]
 
 `releaseCheckoutLock` unlinks whatever occupies the path
 (`src/lock.ts:121-127`): after a `--force-lock` takeover, the previous
@@ -151,7 +151,7 @@ core caps each case at 16 MiB but concatenates ~20 cases into one
 candidate). **Disposition: ticket — cap accumulation at the
 `RESPONSE_TAIL_CHARS` scale; cap the probe's aggregate log write.**
 
-### R12 — Silent evidence loss when log writes fail `ticket-later` · [code-read + subagent]
+### R12 — Silent evidence loss when log writes fail `ticketed T-053` · [code-read + subagent]
 
 `appendLog`/`drain`/`appendLine` swallow all write failures with no
 `cleanupFailures` entry — a run can pass with a completely empty worker.log
@@ -243,7 +243,7 @@ product surface** (assisted drafting of a goal-checking gate before the
 run; seeded hidden-test corpora for domains like decompilation where
 round-tripping is mechanical).
 
-### A2 — Worker derailment is the binding constraint; the engine adapts nothing per-run `monitor`
+### A2 — Worker derailment is the binding constraint; the engine adapts nothing per-run `ticketed T-049/T-050` (instrument + the 2026-10-23 premise-mismatch mechanism's guard)
 
 The recorded failure classes say so (Known issue #6's NO-OP pairs; the
 T-040 saga's two 5-second exit-0 legs; the budget-kill ledger in #12).
