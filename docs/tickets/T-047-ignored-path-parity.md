@@ -122,23 +122,36 @@ running the landed check — 20 failures of 41, exit 1 (exactly the
 new-behavior faces; the 21 green faces are the preserved semantics);
 post-change `node node_modules/tsx/dist/cli.mjs
 scripts/check-ignored-paths.mjs` — 41/41 green, exit 0; Gate 0
-(`npm run typecheck`) exit 0; full fast tier (`node scripts/verify.mjs
-fast`) ALL GREEN. **Gate 2 owed** (report shape + `src/runner.ts` +
-`src/integrate.ts` are on the trigger list): the standard real e2e run
-rides the snapshot on every candidate's final attempt — the demo
-fixture carries no ignored trees, so no block is expected and the run's
-shape is unchanged; whether a real candidate ever produces a block is
-read off the run's reports, never asserted. **Gate 3 n/a** (no adapter
-change). No ride-alongs: no CLI summary marker (the ticket names the
-integrate note only), no store schema change (the store ingests
-verdicts only), no decisions.md change.
+(`npm run typecheck`) exit 0; full fast tier (`node scripts/verify.mjs`
+fast`) ALL GREEN. **Gate 2 — run by the driving script (run
+20261024021432): 1 failing assertion, the Known issue #6 worker-no-op
+class, not this change-set** — `c02-r2: diff non-empty (0 bytes)`: the
+worker mis-transcribed its OWN lease path (`wt/c02-r2` → `wt/c02/r2`,
+hyphen as separator), hit the `external_directory` auto-reject (the
+containment working), and gave up with zero edits — exit 0 in 11s; the
+ladder eliminated it as a NO-OP exactly per AGENTS #7 (`diffPath` set,
+`diffBytes` 0 — a genuine no-op, never a capture failure), round 2
+still executed with sibling c01-r2 surviving, and every other
+assertion on the run was green (recorded as that entry's 2026-10-24
+observation). T-047's own real-run surface on the same run: NO
+candidate carried an `ignoredPaths` block — the fixture leases held no
+ignored trees, the producer-only absence Gate 1.33 predicted, confirmed
+on a real run. Disposition per the class precedent (T-038/T-040/T-043
+lanes): documented in VERIFICATION.md Known issue #6, no assertion
+weakened, no code change — the remedy is a re-run. **Gate 3 n/a** (no
+adapter change). No ride-alongs: no CLI summary marker (the ticket
+names the integrate note only), no store schema change (the store
+ingests verdicts only), no decisions.md change.
 
 ## Verification
 
 Gate 1.33 (`scripts/check-ignored-paths.mjs`, fast tier): ignored-write
 red bar, snapshot green, gate-installed placement, cap, clean-negative,
 integrate note, verdict inertness. Gate 0, full fast tier ALL GREEN;
-Gate 2 owed and recorded (see Landed).
+Gate 2 run by the driving script — 1 failing assertion of the Known
+issue #6 worker-no-op class (documented there, not this change-set; see
+Landed), this change-set's real-run surface confirmed (no block on any
+candidate); Gate 3 n/a.
 
 ## References
 

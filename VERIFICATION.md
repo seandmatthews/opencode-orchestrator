@@ -4202,7 +4202,12 @@ real e2e run rides the snapshot on every candidate's final attempt —
 the demo fixture carries no ignored trees (no `npm install`-style
 gate), so no block is expected and the run's shape is unchanged;
 whether a real candidate ever produces a block is read off the run's
-reports, never asserted. **Gate 3 — n/a** (no adapter change).
+reports, never asserted. **Run 20261024021432 (the driving Gate 2):
+no candidate carried a block — the prediction held on a real run.**
+That run's one failing assertion is the Known issue #6 worker-no-op
+class (a c02-r2 path-transcription no-op), not this change-set — see
+that entry's 2026-10-24 observation. **Gate 3 — n/a** (no adapter
+change).
 
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
@@ -4466,6 +4471,40 @@ landing in T-017's Landed section).
      survivor files are NOT present" framing is a T-030/T-031-successor
      question (the loop stays capped at 2 and its improvement-signal
      question stays open, decisions.md 2026-10-20).
+     **2026-10-24 worker-class observation, third distinct mechanism (run
+     20261024021432, the T-047 lane's driving Gate 2 red): the worker
+     mis-transcribed its OWN lease path.** One worker (c02-r2) — properly
+     leased, properly based — read `.`/`package.json`/`test.js`/`calc.js`
+     fine through relative paths, then attempted ONE absolute read with
+     the candidate id's hyphen transcribed as a path separator (`Read
+     C:/swarm/verify/20261024021432/wt/c02/r2/build.js` — the lease is
+     `wt\c02-r2`), hit `permission requested: external_directory
+     (C:\swarm\verify\20261024021432\wt\c02\r2\*); auto-rejecting` (the
+     containment working, again), and gave up WITHOUT editing — exit 0 in
+     11s, zero edits, 0-byte captured diff (`diffPath` set: the capture
+     succeeded on an untouched tree — a genuine no-op, never a capture
+     failure; the dispatch completion line records `diffBytes: 0`
+     faithfully). The ladder worked exactly as designed: NO-OP
+     elimination (`passedAllGates: false`, no review), gates green on
+     the untouched green base (the AGENTS.md #7 hazard — and the
+     `diffBytes > 0` conjunct doing exactly what it exists for), round 2
+     still executed with the sibling c01-r2 surviving (5,900-byte diff —
+     same composition, same loop) — and it was the tier's ONLY failing
+     assertion (`c02-r2: diff non-empty`; `verify (full) complete: 1
+     failure(s)`), every other candidate, loop, verifier, and
+     hygiene/disposal assertion green on the same run. Change-set
+     provenance: the T-047 diff touches no worker, prompt, path, or
+     adapter code (`src/types.ts` + `src/workspace/worktree.ts` +
+     `src/runner.ts`'s post-gate snapshot + `src/integrate.ts`'s note —
+     verdict-inert evidence surfaces, and the snapshot runs after the
+     diff is already captured). Recorded for T-047's own real-run
+     surface while we were there: NO candidate in the run carries an
+     `ignoredPaths` block — the fixture leases held no ignored trees
+     (the demo `.gitignore` names `node_modules/`; neither worker nor
+     gate created one), the producer-only absence Gate 1.33 predicted
+     for the real run, now confirmed on one. Same disposition as every
+     observation in this class: the containment held, nothing leaked,
+     no code change, nothing weakened — the remedy is a re-run.
    - Output-content threats (e.g. a planner brief containing a hostile
      path) are a *different* threat class — §14 governs execution
      capability, not output content; sanitization is carved (T-023).
