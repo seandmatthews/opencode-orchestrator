@@ -241,6 +241,7 @@ import type { ChildProcess } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { killFailureLines, killSuccessLine, killTreeVerified } from './kill-tree.js'
+import { KILL_SETTLE_WINDOW_MS } from './worker/run-with-timeout.js'
 import type { GateResult, WorkspaceLease } from './types.js'
 
 /** The generic probe types landed so far (§34:2061-2072's start list;
@@ -576,8 +577,17 @@ interface ProbeExecution {
  * kill outcomes that are not proven good land on the returned
  * cleanupFailures — evidence only, never a verdict. A spawn refusal
  * ('error' event) is a recorded outcome, never a throw.
+ *
+ * Since T-046 the post-expiry wait is bounded by KILL_SETTLE_WINDOW_MS
+ * (imported from the worker core — one constant, both timed-run cores): a
+ * child whose close has not arrived by the window's expiry resolves as an
+ * ABANDONED wait (`timedOut: true`, `exitCode: null`, the loud
+ * `CLEANUP FAIL: ... abandoning the wait` line on cleanupFailures, stdio
+ * destroyed) instead of wedging the probe — and with it the run and the
+ * never-reaped checkout lock. Exported so Gate 1.31 can pin the wedge shape
+ * token-free (the snapshotTree precedent, src/kill-tree.ts).
  */
-function executeProbeCommand(
+export function executeProbeCommand(
   command: { exe: string; args: string[] },
   cwd: string,
   timeoutMs: number,
@@ -589,6 +599,7 @@ function executeProbeCommand(
     let spawnError: string | undefined
     let cleanupFailures: string[] = []
     let output = ''
+    let settleTimer: NodeJS.Timeout | undefined
     const child = spawn(command.exe, command.args, { cwd, windowsHide: true })
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
@@ -599,6 +610,7 @@ function executeProbeCommand(
       if (settled) return
       settled = true
       if (timer !== undefined) clearTimeout(timer)
+      if (settleTimer !== undefined) clearTimeout(settleTimer)
       resolve({
         timedOut: false,
         exitCode: null,
@@ -612,6 +624,7 @@ function executeProbeCommand(
       if (settled) return
       settled = true
       if (timer !== undefined) clearTimeout(timer)
+      if (settleTimer !== undefined) clearTimeout(settleTimer)
       resolve({
         timedOut,
         exitCode: timedOut ? null : (code ?? null),
@@ -622,6 +635,26 @@ function executeProbeCommand(
     })
     const timer = setTimeout(() => {
       timedOut = true
+      // The settle window is armed at expiry in EVERY branch (kill-fired or
+      // not — the worker core's T-046 rule): a child that already exited can
+      // still wedge the wait through a pipe-holding descendant, and that
+      // shape gets no kill at all.
+      settleTimer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        const line = `CLEANUP FAIL: child did not settle ${KILL_SETTLE_WINDOW_MS / 1000}s after verified tree kill — abandoning the wait (evidence follows in the log)`
+        cleanupFailures = [...cleanupFailures, line]
+        // Stream teardown so no pipe handle leaks keep this process alive.
+        child.stdout.destroy()
+        child.stderr.destroy()
+        resolve({
+          timedOut: true,
+          exitCode: null,
+          output,
+          durationMs: Date.now() - started,
+          cleanupFailures,
+        })
+      }, KILL_SETTLE_WINDOW_MS)
       // The ChildProcess knows its own exit before close delivers it — never
       // taskkill a process that exited naturally at the boundary (a
       // just-exited or reused pid is not ours to kill).

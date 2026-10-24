@@ -967,6 +967,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.31: post-kill settle deadline (T-046) ----------
+section('Gate 1.31 — post-kill settle deadline (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-settle-deadline.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'settle-deadline self-check exit 0')
+} catch (e) {
+  fail(`settle-deadline self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
