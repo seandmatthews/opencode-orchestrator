@@ -4438,6 +4438,22 @@ survivor-created file is model-behavior variance, recorded honestly
 either way (the Known issue #6 disposition posture). **Gate 3 n/a** (no
 adapter change).
 
+**Gate 2 run (review round 1, run 20261024193003): 1 failure — the c02
+NO-OP, Known issue #6's fourth worker-class observation (the
+give-up-without-editing class; no premise lie, no containment event; the
+full diagnosis is recorded there).** Everything the tier asserts about
+the loop, the guard's siblings, the verifier, review, hygiene, and
+disposal was green on the same run — and the T-050 real-run surfaces
+this gate exists to exercise were confirmed from the run's kept
+artifacts: the guard FIRED on c01's round-1 brief (`src/calc.js`
+absent at the root-level base — the planner's own hedge), the
+annotated candidate SURVIVED (the note verified a path instead of
+derailing a worker), the composed block carried all four premise lines
+into the real round-2 planner prompt, and that planner stated TRUE base
+facts unprompted (c01-r2 guard-inert, surviving). No code change, no
+weakened assertion — the red leg is model-behavior variance in a
+recorded class; the remedy is a re-run.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
@@ -4746,6 +4762,44 @@ landing in T-017's Landed section).
      for the real run, now confirmed on one. Same disposition as every
      observation in this class: the containment held, nothing leaked,
      no code change, nothing weakened — the remedy is a re-run.
+     **2026-10-24 worker-class observation, fourth instance — the
+     give-up-without-editing class with NO premise lie and NO containment
+     event (run 20261024193003, the T-050 lane's driving Gate 2 red,
+     review round 1).** One worker (c02) — properly leased, properly
+     based, reading its OWN lease throughout (`worker.log`: Glob, then
+     `Get-ChildItem` at `wt\c02`, then `Read package.json`/`test.js`/
+     `calc.js`/`build.js`, every read successful — zero permission
+     rejections, zero not-found errors in the entire 25-line log) —
+     simply produced nothing after exploring: exit 0 in 562s, zero
+     edits, 0-byte captured diff. The ladder worked exactly as designed:
+     NO-OP elimination (`passedAllGates: false`, no review), gates green
+     on the untouched green base, round 2 still executed on the sibling
+     survivor — and it was the tier's ONLY failing assertion (`c02: diff
+     non-empty`; `verify (full) complete: 1 failure(s)`), every other
+     candidate, loop, verifier, review, and hygiene/disposal assertion
+     green on the same run. Distinct from the 2026-10-23 premise-lie
+     mechanism this lane's guard targets: c02's brief asserts nothing
+     absent (every file it names exists at the root-level base), the
+     guard was correctly INERT for it (no `brief-premise.txt`,
+     byte-identical dispatch), and the worker failed at the
+     explore-then-edit step, not at any read. T-050's own real-run
+     surfaces, confirmed on this run from its kept artifacts: the guard
+     FIRED on c01's round-1 brief (the planner hedged "adjust path to
+     actual layout, e.g. src/calc.js or equivalent" — `src/calc.js` is
+     absent at the root-level base; `c01/brief-premise.txt` records the
+     before/after with the base-commit-absent note) and the ANNOTATED
+     candidate survived (3,131-byte diff, all gates) — the note verified
+     a path instead of derailing a worker (the pass-direction verdict
+     inertness on real tokens); and the round-2 planner, seeded by the
+     composed block carrying all four T-050 premise lines, stated TRUE
+     base facts unprompted ("the calculator is a root-level calc.js with
+     no src/ directory"), c01-r2 guard-inert and surviving (4,489
+     bytes). Same disposition as every observation in this class: no
+     code change, nothing weakened — the remedy is a re-run (the T-038
+     run-1 → run-2 precedent); whether the guard moves the round-2
+     no-op rate is T-049's yield instrument's question, and this run
+     contributes one honest data point (guard fired once, that candidate
+     survived; the no-op rode the guard-inert sibling).
    - Output-content threats (e.g. a planner brief containing a hostile
      path) are a *different* threat class — §14 governs execution
      capability, not output content; sanitization is carved (T-023).

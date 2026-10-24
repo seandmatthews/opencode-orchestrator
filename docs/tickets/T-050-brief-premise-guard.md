@@ -141,6 +141,26 @@ directory-only paths, out-of-list suffixes, and prose identifiers
 (`Math.sqrt`, `console.log`) are honest misses; false positives are
 impossible by construction.
 
+**Gate 2 run (review round 1, run 20261024193003): 1 failure — the c02
+NO-OP, model-behavior variance in Known issue #6's recorded
+give-up-without-editing class (fourth instance; full diagnosis in
+VERIFICATION.md).** The worker explored its own lease successfully
+(every read green, zero denials in the whole 25-line `worker.log`) and
+produced nothing — exit 0 in 562s, 0-byte diff, the ladder eliminating
+it exactly as designed; c02's brief asserted nothing absent, so the
+premise guard was correctly inert for it. Every other tier assertion —
+both rounds, the sibling candidates, verifier, review, hygiene,
+disposal — green on the same run. The T-050 real-run surfaces this gate
+exists to exercise were confirmed from the run's kept artifacts: the
+guard FIRED on c01's round-1 brief (the planner's own "e.g. src/calc.js"
+hedge; `c01/brief-premise.txt` carries the before/after), the
+ANNOTATED candidate survived (3,131 bytes, all gates — the note
+verified a path instead of derailing a worker), the composed block
+carried all four premise lines into the real round-2 planner prompt,
+and that planner stated TRUE base facts unprompted (c01-r2 guard-inert,
+surviving, 4,489 bytes). No code change, no weakened assertion; the
+remedy is a re-run.
+
 ## Verification
 
 New fast-tier check (next free gate number at landing): both annotation
