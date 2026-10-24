@@ -105,6 +105,18 @@ export class WorktreeProvider implements WorkspaceProvider {
       .filter((p) => p !== '')
   }
 
+  ignoredStatus(lease: WorkspaceLease): string {
+    // T-047: the raw `git status --porcelain --ignored` snapshot — the
+    // `!!`-prefixed entries are the ignored trees diff() can NEVER see
+    // (git add --intent-to-add and git diff both respect .gitignore, the
+    // 2026-10-23 recorded repro) while the gates execute with them present
+    // in the lease. Default untracked mode: an ignored DIRECTORY collapses
+    // to one `!! dir/` entry (node_modules/ as a single line, not a
+    // per-file flood). Read-only; evidence only — the ignored-path parity
+    // summary's input, never a verdict input.
+    return git(lease.path, ['status', '--porcelain', '--ignored'])
+  }
+
   dispose(lease: WorkspaceLease): void {
     git(this.repo, ['worktree', 'remove', '--force', lease.path])
   }

@@ -123,6 +123,17 @@ export interface WorkspaceProvider {
    * verdict input.
    */
   changedPaths(lease: WorkspaceLease): string[]
+  /**
+   * The lease's full `git status --porcelain --ignored` output (T-047) —
+   * the raw input of the ignored-path parity snapshot: the `!!`-prefixed
+   * entries name ignored trees (worker-written or gate-installed) that
+   * exist in the run environment but can never appear in the captured
+   * diff (`diff` respects .gitignore — `git add -A --intent-to-add .` +
+   * `git diff <baseSha>` never see them), so RUN gates and REPLAY gates
+   * execute in systematically different environments. Evidence only (the
+   * ignored-path summary's input), never a verdict input.
+   */
+  ignoredStatus(lease: WorkspaceLease): string
   /** Release the workspace; evidence must be collected beforehand. */
   dispose(lease: WorkspaceLease): void
 }
@@ -357,6 +368,25 @@ export interface CandidateReport {
    */
   gateCommandOverlap?: GateCommandOverlap[]
   /**
+   * Ignored-path parity evidence (T-047, the 2026-10-23 adversarial
+   * review's F2): the FINAL attempt's ignored-tree snapshot, summarized —
+   * `count` is the full pre-cap size of the porcelain `!!` set, `entries`
+   * its first MAX_IGNORED_PATHS paths (repo-relative, forward slashes,
+   * porcelain order; src/runner.ts exports the cap, the
+   * MAX_RETRY_FINDINGS pattern). Taken AFTER the gate loop, so
+   * gate-installed trees (npm-install-style gates) are included — they are
+   * the parity-relevant set. The full porcelain output is written beside
+   * the attempt's evidence as `ignored-paths.txt`. Present only when the
+   * `!!` set is non-empty (the `cleanupFailures` producer-only pattern:
+   * absent → report shape unchanged). Evidence only, never a verdict
+   * input: no ladder line reads it (decisions.md 2026-10-10: gates decide
+   * survival); `integrate` only surfaces it (prints the parity note +
+   * records it in the verdict JSON) because a replay of a
+   * summary-carrying survivor executes gates in a tree that lacks every
+   * ignored tree the run environment held.
+   */
+  ignoredPaths?: IgnoredPathsSummary
+  /**
    * One Attempt record per execution of this candidate (T-007). The
    * top-level fields above keep their meaning as the FINAL attempt's
    * values; gates attach only to the final attempt (a pre-retry leg's gate
@@ -418,6 +448,22 @@ export interface GateCommandOverlap {
   gate: string
   /** The changed paths those tokens overlap (repo-relative, forward slashes). */
   touched: string[]
+}
+
+/**
+ * The ignored-path parity summary (T-047): the bounded report-facing
+ * projection of the final attempt's `git status --porcelain --ignored`
+ * snapshot (the full output lives on disk as the attempt's
+ * `ignored-paths.txt`). Evidence, never a verdict input.
+ */
+export interface IgnoredPathsSummary {
+  /** The FULL pre-cap count of the porcelain `!!` set (the flood
+   *  provenance — T-040's `gateRetry.findings.count` pattern). */
+  count: number
+  /** The FIRST MAX_IGNORED_PATHS entries of the `!!` set in porcelain
+   *  order (top-N, not a sample; repo-relative, forward slashes — ignored
+   *  directories ride collapsed, e.g. `node_modules/`). */
+  entries: string[]
 }
 
 /**

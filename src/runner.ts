@@ -467,6 +467,19 @@ const MAX_DIFF_CHARS = 30_000
 export const MAX_RETRY_FINDINGS = 5
 export const MAX_RETRY_FINDING_CHARS = 2_000
 
+/**
+ * T-047: the ignored-path parity summary's entry cap, a documented constant
+ * (the MAX_RETRY_FINDINGS pattern) — at most MAX_IGNORED_PATHS entries of
+ * the porcelain `!!` set ride `CandidateReport.ignoredPaths.entries`. The
+ * cap bounds the REPORT summary only: the attempt's `ignored-paths.txt`
+ * evidence file keeps the full snapshot, and `count` records the true
+ * pre-cap total (the gateRetry.findings.count provenance pattern). Ignored
+ * directories ride collapsed (`!! node_modules/` is one line, default
+ * porcelain untracked mode), so the cap is a flood guard, not a
+ * dependency-tree limit.
+ */
+export const MAX_IGNORED_PATHS = 50
+
 function reviewerPrompt(brief: string, workspacePath: string, diff: string, gateLines: string[]): string {
   const truncated = diff.length > MAX_DIFF_CHARS
   return [
@@ -1228,6 +1241,43 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
         } catch (e) {
           console.log(`[${id}] gate/diff overlap computation failed: ${errorMessage(e)}`)
         }
+      }
+
+      // T-047: ignored-path parity evidence — the final attempt's ignored-
+      // tree snapshot, taken AFTER the gate loop (so gate-installed trees —
+      // npm-install-style gates — are included: they are the parity-relevant
+      // set) and BEFORE dispose. `diff` above respects .gitignore (the
+      // 2026-10-23 recorded repro), so files under ignored paths exist in
+      // the lease the gates executed in but appear in NEITHER the captured
+      // diff NOR an ordinary status — the run's survivor and the replayed
+      // artifact measure different trees, and until T-047 the report
+      // carried no trace of it. Produced beside the ladder, never read by
+      // it (the T-045 posture): the verdict line above was already computed
+      // from `passed`/`diffBytes` alone, and nothing below feeds this block
+      // back into any verdict (decisions.md 2026-10-10: gates decide
+      // survival). Producer-only: an empty `!!` set records nothing (the
+      // report shape is byte-identical to today's). The snapshot itself
+      // must never break a run (the probes/verifier posture): a failure
+      // logs loudly and records nothing. Visibility only — dependency
+      // provisioning (spec §13's manifest), pristine gate environments, and
+      // tamper DETECTION are the ticket's carved non-goals.
+      try {
+        const porcelain = opts.workspaces.ignoredStatus(lease)
+        const ignored = porcelain
+          .split('\n')
+          .filter((line) => line.startsWith('!! '))
+          .map((line) => line.slice(3))
+        if (ignored.length > 0) {
+          const snapshotPath = join(evidenceDir, 'ignored-paths.txt')
+          writeFileSync(snapshotPath, porcelain)
+          attempt.outputArtifacts.push(snapshotPath)
+          const entries = ignored.slice(0, MAX_IGNORED_PATHS)
+          base.ignoredPaths = { count: ignored.length, entries }
+          const more = ignored.length > entries.length ? `, +${ignored.length - entries.length} more` : ''
+          console.log(`[${id}] ignored paths: ${ignored.length} (${entries.join(', ')}${more}) — written to ignored-paths.txt; gate parity with a replay is not established`)
+        }
+      } catch (e) {
+        console.log(`[${id}] ignored-path snapshot failed: ${errorMessage(e)}`)
       }
 
       // T-015: probes ride beside the ladder as a parallel evidence seam —
