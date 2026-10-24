@@ -55,6 +55,17 @@
 //   refusal surfaces as an HTTP 4xx carrying the refusal message, with
 //   nothing written.
 //
+// T-051 wraps that write (and every route) in a REQUEST GATE: Host must be
+// 127.0.0.1[:port] or localhost[:port], and Origin, when present, must be
+// one of http://127.0.0.1[:port] / http://localhost[:port] — anything else
+// is a 403 plus one loud console.error line, BEFORE any route (and so before
+// any DB open). This closes browser-form CSRF against the decide write
+// (browsers stamp cross-origin POSTs with an Origin header) and DNS
+// rebinding (rebound requests carry an attacker Host); legitimate localhost
+// operators send a loopback Host and no or matching Origin and are served
+// exactly as before. Malformed percent-encoding in a path segment is a 400,
+// never the outer catch's 500.
+//
 // node:sqlite is experimental on Node 22 (VERIFICATION.md Known issue #7) —
 // the dashboard rides the same engine as the store.
 import { existsSync, readFileSync } from 'node:fs'
@@ -102,7 +113,9 @@ Routes:
 
 Read routes open the database read-only and never write; a missing DB file
 refuses startup and never creates a refinery.db as a side effect. Binds
-127.0.0.1 only; no auth (operator-local tooling).`
+127.0.0.1 only; no auth (operator-local tooling). Every request must carry
+Host 127.0.0.1[:port] or localhost[:port], and Origin (when present) must
+match one of those loopback origins — anything else is refused 403 (T-051).`
 
 export interface DashboardOptions {
   /** Path to the store DB. Must already exist — the dashboard never creates one. */
@@ -882,6 +895,41 @@ function decideForm(): string {
 
 // ---------- routing ----------
 
+// ---------- T-051: the request gate (Host/Origin validation) ----------
+//
+// The dashboard's only write is form-driven, so it is CSRF-shaped: any page
+// the operator visits can silently POST to 127.0.0.1:<port>. Browsers stamp
+// cross-origin POSTs with an Origin header, and DNS-rebinding requests
+// arrive with an attacker-controlled Host — so both are checked here, before
+// any route runs. Non-goals carved by the ticket: content-type checks, CSRF
+// tokens (Host/Origin cover the browser threat class), and auth beyond
+// localhost (the T-034 trust-domain posture).
+
+const LOOPBACK_HOST = /^(?:127\.0\.0\.1|localhost)(?::\d+)?$/
+const LOOPBACK_ORIGIN = /^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/
+
+/** Refuse a request whose Host or Origin is not a loopback origin: 403 plus
+ *  exactly ONE loud console.error line naming the rejected header and its
+ *  value — the operator-local audit trail for a refused request. Runs before
+ *  any route, so a refused request never opens the DB. */
+function gateRefusal(res: ServerResponse, header: 'Host' | 'Origin', value: string, expected: string): void {
+  console.error(`dashboard: request refused — ${header} '${value}' rejected; expected ${expected} (T-051 Host/Origin gate)`)
+  send(res, 403, page('refused', `<p class="refusal">refused: ${header} '${esc(value)}' rejected (expected ${esc(expected)})</p>`))
+}
+
+/** T-051: decode one percent-encoded path segment, mapping a malformed
+ *  sequence (e.g. `%zz` — decodeURIComponent throws URIError on it) to a 400
+ *  page naming the segment, never the outer catch's 500. Returns null when
+ *  the response has been sent. */
+function decodePathSegment(res: ServerResponse, raw: string): string | null {
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    send(res, 400, page('bad request', `<p class="refusal">malformed percent-encoding in path segment '${esc(raw)}'</p>`))
+    return null
+  }
+}
+
 function send(res: ServerResponse, status: number, html: string): void {
   res.writeHead(status, { 'content-type': 'text/html; charset=utf-8' })
   res.end(html)
@@ -969,6 +1017,18 @@ async function handleDecide(req: IncomingMessage, res: ServerResponse, dbPath: s
 
 async function handle(req: IncomingMessage, res: ServerResponse, dbPath: string): Promise<void> {
   try {
+    // T-051 request gate, before any route (and so before any DB open):
+    // Host must be a loopback origin, Origin (when present) must match one.
+    const host = req.headers.host
+    if (host === undefined || !LOOPBACK_HOST.test(host)) {
+      gateRefusal(res, 'Host', host ?? '(none)', '127.0.0.1[:port] or localhost[:port]')
+      return
+    }
+    const origin = req.headers.origin
+    if (origin !== undefined && !LOOPBACK_ORIGIN.test(origin)) {
+      gateRefusal(res, 'Origin', origin, 'http://127.0.0.1[:port] or http://localhost[:port]')
+      return
+    }
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     const method = req.method ?? 'GET'
     if (url.pathname === '/') {
@@ -991,7 +1051,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, dbPath: string)
         // plus the report's rounds block (honestly labeled), and §26.4's
         // producer-less fields as markers. Same 404 face as the run page:
         // an unknown run id carries the refusal message.
-        const runId = decodeURIComponent(rest.slice(0, -'/context'.length))
+        const runId = decodePathSegment(res, rest.slice(0, -'/context'.length))
+        if (runId === null) return
         if (runId.length === 0) return notFound(res, 'missing run id')
         const body = renderContext(dbPath, runId)
         if (body === null) return notFound(res, `no recorded run '${runId}' in ${dbPath}`)
@@ -1002,8 +1063,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, dbPath: string)
         // T-035: the per-job drill-down route. An id with no jobs row at
         // all (unknown job OR unknown run — either way the store holds no
         // such row) is a 404 carrying the refusal message.
-        const runId = decodeURIComponent(rest.slice(0, jobSep))
-        const jobId = decodeURIComponent(rest.slice(jobSep + '/job/'.length))
+        const runId = decodePathSegment(res, rest.slice(0, jobSep))
+        if (runId === null) return
+        const jobId = decodePathSegment(res, rest.slice(jobSep + '/job/'.length))
+        if (jobId === null) return
         if (jobId.length === 0) return notFound(res, 'missing job id')
         const body = renderJob(dbPath, runId, jobId)
         if (body === null) {
@@ -1011,7 +1074,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, dbPath: string)
         }
         return send(res, 200, page(`job ${jobId} (run ${runId})`, body))
       }
-      const runId = decodeURIComponent(rest)
+      const runId = decodePathSegment(res, rest)
+      if (runId === null) return
       if (runId.length === 0) return notFound(res, 'missing run id')
       const body = renderRun(dbPath, runId)
       if (body === null) return notFound(res, `no recorded run '${runId}' in ${dbPath}`)

@@ -1,6 +1,6 @@
 # T-051 — Dashboard write surface: Host/Origin validation on the server + the approvals double-decide race closed (register R3)
 
-**Status:** proposed
+**Status:** done 2026-10-24
 **Category:** ops
 **Value (1-5):** 3 · **Risk (1-5):** 2
 **Depends on:** —
@@ -84,12 +84,64 @@ mechanical changes with no behavior change for the legitimate operator
 
 ## Landed
 
+Lane `ticket/T-051-dashboard-host-origin-decide-txn`, 2026-10-24. Three
+changes, exactly the ticket's scope:
+
+1. **Request gate** — `src/dashboard.ts`: `LOOPBACK_HOST` /
+   `LOOPBACK_ORIGIN` + `gateRefusal()` at the top of `handle`, before any
+   route (so before any DB open): Host must be `127.0.0.1[:port]` or
+   `localhost[:port]`, Origin (when present) must be
+   `http://127.0.0.1[:port]` or `http://localhost[:port]`; anything else →
+   403 plus exactly one loud `console.error` line naming the rejected
+   header and its value. A missing Host (raw-socket HTTP/1.0 face) refuses
+   too — nothing trusted by default.
+2. **Decide race closed by construction** — `src/store/index.ts`
+   `decideApproval`: the approval_gates state read moved inside `BEGIN`,
+   the UPDATE made conditional
+   (`AND state = 'waiting_for_approval'`), `changes === 0` refused with
+   today's byte-identical double-decide message. Message, statuses, and
+   every other refusal face unchanged (Gate 1.9 riding green).
+3. **`decodePathSegment`** — `src/dashboard.ts`: `decodeURIComponent` on
+   the three decoded path segments guarded; `%zz` → a 400 page naming the
+   segment, never the outer catch's 500.
+
+**Red bar** (AGENTS #8), recorded on main's engine at the lane before the
+change (final check version): `scripts/check-dashboard-write.mjs` exit 1,
+18 failures, teed to
+`C:\swarm\verify-red\T-051-redbar.log` — the cross-origin decide POST was
+ACCEPTED (200, durably approving the row; the cascade into the race legs
+failing is the attack demonstrated end to end), `Host: evil.example` was
+served (200), the https/suffix origins reached the store (409), the
+Host-less request was served (200), all three `%zz` legs 500'd. The TOCTOU
+itself stays a code-shape citation per this ticket's own AC — never
+claimed as a reproduced red.
+
+**Gate 2 trigger analysis** (the T-041 precedent): NOT triggered — the
+change-set touches `src/dashboard.ts` (a recorded-state consumer) and the
+`decideApproval` seam of `src/store/index.ts` only; nothing on the trigger
+list (src/runner.ts, adapters, gates, workspace handling, report shape)
+changed; no report-shape or runner behavior difference exists for a real
+run to surface. **Gate 3 n/a** (no adapter; the dashboard spawns no
+harness).
+
 ## Verification
 
-New/extended fast-tier check (next free gate number at landing): the two
-403 legs, legitimate-request inertness, sequential double-decide refusal,
-two-process concurrent decide (exactly one lands), 400 leg. Gate 0, full
-fast tier ALL GREEN; Gate 2 trigger analysis recorded.
+New fast-tier check `scripts/check-dashboard-write.mjs` wired as **Gate
+1.37** (`scripts/verify.mjs`; VERIFICATION.md's Gate 1.37 section written
+in the same change-set): the two ticketed hostile 403 legs (evil Origin on
+the decide POST, evil Host on a GET) plus https-origin, suffix-spoof
+Origin/Host, and Host-less legs, each with its one loud log line;
+legitimate-request inertness (localhost Host, matching Origin, no Origin —
+the Gate 1.23 fetch face — all served as today, a matching-Origin decide
+landing through the real store); sha256 proof every refused request
+touched zero DB bytes; sequential double-decide 409 with today's exact
+message; the overlapping two-process pair (exactly one decide lands, one
+event, never APPROVED+REJECTED — loser face logged, never asserted, it is
+timing-dependent) and the quick-succession pair (refuses AT THE GUARD with
+the exact message); the three `%zz` → 400 legs. Gate 0 exit 0; the new
+check ALL GREEN (three consecutive runs); full fast tier ALL GREEN
+including Gate 1.23 (every existing dashboard check riding green
+unchanged).
 
 ## References
 

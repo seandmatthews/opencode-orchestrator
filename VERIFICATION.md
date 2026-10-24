@@ -4560,6 +4560,93 @@ the landed check against main's engine at the lane — 11 failures, exit
 ALL GREEN. Required whenever `src/yield.ts` or the yield block's
 derivation changes.
 
+## Gate 1.37 — dashboard write surface: Host/Origin request gate, decide race closed by construction, %zz → 400 (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-dashboard-write.mjs
+```
+
+Pins T-051 — the 2026-10-23 adversarial review's register R3, ticketed
+`ticket-later` with this exact scope. The dashboard's only network-reachable
+write (`POST /approvals/decide`, `src/dashboard.ts` — the approval-audit
+record other subsystems treat as the human decision of record) gets three
+mechanical changes, no behavior change for the legitimate operator:
+
+- **The request gate** (top of `handle`, before any route and so before any
+  DB open): Host must be `127.0.0.1[:port]` or `localhost[:port]`; Origin,
+  when present, must be one of `http://127.0.0.1[:port]` /
+  `http://localhost[:port]`. Anything else → 403 plus exactly ONE loud
+  `console.error` line naming the rejected header and its value. This
+  closes browser-form CSRF (browsers stamp cross-origin POSTs with an
+  Origin header) and DNS rebinding (rebound requests carry an attacker
+  Host). Pinned hostile legs: `Origin: http://evil.example` on the decide
+  POST, `Host: evil.example` on a GET, an `https://` origin, the
+  suffix spoofs `http://127.0.0.1.evil.example` and
+  `localhost.evil.example`, and a Host-less HTTP/1.0 request over a raw
+  socket (node:http auto-stamps Host, so that leg needs literal wire
+  bytes) — all 403, each with its one loud line, and a sha256 over the DB
+  file proving every refused request (403s and the 400 legs below) touched
+  ZERO bytes: the gate refuses before any DB open.
+- **Legitimate-request inertness**: `Host: localhost[:port]`, a matching
+  Origin, and no Origin at all (the stdlib-fetch face every existing
+  dashboard check drives) are served exactly as today — 200s, and a decide
+  POST with `Origin: http://127.0.0.1:<port>` lands through the real
+  `decideApproval` (row flipped, `decided_by`/note recorded, exactly one
+  APPROVAL_GRANTED event). Every pre-existing dashboard face is additionally
+  pinned by Gate 1.23 riding green unchanged in the same fast tier (its
+  fetches send a loopback Host and no Origin).
+- **The decide race, closed by construction** (`decideApproval`,
+  `src/store/index.ts`): the approval_gates state read moved INSIDE the
+  transaction and the UPDATE made conditional
+  (`WHERE ... AND state = 'waiting_for_approval'`), refused with today's
+  byte-identical double-decide message when `changes === 0`. Pinned three
+  ways: a second SEQUENTIAL decide (no Origin — also the no-Origin POST
+  inertness leg) refuses 409 with the exact pre-T-051 message and writes
+  nothing; an OVERLAPPING two-process pair (both children spawned together
+  by the check, one approving one rejecting the same row through the real
+  store under tsx) lands EXACTLY ONE decide — the row carries the winner's
+  decision and decider, exactly one APPROVAL_GRANTED/REJECTED event for the
+  row, NEVER one APPROVED *and* one REJECTED (the pre-T-051 corruption
+  shape); and a QUICK-SUCCESSION two-process pair (second decide ~1s behind
+  the first, the CSRF-racing-a-human shape) refuses AT THE GUARD with the
+  exact double-decide message. The overlapping pair's loser face is
+  timing-dependent (the guard's message, or a SQLite `database is locked`
+  at open/update/commit — every face refuses with nothing written), so it
+  is logged, never asserted. **Honesty note, the ticket's own:** the TOCTOU
+  has no deterministic single-process red — node:sqlite is synchronous, the
+  interleaving needs two processes — so the race's red is the code-shape
+  citation in the ticket (`:691-706` read-outside-BEGIN + unconditional
+  UPDATE), never a claimed reproduced red; on the red-bar run the
+  overlapping-pair legs failed only because the CSRF leg's landing (main
+  served it, 200) had already decided the row — the cascade is itself the
+  attack demonstrated.
+- **Malformed percent-encoding → 400, not 500**: `decodeURIComponent` on
+  path segments is guarded (`decodePathSegment`); `%zz` in each decoded
+  segment (`/run/%zz`, `/run/<id>/job/%zz`, `/run/%zz/context`) returns a
+  400 page naming the malformed segment — pre-T-051 the URIError fell to
+  the outer catch's 500.
+
+Red bar (AGENTS #8), recorded before the change on main's engine at the
+lane with the final check version: 18 failures, exit 1, teed to
+`C:\swarm\verify-red\T-051-redbar.log` — the cross-origin decide POST
+landed (200, durably approving the row), the rebound Host was served
+(200), the https/suffix origins reached the store (409), the Host-less
+request was served (200), and all three `%zz` legs 500'd. Post-change the
+check is ALL GREEN (observed green on three consecutive runs; which child
+  wins the overlapping pair is timing's choice — the assertions read the
+  winner off the outcome, never assume an order). Non-goals
+carved by the ticket and unchanged: content-type checks, CSRF tokens
+(Host/Origin cover the browser threat class), auth beyond localhost (the
+T-034 trust-domain posture), and `requestApproval`'s outside-transaction
+check (its race fails loudly on the PK, not silently — carved). Gate 2
+trigger analysis (the T-041 precedent): NOT triggered — the change-set
+touches `src/dashboard.ts` (a store consumer) and `src/store/index.ts`'s
+`decideApproval` only; nothing on the trigger list (src/runner.ts,
+adapters, gates, workspace handling, report shape) changed, the
+T-006/T-008/T-034/T-035/T-037 standalone-consumer precedent. Gate 3 n/a
+(no adapter; the dashboard spawns no harness). Required whenever the
+dashboard request gate or the store's decide transaction changes.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash

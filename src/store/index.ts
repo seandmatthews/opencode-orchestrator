@@ -670,6 +670,18 @@ export function requestApproval(dbPath: string, opts: ApprovalRequestOptions): A
  * write; a double-decide refusal names the row's current state — the audit
  * record is not rewritable. The stamps are wall-clock — see the header
  * comment's scoping of the determinism rule.
+ *
+ * T-051: the double-decide race is closed BY CONSTRUCTION. The state read
+ * lives INSIDE the transaction and the UPDATE is conditional on
+ * `state = 'waiting_for_approval'`, refused with the same message when
+ * `changes === 0` — so a second concurrent decide (a second browser tab, a
+ * CSRF racing a human, another process) can never flip a decided row or
+ * append a second, contradictory event: it either reads the committed state
+ * and refuses, or loses SQLite's write lock and throws. node:sqlite is
+ * synchronous, so within one process the interleaving cannot happen at all;
+ * the conditional UPDATE is the cross-process guard (and belt-and-braces
+ * against the read changing between read and write, which the transaction's
+ * own locks make unreachable).
  */
 export function decideApproval(dbPath: string, opts: ApprovalDecisionOptions): ApprovalRow {
   if (opts.decision !== 'approved' && opts.decision !== 'rejected') {
@@ -688,36 +700,44 @@ export function decideApproval(dbPath: string, opts: ApprovalDecisionOptions): A
       throw new Error(`no derived job row for '${opts.jobId}' — ingest the run with a T-006-era store first`)
     }
     if (!candidateIsSurvivor(db, opts.runId, opts.jobId)) throw new Error(survivorRefusal(opts.jobId))
-    const row = db.prepare('SELECT * FROM approval_gates WHERE run_id = ? AND phase_id = ? AND job_id = ?')
-      .get(opts.runId, job.phase_id, opts.jobId) as Record<string, unknown> | undefined
-    if (!row) throw new Error(`no approval request recorded for job '${opts.jobId}' — request one first`)
-    if (row.state !== 'waiting_for_approval') {
-      throw new Error(`approval for job '${opts.jobId}' is already '${String(row.state)}' — the audit record is not rewritable`)
-    }
-
     const at = new Date().toISOString()
     const by = opts.by ?? osUsername()
     db.exec('BEGIN')
     try {
-      db.prepare(
+      // T-051: the state read rides INSIDE the transaction — a concurrent
+      // decider's committed flip is what this read sees, never a stale
+      // pre-decide snapshot.
+      const row = db.prepare('SELECT * FROM approval_gates WHERE run_id = ? AND phase_id = ? AND job_id = ?')
+        .get(opts.runId, job.phase_id, opts.jobId) as Record<string, unknown> | undefined
+      if (!row) throw new Error(`no approval request recorded for job '${opts.jobId}' — request one first`)
+      if (row.state !== 'waiting_for_approval') {
+        throw new Error(`approval for job '${opts.jobId}' is already '${String(row.state)}' — the audit record is not rewritable`)
+      }
+      const flipped = db.prepare(
         `UPDATE approval_gates SET state = ?, decided_at = ?, decided_by = ?,
            note = COALESCE(?, note)
-         WHERE run_id = ? AND phase_id = ? AND job_id = ?`,
+         WHERE run_id = ? AND phase_id = ? AND job_id = ? AND state = 'waiting_for_approval'`,
       ).run(opts.decision, at, by, opts.note ?? null, opts.runId, job.phase_id, opts.jobId)
+      // The guard: zero matched rows means someone else flipped it between
+      // this transaction's read and write — unreachable under the
+      // transaction's own locks, refused with the same message regardless.
+      if (Number(flipped.changes) === 0) {
+        throw new Error(`approval for job '${opts.jobId}' is already '${String(row.state)}' — the audit record is not rewritable`)
+      }
       insertEvent(db, opts.runId, opts.decision === 'approved' ? 'APPROVAL_GRANTED' : 'APPROVAL_REJECTED', at, {
         phaseId: job.phase_id,
         jobId: opts.jobId,
         decidedBy: by,
       })
       db.exec('COMMIT')
+      return {
+        runId: opts.runId, phaseId: job.phase_id, jobId: opts.jobId, state: opts.decision,
+        requestedAt: row.requested_at as string, requestedBy: row.requested_by as string,
+        decidedAt: at, decidedBy: by, note: opts.note ?? (row.note as string | null),
+      }
     } catch (e) {
       try { db.exec('ROLLBACK') } catch { /* nothing to undo */ }
       throw e
-    }
-    return {
-      runId: opts.runId, phaseId: job.phase_id, jobId: opts.jobId, state: opts.decision,
-      requestedAt: row.requested_at as string, requestedBy: row.requested_by as string,
-      decidedAt: at, decidedBy: by, note: opts.note ?? (row.note as string | null),
     }
   } finally {
     db.close()
