@@ -49,7 +49,7 @@ import { CommandGate } from './gate/command.js'
 import { acquireCheckoutLock, CheckoutLockRefused, releaseCheckoutLock } from './lock.js'
 import { diffArtifactId, recordIntegrateVerdict, verifyRunArtifacts } from './store/index.js'
 import type { ArtifactVerification } from './store/index.js'
-import type { CandidateReport, GateResult, RunReport } from './types.js'
+import type { CandidateReport, GateCommandOverlap, GateResult, RunReport } from './types.js'
 
 const usage = `Integration replay: re-verify a surviving candidate's diff at current HEAD.
 
@@ -179,6 +179,14 @@ interface IntegrateVerdict {
   gates: { name: string; passed: boolean; exitCode: number | null; durationMs: number; outputTail: string; command?: string }[]
   passed: boolean
   worktreePath: string
+  /**
+   * T-045: copied verbatim from the candidate's recorded overlap block when
+   * present — a replay of an overlap-carrying survivor is exercising
+   * evaluator files the candidate changed (the re-supplied gate commands run
+   * on a tree that CONTAINS the tampering), and the verdict artifact must
+   * say so. Evidence only: the exit code stays gate-determined.
+   */
+  gateCommandOverlap?: GateCommandOverlap[]
 }
 
 async function main(): Promise<number> {
@@ -278,6 +286,17 @@ async function replay(
 ): Promise<number> {
   const runDir = join(opts.runRoot, opts.run)
 
+  // T-045: surface the run's recorded gate/diff overlap block BEFORE any
+  // gate output — the operator should see this sentence before trusting a
+  // replay PASS, because the replay re-runs the SAME recorded gate commands
+  // on a tree that CONTAINS the candidate's changes to the files those
+  // commands execute (faithfully re-verifying a possibly weakened
+  // evaluator). Evidence only: the note changes no verdict; the exit code
+  // below stays gate-determined.
+  if (candidate.gateCommandOverlap !== undefined) {
+    console.log(`integrate ${opts.candidate}: NOTE — the run flagged gate/diff overlap (this replay exercises evaluator files the candidate changed): ${candidate.gateCommandOverlap.map((o) => `gate ${o.gate} executes ${o.touched.join(', ')}`).join('; ')}`)
+  }
+
   // git apply is atomic: a rejecting patch leaves the tree untouched, so
   // there is no partial state to clean up.
   //
@@ -318,6 +337,7 @@ async function replay(
       gates: [],
       passed: false,
       worktreePath,
+      ...(candidate.gateCommandOverlap !== undefined ? { gateCommandOverlap: candidate.gateCommandOverlap } : {}),
     })
     return 1
   }
@@ -342,6 +362,7 @@ async function replay(
     gates: results,
     passed,
     worktreePath,
+    ...(candidate.gateCommandOverlap !== undefined ? { gateCommandOverlap: candidate.gateCommandOverlap } : {}),
   })
 
   const gateText = results.map((r) => `${r.name} ${r.passed ? 'PASS' : 'FAIL'}`).join(', ')

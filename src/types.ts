@@ -114,6 +114,15 @@ export interface WorkspaceProvider {
   lease(id: string, baseRef: string): WorkspaceLease
   /** Unified diff of all changes (including new files) against the base. */
   diff(lease: WorkspaceLease): string
+  /**
+   * Repo-relative changed paths against the lease's pinned base (T-045) —
+   * the path projection of `diff`, re-derived `git diff <baseSha>
+   * --name-only` (the same T-044 pinned-base semantics). Call after
+   * `diff` so the untracked/intent-to-add posture matches the captured
+   * diff. Evidence only (the gate/diff overlap signal's input), never a
+   * verdict input.
+   */
+  changedPaths(lease: WorkspaceLease): string[]
   /** Release the workspace; evidence must be collected beforehand. */
   dispose(lease: WorkspaceLease): void
 }
@@ -326,6 +335,28 @@ export interface CandidateReport {
   gates: GateResult[]
   passedAllGates: boolean
   /**
+   * Gate/diff overlap evidence (T-045, the 2026-10-23 adversarial review's
+   * F4): for each gate whose RECORDED command (`GateResult.command`,
+   * T-027) carries a path-shaped token overlapping the final attempt's
+   * changed paths (re-derived `git diff <baseSha> --name-only` in the
+   * lease, riding T-044's semantics), the gate's name and the touched
+   * paths — the evaluator-tampering signal (a worker that weakens the
+   * test script its gate executes produces a non-zero diff that passes
+   * every gate; spec §35 asks "Were evaluator jobs prevented from
+   * modifying contestants?" — this records the inverted question). A
+   * HEURISTIC, honestly named one: transitive loads are invisible
+   * (`node build.js` can require anything), and npm/make-style commands
+   * with no path tokens yield no overlap by construction. Present only
+   * when at least one gate overlaps (the `cleanupFailures` producer-only
+   * pattern: absent → report shape unchanged). Evidence only, never a
+   * verdict input: no ladder line reads it (decisions.md 2026-10-10:
+   * gates decide survival); `integrate` only surfaces it (prints the
+   * note + records it in the verdict JSON) because a replay of an
+   * overlap-carrying survivor is exercising evaluator files the candidate
+   * changed.
+   */
+  gateCommandOverlap?: GateCommandOverlap[]
+  /**
    * One Attempt record per execution of this candidate (T-007). The
    * top-level fields above keep their meaning as the FINAL attempt's
    * values; gates attach only to the final attempt (a pre-retry leg's gate
@@ -375,6 +406,18 @@ export interface CandidateReport {
    */
   verifier?: VerifierReport
   error?: string
+}
+
+/**
+ * One gate's overlap with the candidate diff (T-045): the gate whose
+ * recorded command's path-shaped tokens overlap the final attempt's
+ * changed paths, and those paths. Evidence, never a verdict input.
+ */
+export interface GateCommandOverlap {
+  /** The gate whose recorded command's path-shaped tokens overlap the diff. */
+  gate: string
+  /** The changed paths those tokens overlap (repo-relative, forward slashes). */
+  touched: string[]
 }
 
 /**

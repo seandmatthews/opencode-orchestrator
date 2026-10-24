@@ -3931,6 +3931,142 @@ real-run abandonment is not asserted (it needs a real wedge) — the
 no-regression half is what Gate 2 pins. **Gate 3 — n/a** (no adapter
 change; the adapters' own files are untouched).
 
+## Gate 1.32 — gate/diff overlap evidence: flag when a candidate diff touches files its gate commands execute (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-gate-overlap.mjs
+```
+
+Pins T-045 (the 2026-10-23 adversarial review's F4): gates are shell
+commands evaluated in the candidate worktree (`src/gate/command.ts:38-40`)
+— for the canonical demo `node build.js` / `node test.js`, files the
+worker can edit. A worker that weakens the test script plus adds a trivial
+change elsewhere produces a non-zero diff that passes every gate; the
+tampering IS visible in the captured diff, but nothing machine-flagged it
+(the reviewer is advisory, the T-032 probe evidence-only, the T-041
+ratchet human-owned cross-run), and `integrate` then re-runs the SAME
+recorded gate command on a replay tree that CONTAINS the tampering —
+faithfully re-verifying the weakened evaluator. Spec §35 asks "Were
+evaluator jobs prevented from modifying contestants?"; the live question
+is the inverse, and until T-045 nothing even recorded it.
+
+The change — a deterministic, evidence-only overlap signal (the
+`cleanupFailures` pattern: produced beside the ladder, never read by it):
+
+1. **Compute** (`src/gate/overlap.ts`, new; called from `src/runner.ts`
+   after the final attempt's ladder line, gated on the diff having been
+   captured): intersect the diff's changed paths — re-derived `git diff
+   <baseSha> --name-only` in the lease through the new
+   `WorkspaceProvider.changedPaths` seam (`src/workspace/worktree.ts`,
+   riding T-044's pinned-base semantics, `-z`-separated) — with the
+   path-shaped tokens of each gate's recorded command
+   (`GateResult.command`, T-027): split on whitespace and the shell
+   command separators `& ; | ( )`, strip one wrapping quote pair; a token
+   is path-shaped when it resolves to a file/directory in the worktree
+   (absolute tokens inside the worktree fold to repo-relative form) or
+   exactly matches a changed path (a file the diff DELETED no longer
+   resolves — the second clause keeps it visible); a path-shaped token
+   overlaps a changed path on equality or directory prefix (`npx eslint
+   src/` flags every change under `src/`). Matching is Windows-forward
+   (backslashes folded, case-insensitive — the `normPath` posture).
+   `npm test`/`make`-style commands with no path tokens yield no overlap
+   by construction. The computation can never break a run: a failure logs
+   loudly and records nothing (the probes/verifier posture).
+2. **Record** — the additive, producer-only `CandidateReport.gateCommandOverlap?:
+   { gate: string; touched: string[] }[]` (`GateCommandOverlap`,
+   `src/types.ts`), present only when at least one gate overlaps, so
+   clean reports keep the exact pre-T-045 key set; a loud console line at
+   the gate step (`[c01] gate test: PASS — NOTE: diff touches files this
+   gate executes: test.js`, verdict-embedded, printed per overlapping gate
+   regardless of its PASS/FAIL); the RUN SUMMARY line carries the marker
+   (`  gate-overlap:test(test.js)`, `src/cli.ts`).
+3. **Surface at replay** (`src/integrate.ts`) — when the candidate
+   carries the block, the replay prints the note BEFORE any gate output
+   (the operator sees the sentence before trusting a replay PASS) and
+   records the block verbatim in the verdict JSON
+   (`IntegrateVerdict.gateCommandOverlap`, on both verdict write paths);
+   the exit code stays gate-determined.
+
+A HEURISTIC, honestly named one, and the check pins its limits as
+documented: **transitive loads are invisible** (`node build.js` can
+`require` anything the diff touched without any token naming it);
+redirect targets written as separate tokens can over-flag (glued
+`>out.txt` tokens drop out — redirect operators are deliberately not
+separators); `npm test` flags only if a file literally named `test`
+exists and changed. Non-goals carved by the ticket: transitive-load
+analysis, pristine-copy gate execution, ANY verdict effect — no ladder
+line reads the block (no decisions.md change needed; the 2026-10-10
+machine-gates decision stands untouched).
+
+Legs, zero model tokens (fake WorkerAdapter + REAL CommandGates against
+scratch repos, the real CLI's machine worker, the real integrate CLI —
+the check-gate-retry import pattern):
+
+- **O1 — the tampering core (the red-bar face)**: a worker that weakens
+  `test.js` (the file gate `test=node test.js` executes) plus adds a
+  trivial change elsewhere — real gates, real execution: every gate
+  PASSES on the weakened evaluator, the tampering is visible in the
+  captured diff, and the report block names gate + touched path, the
+  NOTE line prints, the non-overlapping gate gets no note, and
+  `passedAllGates` is unchanged (pass direction);
+- **O2 — clean-negative**: a diff touching only non-gate files produces
+  NO block, NO note, and a candidate report whose key set is exactly the
+  pre-T-045 list (the byte-identical producer-only shape);
+- **O3 — verdict inertness (fail direction)**: overlap entries on BOTH a
+  passing and a failing gate — the verdict follows the gates alone
+  (FAIL), the block records both, the NOTE prints for each regardless of
+  verdict;
+- **O4 — multi-token commands + the seam**: `npx eslint src/` flags a
+  change under `src/` (directory prefix); `npm run build` never flags
+  (no path tokens); `node gone.js` flags a file the diff DELETED (the
+  matches-changed-paths clause); `WorkspaceProvider.changedPaths` pinned
+  directly on the drive's lease (edit + edit + deletion);
+- **O5 — the real CLI** (machine worker, `--jobs`): the gate-step NOTE
+  line and the RUN SUMMARY marker on stdout, the block in the on-disk
+  report.json, exit 0 — today's verdict, plus the flag;
+- **O6 — integrate surfacing**: an overlap-carrying survivor's replay
+  exits 0 with the note printed and the block recorded verbatim in
+  `<id>.json`; the same shape with a failing replay gate exits 1
+  (gate-determined, the block forced nothing) with the note and block
+  still recorded; a clean survivor's replay prints no note and records
+  no block key.
+
+**Red bar (AGENTS.md #8), recorded BEFORE the change landed** — the lane
+at main (33db211, engine untouched) running this same check: 16 failures
+of 35, exit 1 — exactly the new-behavior faces (O1's block/key/NOTE ×3,
+O3's both-gates block + both NOTE lines ×2, O4's lint/npm/gone/seam ×4,
+O5's NOTE/marker/on-disk block ×3, O6's note+block on both replay faces
+×4). The 19 green faces pin preserved semantics (the verdict machinery,
+the clean-negative shape, the gate-determined exits — the Gate 1.30
+C3/C4 pattern), and the ticket's premise was confirmed empirically at
+main: the weakened evaluator passed every gate and the tampering was
+visible in the captured diff, with no machine trace. Post-change: all 35
+assertions green, exit 0.
+
+Riding the same signal: Gate 1.21's check (`check-per-role-harness.mjs`)
+S3 — its real-CLI drive is itself a TRUE overlap positive (the gate
+command `node -e "require('fs').accessSync('marker-a.txt')"` names the
+very file the worker's machine command changes), so its candidate
+legitimately carries the block; the drive's expected key set gained
+exactly the ticketed `gateCommandOverlap` producer (the assertion's
+T-025 intent — no adapter-id fields — unchanged) plus a NEW assertion
+pinning the block as the true positive. Every other existing assertion
+rode green unchanged.
+
+Not pinned here and carved by the ticket: no verdict-semantics change
+(the ladder expression is untouched), no decisions.md change, no
+transitive-load analysis, no pristine-copy gate execution, no dispatch
+evidence line (the block rides the report only). **Gate 2 — owed**
+(`src/runner.ts` — the gate loop's verdict-adjacent code — plus
+`src/types.ts` report shape, `src/cli.ts` summary, `src/integrate.ts`,
+`src/workspace/worktree.ts` workspace handling; trigger list, Gate 2's
+section): the standard real e2e run rides the computation on every
+candidate's final attempt — a real run's candidates touch only source
+files (not `build.js`/`test.js`), so no block is expected and the run's
+shape is unchanged; whether a real candidate ever produces a block is
+read off the run's reports, never asserted. **Gate 3 — n/a** (no adapter
+change).
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash

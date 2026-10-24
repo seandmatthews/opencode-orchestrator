@@ -762,9 +762,15 @@ async function runPipeline(opts: Options, jobsSpec: JobsSpec | null): Promise<vo
     const reviewText = c.review
       ? `  review:${c.review.ok ? `${c.review.observations.length} obs` : 'PARSE FAILED'}`
       : ''
+    // T-045: the run summary line carries the overlap marker when the
+    // candidate's recorded block flags evaluator-file tampering — evidence
+    // beside the verdict, never part of it (the block changes no verdict).
+    const overlapText = c.gateCommandOverlap
+      ? `  gate-overlap:${c.gateCommandOverlap.map((o) => `${o.gate}(${o.touched.join('+')})`).join(',')}`
+      : ''
     console.log(
       `${c.id}  worker:${c.workerOk ? 'ok' : 'failed'} ${(c.workerDurationMs / 1000).toFixed(0)}s` +
-      `  diff:${(c.diffBytes / 1024).toFixed(1)}KiB  ${gateText} => ${verdict}${reviewText}`,
+      `  diff:${(c.diffBytes / 1024).toFixed(1)}KiB  ${gateText} => ${verdict}${reviewText}${overlapText}`,
     )
   }
   if (report.schedule) {

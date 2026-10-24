@@ -977,6 +977,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.32: gate/diff overlap evidence (T-045) ----------
+section('Gate 1.32 — gate/diff overlap evidence (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-gate-overlap.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'gate-overlap self-check exit 0')
+} catch (e) {
+  fail(`gate-overlap self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
