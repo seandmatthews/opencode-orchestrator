@@ -1010,6 +1010,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.35: round-2 brief-premise guard (T-050) ----------
+section('Gate 1.35 — brief-premise guard (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-brief-premise.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'brief-premise self-check exit 0')
+} catch (e) {
+  fail(`brief-premise self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

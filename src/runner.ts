@@ -5,6 +5,8 @@ import { parseBriefs, parseReview } from './parse.js'
 import { evidenceBundlePath, failedBundle, writeEvidenceBundle } from './probe.js'
 import type { Probe } from './probe.js'
 import { computeGateCommandOverlap } from './gate/overlap.js'
+import { annotateBriefPremise } from './premise.js'
+import type { BriefPremiseAnnotation } from './premise.js'
 import { composeRoundPacket } from './rounds.js'
 import { buildEarlyStops, buildSchedule, earlyStopMet, readyJobs } from './scheduler.js'
 import type { EarlyStopPolicy, PhaseSpec } from './scheduler.js'
@@ -57,6 +59,18 @@ export interface ResolvedJob {
   /** Evidence probes (T-015, spec §12) behind the Probe seam. Absent when
    *  the job has none — default-mode jobs never carry probes. */
   probes?: Probe[]
+  /**
+   * T-050 brief-premise annotation, present ONLY on planner-authored briefs
+   * whose path-shaped tokens name files absent at the run's baseSha (never
+   * on --jobs briefs — operator-owned — nor on raw-goal fallback briefs).
+   * `brief` above keeps the planner's text (the candidate report's brief);
+   * `annotated` is what every attempt of this job dispatches, hashed into
+   * its promptVersion (one composition, two consumers), with the
+   * before/after evidence written as `brief-premise.txt` in the candidate's
+   * evidence dir. Never a verdict input — annotations change what a worker
+   * is TOLD, which is a brief, not a gate.
+   */
+  premiseAnnotation?: BriefPremiseAnnotation
 }
 
 /** The validated spec a --jobs run drives: the declared phases (for the
@@ -177,6 +191,36 @@ export function builderPrompt(goal: string, workspacePath: string): string {
   ].join('\n')
 }
 
+/**
+ * T-050: run the brief-premise guard over PLANNER-AUTHORED briefs before
+ * they become jobs (rounds 1 AND 2 — the caller passes the round-1
+ * survivors' changed paths for the round-2 call, empty for round 1).
+ * `--jobs` briefs and raw-goal fallback briefs are operator-owned and never
+ * reach this function. Never-break-a-run posture (the probes/verifier/
+ * overlap pattern): a guard failure — most plausibly an unresolvable base
+ * commit, which annotateBriefPremise treats as loud-degradation rather than
+ * a silent everything-is-absent flood — logs once per brief and dispatches
+ * that brief unannotated; an unannotated lie is exactly today's behavior,
+ * never worse. Returns one entry per brief: undefined = inert (dispatch
+ * today's exact bytes, write no evidence file).
+ */
+function annotatePlannerBriefs(
+  opts: SkeletonOptions,
+  briefs: readonly string[],
+  survivorChangedPaths: readonly string[],
+): (BriefPremiseAnnotation | undefined)[] {
+  return briefs.map((brief) => {
+    try {
+      // null (inert) folds to undefined — one array shape for "dispatch
+      // today's exact bytes".
+      return annotateBriefPremise({ brief, repo: opts.repo, baseSha: opts.baseSha, survivorChangedPaths: [...survivorChangedPaths] }) ?? undefined
+    } catch (e) {
+      console.log(`brief-premise guard failed (${errorMessage(e)}); dispatching the brief unannotated`)
+      return undefined
+    }
+  })
+}
+
 export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
   const startedAt = new Date().toISOString()
   mkdirSync(join(opts.artifactsDir, 'wt'), { recursive: true })
@@ -201,11 +245,20 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
   // into N distinct briefs. Failure here degrades gracefully — candidates
   // fall back to the raw goal. --jobs mode skips it entirely: briefs come
   // from the spec and the goal is not required.
+  // T-050: PLANNER-AUTHORED briefs (and only those — fallback raw-goal
+  // briefs below stay operator-owned) pass the brief-premise guard before
+  // they become jobs: path-shaped tokens naming files absent at baseSha get
+  // a fixed engine note appended. Round 1 has no survivor evidence, so
+  // every absent path is the base-commit-absent kind.
   let briefs: string[] = opts.candidateIds.map(() => opts.goal)
   let planner: PlannerReport | undefined
+  let premiseAnnotations: (BriefPremiseAnnotation | undefined)[] = []
   if (!opts.scheduled && opts.plannerModel) {
     planner = await runPlannerPhase(opts)
-    if (planner.ok) briefs = planner.briefs
+    if (planner.ok) {
+      briefs = planner.briefs
+      premiseAnnotations = annotatePlannerBriefs(opts, briefs, [])
+    }
     console.log(`planner: ${planner.ok ? `${briefs.length} briefs` : 'no valid output, using raw goal'} in ${(planner.durationMs / 1000).toFixed(0)}s (${planner.attempts} attempt${planner.attempts > 1 ? 's' : ''})`)
     console.log('')
   }
@@ -213,12 +266,15 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
   // The job list the scheduler drives (T-009). --jobs mode: the resolved
   // specs. Default mode: the degenerate one-phase spec — one dependency-free
   // job per candidate, exactly T-006's derived DAG — so both modes run the
-  // same loop; only the schedule recording differs.
+  // same loop; only the schedule recording differs. `brief` is always the
+  // planner's (or operator's) text; the T-050 annotation rides separately
+  // and is consumed at dispatch (runJob), never on the report.
   const jobs: ResolvedJob[] = opts.scheduled?.jobs ?? opts.candidateIds.map((id, i) => ({
     id,
     phaseId: DERIVED_PHASE_ID,
     dependencies: [],
     brief: briefs[i]!,
+    ...(premiseAnnotations[i] !== undefined ? { premiseAnnotation: premiseAnnotations[i] } : {}),
     model: opts.model,
     worker: opts.worker,
     timeoutMs: opts.timeoutMs,
@@ -272,7 +328,21 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
         contextBlock: composition.renderedBlock,
         evidenceTag: '-r2',
       })
-      if (planner2.ok) briefs2 = planner2.briefs
+      // T-050: the round-2 briefs pass the SAME premise guard, now with the
+      // round-1 survivors' changed paths (the T-045 changedPaths seam's
+      // output, recorded per candidate during the final-attempt diff
+      // derivation) as survivor evidence — a brief naming a file a
+      // survivor's diff CREATED gets the survivor-created reason (the Known
+      // issue #6 mechanism), anything else absent gets the base-commit note.
+      let premiseAnnotations2: (BriefPremiseAnnotation | undefined)[] = []
+      if (planner2.ok) {
+        briefs2 = planner2.briefs
+        premiseAnnotations2 = annotatePlannerBriefs(
+          opts,
+          briefs2,
+          round1Survivors.flatMap((s) => round1.changedPathsById.get(s.id) ?? []),
+        )
+      }
       console.log(`planner (round 2): ${planner2.ok ? `${briefs2.length} briefs` : 'no valid output, using raw goal'} in ${(planner2.durationMs / 1000).toFixed(0)}s (${planner2.attempts} attempt${planner2.attempts > 1 ? 's' : ''})`)
       console.log('')
       const jobs2: ResolvedJob[] = round2Ids.map((id, i) => ({
@@ -280,6 +350,7 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
         phaseId: DERIVED_PHASE_ID,
         dependencies: [],
         brief: briefs2[i]!,
+        ...(premiseAnnotations2[i] !== undefined ? { premiseAnnotation: premiseAnnotations2[i] } : {}),
         model: opts.model,
         worker: opts.worker,
         timeoutMs: opts.timeoutMs,
@@ -381,6 +452,7 @@ async function driveJobs(jobs: ResolvedJob[], opts: SkeletonOptions): Promise<{
   terminal: Map<string, 'succeeded' | 'failed'>
   dispatchIndexOf: Map<string, number>
   nodes: { id: string; phaseId: string; dependencies: string[] }[]
+  changedPathsById: Map<string, string[]>
 }> {
   const nodes = jobs.map((j) => ({ id: j.id, phaseId: j.phaseId, dependencies: j.dependencies }))
   const byId = new Map(jobs.map((j) => [j.id, j]))
@@ -389,6 +461,12 @@ async function driveJobs(jobs: ResolvedJob[], opts: SkeletonOptions): Promise<{
   const inFlight = new Set<Promise<void>>()
   const dispatchIndexOf = new Map<string, number>()
   const reports = new Map<string, CandidateReport>()
+  // T-050: each wave's per-candidate changed paths (the T-045 seam's output,
+  // recorded where the overlap block already derives it) — the round-2
+  // brief-premise guard's survivor-evidence input. In-run state only, never
+  // serialized: a wave's map dies with the wave, exactly like its terminal
+  // bookkeeping.
+  const changedPathsById = new Map<string, string[]>()
   let dispatched = 0
   // T-031: the declaring phases' policies, by phase id (default mode: empty
   // ⇒ no stop input anywhere). Once met, a policy stays met.
@@ -411,7 +489,7 @@ async function driveJobs(jobs: ResolvedJob[], opts: SkeletonOptions): Promise<{
       const job = byId.get(id)!
       dispatchIndexOf.set(id, dispatched++)
       running.add(id)
-      const p = runJob(job, opts).then((rep) => {
+      const p = runJob(job, opts, changedPathsById).then((rep) => {
         reports.set(id, rep)
         terminal.set(id, rep.passedAllGates ? 'succeeded' : 'failed')
       }).finally(() => {
@@ -423,7 +501,7 @@ async function driveJobs(jobs: ResolvedJob[], opts: SkeletonOptions): Promise<{
     if (inFlight.size === 0) break
     await Promise.race([...inFlight])
   }
-  return { reports, terminal, dispatchIndexOf, nodes }
+  return { reports, terminal, dispatchIndexOf, nodes, changedPathsById }
 }
 
 function plannerPrompt(goal: string, count: number, contextBlock?: string): string {
@@ -890,7 +968,7 @@ function composeGateRetryBrief(
  *  and its eligible findings ride the composed brief under documented caps —
  *  still no model call composes the brief, still zero verdict inputs. Blind
  *  re-rolls stay banned (decisions.md 2026-10-21). */
-async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<CandidateReport> {
+async function runJob(job: ResolvedJob, opts: SkeletonOptions, changedPathsById?: Map<string, string[]>): Promise<CandidateReport> {
   const id = job.id
   const dir = join(opts.artifactsDir, id)
   mkdirSync(dir, { recursive: true })
@@ -920,7 +998,11 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
   // brief for attempt 1, the composed feedback brief for a gate-retry leg.
   // `base.brief` keeps the ORIGINAL brief; the composed text is attempt-scoped
   // evidence, never a replacement.
-  let attemptBrief = job.brief
+  // T-050: when the premise guard fired for this job's brief, EVERY attempt
+  // dispatches the ANNOTATED text (the premise is about the base commit, not
+  // about any one attempt) — `base.brief` still keeps the planner's text,
+  // and the before/after evidence lands in brief-premise.txt below.
+  let attemptBrief = job.premiseAnnotation !== undefined ? job.premiseAnnotation.annotated : job.brief
   // T-038: the composed retry brief, composed ONCE per retry (below) and
   // consumed at the top of the retry leg's iteration — one composition, two
   // consumers: the exact prompt text (hashed into that attempt's
@@ -975,6 +1057,17 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
       outputArtifacts: [logPath],
     }
     base.attempts.push(attempt)
+    // T-050: the premise annotation's before/after evidence — written ONCE,
+    // on the first attempt (its evidence dir IS the candidate dir), riding
+    // the dispatched attempt's outputArtifacts like diff.patch and
+    // retry-brief.txt. The AUTHORED section is the planner's brief verbatim;
+    // the DISPATCHED section is the annotated text this attempt's
+    // promptVersion hashes.
+    if (n === 1 && job.premiseAnnotation !== undefined) {
+      const premisePath = join(evidenceDir, 'brief-premise.txt')
+      writeFileSync(premisePath, job.premiseAnnotation.evidenceText)
+      attempt.outputArtifacts.push(premisePath)
+    }
     // T-038: a gate-retry leg's evidence dir carries the composed brief —
     // the exact text hashed into `gateRetry.fingerprint` below and wrapped
     // into this attempt's prompt above.
@@ -1230,7 +1323,14 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions): Promise<Candidat
       // posture): a failure logs loudly and records nothing.
       if (diffCaptured) {
         try {
-          const overlap = computeGateCommandOverlap(attemptGates, opts.workspaces.changedPaths(lease), lease.path)
+          const changedPaths = opts.workspaces.changedPaths(lease)
+          // T-050: the wave's in-run survivor-evidence map records this final
+          // attempt's changed paths beside the T-045 derivation that already
+          // walks the same seam — one derivation, two consumers (the
+          // round-2 premise guard reads the map after the wave drains).
+          // Never serialized; never a verdict input.
+          changedPathsById?.set(id, changedPaths)
+          const overlap = computeGateCommandOverlap(attemptGates, changedPaths, lease.path)
           if (overlap.length > 0) {
             base.gateCommandOverlap = overlap
             for (const o of overlap) {
