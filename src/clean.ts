@@ -4,8 +4,10 @@
 //   npm run clean -- --all [--force] [--run-root <path>]
 //
 // Evidence (report.json, diff.patch, logs) is never deleted — only git
-// worktrees and their branches. A worktree holding uncommitted changes is
-// refused unless --force: those changes may be the only un-captured copy.
+// worktrees and their branches. A worktree NOT covered by captured evidence
+// is refused unless --force (T-048's evidence-parity predicate,
+// src/disposal.ts): changes no stored diff.patch holds, or changes made
+// after the capture — those may be the only un-captured copy.
 // Every git subprocess is list-form, never through a shell (AGENTS.md #4) —
 // hand-rolled shell loops on exactly this path bit us twice
 // (VERIFICATION.md Known issues #4).
@@ -30,7 +32,9 @@ Options:
   --run <runId>        Clean one run directory under the run root
   --all                Clean every run directory under the run root that is
                        not the newest (run directories are 14-digit timestamps)
-  --force              Remove worktrees even when they hold uncommitted changes
+  --force              Remove worktrees even when they hold un-captured changes
+                       (no stored diff.patch evidence, or the tree differs
+                       from it)
   --force-lock         Take the checkout lock even if another (suspected-stale)
                        holder still owns it
   --run-root <path>    Where runs live (default: C:\\swarm)
