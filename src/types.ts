@@ -637,6 +637,102 @@ export interface EarlyStopRecord {
   neverDispatchedIds: string[]
 }
 
+/**
+ * The per-run yield block's count fields (T-049, the 2026-10-23 adversarial
+ * review's A2 measuring stick). Every count is a pure derivation over data
+ * the report already holds — the ladder vocabulary (`FailureReason`) and the
+ * store's elimination classes (eliminationReason, src/store/index.ts); the
+ * exact metric definitions live in src/yield.ts and VERIFICATION.md's Gate
+ * 1.36. Evidence only, never a verdict input.
+ */
+export interface RunYieldCounts {
+  /** Dispatched candidates, report order (never-dispatched jobs appear in
+   *  the schedule block, never here). */
+  candidates: number
+  /** Every attempt the runner dispatched, mechanical retries and the T-038
+   *  gate-retry leg included. */
+  attemptsDispatched: number
+  /** Attempts whose worker leg succeeded: no failure record (a succeeded
+   *  attempt) or `failure.reason === 'gates-failed'` (the T-038 pre-retry
+   *  leg — the worker succeeded, the gates rejected). The worker-side
+   *  failure reasons ('worker-failed', 'error') do not count. */
+  workerOkAttempts: number
+  /** Attempts with a machine-known non-zero captured diff: the FINAL attempt
+   *  counts iff the candidate's `diffBytes > 0` (the report's only diff byte
+   *  count, describing the final attempt); a NON-final attempt counts iff
+   *  `failure.reason === 'gates-failed'` (the T-038 firing condition requires
+   *  a non-zero captured diff, decisions.md 2026-10-21). A retried
+   *  worker-failed leg's partial diff size is not report data — it counts
+   *  nowhere (honest absence, not a zero). */
+  nonZeroDiffAttempts: number
+  /** Candidates in the store's 'gates-failed' elimination class: worker
+   *  succeeded, diff non-zero, gates ran, at least one rejected — counted on
+   *  FINAL attempts only (a pre-retry gates-failed leg is not a final
+   *  attempt). */
+  gateFailedFinalAttempts: number
+  /** Candidates in the store's 'no-op' elimination class: workerOk with a
+   *  zero-byte captured diff (AGENTS.md #7's machine-known NO-OP). */
+  noOpEliminations: number
+  /** Candidates with `passedAllGates === true`. */
+  survivors: number
+}
+
+/** One round's sub-totals inside `RunReport.yield.perRound` (T-049): the
+ *  same count set as `RunYieldCounts` over that round's candidates. Round
+ *  membership follows the runner's id convention — round 2 ids are
+ *  `<survivorId>-r2` (src/runner.ts) — so round 1 holds every id without
+ *  the `-r2` suffix. A recorded-but-not-executed round carries zeros
+ *  (recorded, never fabricated — the RoundRecord.executed posture). */
+export interface RunYieldRound {
+  /** 1-based round index, mirroring the report's `rounds` block entry. */
+  round: number
+  candidates: number
+  attemptsDispatched: number
+  workerOkAttempts: number
+  nonZeroDiffAttempts: number
+  gateFailedFinalAttempts: number
+  noOpEliminations: number
+  survivors: number
+}
+
+/** One evidence-only derailment marker (T-049): a machine-known no-op
+ *  attempt (workerOk, zero-byte diff) whose worker.log carries the harness's
+ *  recorded external_directory auto-reject line — the Known issue #6
+ *  containment class, cited by its matched literal. A HEURISTIC, honestly
+ *  named one: a deterministic string match on recorded bytes, labeled
+ *  evidence, never a verdict input, never a classification the ladder
+ *  reads (decisions.md 2026-10-10: gates decide survival). */
+export interface DerailmentMarkerNote {
+  /** The no-op attempt whose worker.log matched (`<candidateId>-a<n>`). */
+  attemptId: string
+  /** The matched marker literal, verbatim (src/yield.ts DERAILMENT_MARKER). */
+  marker: string
+}
+
+/**
+ * The machine-derived per-run yield block (T-049), carried on
+ * `RunReport.yield` ONLY when the run recorded at least one machine-known
+ * no-op elimination (workerOk, zero-byte diff) — the producer-only pattern:
+ * a clean run's report shape is byte-identical to pre-T-049. Pure
+ * derivation over recorded evidence (the report's own fields, plus the
+ * no-op attempts' worker.log bytes for the marker scan) — zero new failure
+ * surface, zero decisions: no threshold, no early-stop wiring, nothing the
+ * ladder reads (A2 explicitly does NOT feed verdicts; decisions.md
+ * 2026-10-10). Store columns, dashboard tiles, and cross-run aggregation
+ * are carved (later slices; the report is this slice's durable copy).
+ */
+export interface RunYield extends RunYieldCounts {
+  /** The FINAL attempt id of every no-op candidate, report order — the
+   *  machine-known no-op class the marker scan runs over. */
+  noOpAttemptIds: string[]
+  /** Present only when at least one no-op attempt's worker.log carries the
+   *  recorded auto-reject marker (absent blocks never appear). */
+  derailmentMarkers?: DerailmentMarkerNote[]
+  /** Present only when the report carries a `rounds` block (T-030):
+   *  one entry per round record, in its order. */
+  perRound?: RunYieldRound[]
+}
+
 export interface RunReport {
   runId: string
   repo: string
@@ -659,4 +755,12 @@ export interface RunReport {
    *  unchanged. The store never reads it (verdicts only; the rounds
    *  store-invisible precedent). */
   earlyStops?: EarlyStopRecord[]
+  /** Present only when the run recorded at least one machine-known no-op
+   *  elimination — workerOk with a zero-byte captured diff (T-049): the
+   *  mechanically derived per-run yield block (`RunYield`). Absent
+   *  otherwise — clean runs' report shape is byte-identical to pre-T-049
+   *  (the rounds/earlyStops producer-only pattern). Evidence only, never a
+   *  verdict input: no ladder line reads it (decisions.md 2026-10-10 —
+   *  gates decide survival). */
+  yield?: RunYield
 }

@@ -288,9 +288,12 @@ async function drive(name, { rounds, candidateIds = ['c01', 'c02'] }) {
   t('B (T-050): the round-1 planner prompt carries NONE of the premise lines — round-1 prompts are byte-identical to today',
     !ROUND_PREMISE_LINES.some((line) => plannerPlainReqs[0]?.prompt.includes(line)))
 
-  t('B: report on disk — top-level keys exactly today\'s plus the additive rounds block',
+  // T-049: the key set gains `yield` — this fixture intentionally carries a
+  // no-op round-2 candidate (brief B "change nothing"), which is exactly the
+  // yield block's producer; the block's own behavior is pinned by Gate 1.36.
+  t('B: report on disk — top-level keys exactly today\'s plus the additive rounds and yield blocks',
     eq(sortedKeys(JSON.parse(read(join(artifactsDir, 'report.json')))),
-      ['baseSha', 'candidates', 'finishedAt', 'goal', 'model', 'planner', 'repo', 'rounds', 'runId', 'startedAt']))
+      ['baseSha', 'candidates', 'finishedAt', 'goal', 'model', 'planner', 'repo', 'rounds', 'runId', 'startedAt', 'yield']))
   const onDisk = JSON.parse(read(join(artifactsDir, 'report.json')))
   t('B: the rounds block has exactly the ticketed fields — round 1 (executed/survivorIds), round 2 plus packetFingerprint and renderedBlockPath',
     onDisk.rounds.length === 2

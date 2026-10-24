@@ -2601,7 +2601,9 @@ optional. Four legs, all token-free:
   rendered block as a verbatim substring, naming survivor ids, briefs,
   gate results with commands, and review observations (round 1's prompt
   carries none); the report on disk has exactly today's top-level keys
-  plus `rounds`, the entries exactly the ticketed fields, the recorded
+  plus `rounds` (and, since T-049, `yield` — the fixture intentionally
+  carries a no-op round-2 candidate, exactly the yield block's producer;
+  Gate 1.36 pins that block), the entries exactly the ticketed fields, the recorded
   fingerprint equal to the independently recomputed composition's, and
   the block file byte-identical to the recomputation; candidates are
   both waves in order; round-2 worktrees exist at the same baseSha;
@@ -4453,6 +4455,110 @@ into the real round-2 planner prompt, and that planner stated TRUE base
 facts unprompted (c01-r2 guard-inert, surviving). No code change, no
 weakened assertion — the red leg is model-behavior variance in a
 recorded class; the remedy is a re-run.
+
+## Gate 1.36 — yield instrumentation: derivation arithmetic, round sub-totals, derailment markers, verdict inertness (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-yield.mjs
+```
+
+Pins T-049 — the 2026-10-23 adversarial review's A2 instrument: the
+mechanically derived, additive, producer-only `RunReport.yield` block
+(`RunYield`, src/types.ts; derivation `deriveRunYield`, src/yield.ts),
+produced by the runner after every other report block attaches. You
+cannot manage what the honest report tells you only anecdotally: every
+decision that matters next (which worker model, which prompt posture,
+whether `--rounds 2` earns its tokens) needs per-run yield numbers, and
+until T-049 the only way to get them was to re-derive them by hand.
+
+**The metric definitions** (every count a pure derivation over data the
+report already holds — the ladder vocabulary `FailureReason` and the
+store's elimination classes, `eliminationReason` in src/store/index.ts:
+error → worker-failed → no-op → no-gates → gates-failed):
+
+- `candidates` — dispatched candidates, report order.
+- `attemptsDispatched` — Σ per-candidate attempts (mechanical retries and
+  the T-038 gate-retry leg included).
+- `workerOkAttempts` — attempts whose worker leg succeeded: no failure
+  record, or `failure.reason === 'gates-failed'` (the T-038 pre-retry
+  leg — the worker succeeded; the gates, not the worker, rejected).
+- `nonZeroDiffAttempts` — attempts with a machine-known non-zero captured
+  diff. The report's only diff byte count (`diffBytes`) describes the
+  FINAL attempt, so that attempt counts iff `diffBytes > 0`; a non-final
+  attempt counts iff `failure.reason === 'gates-failed'` (the T-038
+  firing condition requires a non-zero captured diff, decisions.md
+  2026-10-21). A retried worker-failed leg's partial diff size is not
+  report data and counts nowhere — an honest absence, never a zero.
+- `gateFailedFinalAttempts` — the store's 'gates-failed' class, FINAL
+  attempts only (workerOk, non-zero diff, gates ran, at least one
+  rejected; a pre-retry gates-failed leg is not a final attempt).
+- `noOpEliminations` — the store's 'no-op' class: workerOk with a
+  zero-byte captured diff (AGENTS.md #7's machine-known NO-OP).
+- `survivors` — `passedAllGates === true`.
+- `noOpAttemptIds` — the FINAL attempt id of every no-op candidate.
+- `perRound` (present only when the report carries a `rounds` block) —
+  the same count set per round; membership by the runner's id
+  convention (`<survivorId>-r2`, src/runner.ts), so a
+  recorded-but-not-executed round carries zeros, never fabrications.
+
+**The derailment marker, evidence-only.** For each no-op attempt, when
+its `worker.log` (the attempt's own recorded artifact) contains the
+harness's external_directory auto-reject line, the block records a
+`derailmentMarkers` note citing the matched literal. The recorded line,
+verbatim from the cited run evidence (run 20261024021432, the T-047
+lane's driving Gate 2, its c02-r2 worker.log — the run's artifacts were
+wiped from disk by a later Gate 2 run's root reset, so the literal is
+cited from this file's own Known issue #6 2026-10-24 entry, which
+recorded it at landing time, and byte-cross-checked against the same
+harness frame on disk in run 20261010235146's c02/c03 worker.logs and
+run 20261024203025's planner logs):
+
+```
+permission requested: external_directory (C:\swarm\verify\20261024021432\wt\c02\r2\*); auto-rejecting
+```
+
+The parenthesized path is per-run; the matched literal
+(`DERAILMENT_MARKER`, src/yield.ts) is the line's stable
+path-independent frame, a byte-exact substring of every recorded
+instance, never a paraphrase and never a regex:
+
+```
+permission requested: external_directory
+```
+
+A HEURISTIC, honestly named one: a deterministic string match on
+recorded bytes, labeled evidence — never a verdict input, never a
+classification the ladder reads (decisions.md 2026-10-10: gates decide
+survival). A no-op without the marker is still recorded
+(`noOpAttemptIds`); the marker without the zero diff produces nothing;
+a missing or unreadable worker.log degrades to no note and never throws.
+
+**Producer-only.** The block is produced ONLY when the run recorded at
+least one machine-known no-op elimination — a clean run's report shape
+is byte-identical to pre-T-049 (pinned on a real `runSkeleton` drive:
+no `yield` key, no bytes, exactly the pre-T-049 top-level key set). One
+existing pin was extended in the same change-set, not weakened: Gate
+1.22 leg B's exact top-level key set gains `yield`, because that
+fixture intentionally carries a no-op round-2 candidate ("change
+nothing") — exactly this block's producer (the T-030 precedent: that
+ticket added `rounds` to the then-existing key pin the same way).
+
+**Verdict inertness.** The block is derived after the ladder; no ladder
+line, retry decision, or elimination path reads it. Pinned
+behaviorally: candidates are byte-identical with and without the block
+(every elimination-determining field: `workerOk`, `diffBytes`, gate
+verdicts, `error`, `passedAllGates`), and a derivation failure in the
+runner logs and records nothing — an instrument must never break the
+run it measures.
+
+Carved (later slices, the T-034 producer-only precedent): store columns,
+dashboard tiles, and any cross-run aggregation. No decisions, no
+thresholds, no early-stop wiring — A2 explicitly does NOT feed
+verdicts. The report is this slice's durable copy. Red bar (AGENTS #8):
+the landed check against main's engine at the lane — 11 failures, exit
+1 (`C:\swarm\verify-red\T-049-redbar.log`); post-change the check is
+ALL GREEN. Required whenever `src/yield.ts` or the yield block's
+derivation changes.
 
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
