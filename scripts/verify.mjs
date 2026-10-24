@@ -1030,6 +1030,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.37: dashboard write surface (T-051) ----------
+section('Gate 1.37 — dashboard write surface (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-dashboard-write.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'dashboard-write self-check exit 0')
+} catch (e) {
+  fail(`dashboard-write self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
