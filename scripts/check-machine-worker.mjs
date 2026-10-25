@@ -197,9 +197,13 @@ async function main() {
     // Source-level pin of the passthrough wiring (the Gate 1.12 S2 source-pin
     // precedent): the timed run goes through runChildWithTimeout and its
     // cleanupFailures spread onto the result, exactly like the OpenCodeWorker.
+    // The pinned call shape was EXTENDED (not weakened) in the T-053
+    // change-set: the adapter now also passes its attempt-scoped
+    // logWriteLoss recorder into the core (the Gate 1.36 key-set-extension
+    // precedent) — routing and spread stay asserted verbatim.
     const src = read(join(root, 'src', 'worker', 'machine.ts'))
     t('S4: source pin — the adapter routes through runChildWithTimeout and spreads its cleanupFailures',
-      src.includes('runChildWithTimeout(child, { timeoutMs: req.timeoutMs, logPath: req.logPath })')
+      src.includes('runChildWithTimeout(child, { timeoutMs: req.timeoutMs, logPath: req.logPath, logWriteLoss })')
       && src.includes('run.cleanupFailures.length > 0 ? { cleanupFailures: run.cleanupFailures }'))
   }
 

@@ -2,7 +2,8 @@ import { spawn } from 'node:child_process'
 import { appendFileSync } from 'node:fs'
 import type { Readable } from 'node:stream'
 import type { WorkerAdapter, WorkerExecutionRequest, WorkerResult } from '../types.js'
-import { runChildWithTimeout } from './run-with-timeout.js'
+import { createLogWriteLoss, runChildWithTimeout } from './run-with-timeout.js'
+import type { LogWriteLoss } from './run-with-timeout.js'
 
 /**
  * Worker adapter for OpenCode in headless mode (`opencode run`).
@@ -44,7 +45,11 @@ import { runChildWithTimeout } from './run-with-timeout.js'
  * goal, brief, or retry-diff bytes are visible to local process listings.
  * The argv log line still records the actual spawn shape with the prompt
  * elided; PWD/OLDPWD pinning, responseTail collection, onSpawn, and the
- * timeout/kill path (`runChildWithTimeout` untouched) are unchanged.
+ * timeout/kill path (`runChildWithTimeout` untouched) are unchanged. Since
+ * T-053 the pre-run argv line and the core's log writes share one
+ * log-write-loss recorder, so a broken log path surfaces as exactly one
+ * `LOG WRITE FAILED` cleanupFailures line (Gate 1.39 C2) — recorded, never
+ * thrown, never read by any verdict.
  */
 export class OpenCodeWorker implements WorkerAdapter {
   readonly id = 'opencode'
@@ -53,6 +58,11 @@ export class OpenCodeWorker implements WorkerAdapter {
 
   async execute(req: WorkerExecutionRequest): Promise<WorkerResult> {
     const started = Date.now()
+    // T-053: one log-write-loss recorder spans this attempt's pre-run argv
+    // line and the core's drain/exit-line writes — a broken log path yields
+    // exactly ONE `LOG WRITE FAILED` line in WorkerResult.cleanupFailures
+    // (first failure per path), never a broken run and never silence.
+    const logWriteLoss = createLogWriteLoss()
     // Absent policy ≡ 'worktree-write' (the pre-T-023 shape): existing
     // request sites and fake adapters compile and behave unchanged.
     const policy = req.executionPolicy ?? 'worktree-write'
@@ -66,7 +76,7 @@ export class OpenCodeWorker implements WorkerAdapter {
     const args = policy === 'worktree-write'
       ? ['run', '-m', req.model]
       : ['run', '--agent', 'plan', '-m', req.model]
-    appendLog(req.logPath, `$ opencode ${args.join(' ')} <prompt: ${req.prompt.length} chars>\n`)
+    appendLog(req.logPath, `$ opencode ${args.join(' ')} <prompt: ${req.prompt.length} chars>\n`, logWriteLoss)
 
     const child = spawn(this.binPath, args, {
       cwd: req.cwd,
@@ -104,7 +114,7 @@ export class OpenCodeWorker implements WorkerAdapter {
       responseText = out + err
     })
 
-    const run = await runChildWithTimeout(child, { timeoutMs: req.timeoutMs, logPath: req.logPath })
+    const run = await runChildWithTimeout(child, { timeoutMs: req.timeoutMs, logPath: req.logPath, logWriteLoss })
     await tail
 
     return {
@@ -140,10 +150,13 @@ function collectText(stream: Readable | null): Promise<string> {
   })
 }
 
-function appendLog(logPath: string, line: string): void {
+function appendLog(logPath: string, line: string, loss: LogWriteLoss): void {
   try {
     appendFileSync(logPath, line)
-  } catch {
-    // Logging must never break a run.
+    loss.noteWriteSuccess(logPath, Buffer.byteLength(line))
+  } catch (err) {
+    // Logging must never break a run — but since T-053 the loss is recorded
+    // (first failure per path), not silent.
+    loss.noteWriteFailure(logPath, err)
   }
 }

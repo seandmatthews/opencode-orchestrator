@@ -2,7 +2,8 @@ import { spawn } from 'node:child_process'
 import { appendFileSync } from 'node:fs'
 import type { Readable } from 'node:stream'
 import type { WorkerAdapter, WorkerExecutionRequest, WorkerResult } from '../types.js'
-import { runChildWithTimeout } from './run-with-timeout.js'
+import { createLogWriteLoss, runChildWithTimeout } from './run-with-timeout.js'
+import type { LogWriteLoss } from './run-with-timeout.js'
 
 /**
  * MachineWorker (T-017, spec §4:186-187, §5.3:254-273, §11:851-859,
@@ -42,6 +43,10 @@ import { runChildWithTimeout } from './run-with-timeout.js'
  * (src/worker/run-with-timeout.ts, pinned token-free by Gate 1.12 S4): log
  * draining, the verified process-tree kill at expiry, `cleanupFailures`
  * passthrough (src/types.ts). This file keeps only the specifics: the argv.
+ * Since T-053 the pre-run header write and the core's log writes share one
+ * log-write-loss recorder, so a broken log path surfaces as exactly one
+ * `LOG WRITE FAILED` cleanupFailures line (Gate 1.39 C1) — recorded, never
+ * thrown, never read by any verdict.
  */
 export class MachineWorker implements WorkerAdapter {
   readonly id = 'machine'
@@ -52,13 +57,18 @@ export class MachineWorker implements WorkerAdapter {
 
   async execute(req: WorkerExecutionRequest): Promise<WorkerResult> {
     const started = Date.now()
+    // T-053: one log-write-loss recorder spans this attempt's pre-run header
+    // write and the core's drain/exit-line writes — a broken log path yields
+    // exactly ONE `LOG WRITE FAILED` line in WorkerResult.cleanupFailures
+    // (first failure per path), never a broken run and never silence.
+    const logWriteLoss = createLogWriteLoss()
     appendLog(req.logPath, [
       `$ machine ${JSON.stringify(this.command)}  (argv, list-form; never re-tokenized)`,
       `  model: ${req.model} (ignored — a machine worker runs no model; the report records the configured string verbatim)`,
       '  brief (provenance only — never interpreted or executed by this worker):',
       req.prompt,
       '',
-    ].join('\n'))
+    ].join('\n'), logWriteLoss)
 
     const child = spawn(this.command[0]!, this.command.slice(1), {
       cwd: req.cwd,
@@ -81,7 +91,7 @@ export class MachineWorker implements WorkerAdapter {
       responseText = out + err
     })
 
-    const run = await runChildWithTimeout(child, { timeoutMs: req.timeoutMs, logPath: req.logPath })
+    const run = await runChildWithTimeout(child, { timeoutMs: req.timeoutMs, logPath: req.logPath, logWriteLoss })
     await tail
 
     return {
@@ -117,10 +127,13 @@ function collectText(stream: Readable | null): Promise<string> {
   })
 }
 
-function appendLog(logPath: string, line: string): void {
+function appendLog(logPath: string, line: string, loss: LogWriteLoss): void {
   try {
     appendFileSync(logPath, line)
-  } catch {
-    // Logging must never break a run.
+    loss.noteWriteSuccess(logPath, Buffer.byteLength(line))
+  } catch (err) {
+    // Logging must never break a run — but since T-053 the loss is recorded
+    // (first failure per path), not silent.
+    loss.noteWriteFailure(logPath, err)
   }
 }

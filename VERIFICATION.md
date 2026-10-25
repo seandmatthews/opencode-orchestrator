@@ -4784,6 +4784,117 @@ pairing). Gate 3 n/a (no adapter; no harness spawn changed). Required
 whenever the lock release semantics or recover's identity verification
 changes.
 
+## Gate 1.39 — log-write loss made loud: first-failure-per-path cleanup evidence (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-log-write-loss.mjs
+```
+
+Pins T-053 (register R12): every log write in the worker-run path used to
+swallow its failures silently — `drain`/`appendLine`
+(src/worker/run-with-timeout.ts) and both adapters' pre-run `appendLog`
+(src/worker/opencode.ts, src/worker/machine.ts) — so a full disk, a locked
+file, or an unwritable path yielded a silently-empty `worker.log` that a
+human later read as "the worker produced nothing": indistinguishable from
+the no-op derailment class and worse than useless as forensics (Known issue
+#6's diagnosis method depends on worker.log). The change surfaces the loss
+through the vocabulary that already exists (T-011's `cleanupFailures` →
+the runner's aggregation → `CandidateReport.cleanupFailures`, so
+dashboard/report/store surfaces come free):
+
+- **First-failure-per-path recording** — one `LogWriteLoss` recorder per
+  attempt, created by the adapter and shared with the core through
+  `RunChildTimeoutOptions.logWriteLoss` (the core creates its own when
+  driven directly). The FIRST failed append to a path pushes exactly one
+  line — `LOG WRITE FAILED after <N> bytes at <path>: <err> — log evidence
+  incomplete from this point` (N = the bytes that had actually landed,
+  counted across every successful write, so a mid-run loss records the true
+  evidence offset, not always zero); every subsequent failure for the same
+  path adds nothing (no spam from a chatty child on a broken path).
+- **The run never breaks** — the swallow stays (the posture is unchanged:
+  this records, it does not throw); a candidate whose log could not be
+  written still completes and is still verdicted by its gates alone. The
+  healthy path is byte-identical: no line, no `cleanupFailures` key, the
+  same log bytes (pinned below; Gates 1.12/1.17's own faces also ride green
+  unchanged in the same tier).
+
+The deterministic broken-log fixtures (both verified on this host):
+`appendFileSync` onto a directory throws `EISDIR` (the always-broken path),
+and the Windows read-only attribute (`chmodSync(path, 0o444)`) blocks
+appends with `EPERM` (the mid-run loss — chunk 1 lands, the attribute goes
+on, chunk 2 fails; deleting the file is NOT a fixture, `appendFileSync`
+recreates a missing file and never throws ENOENT — discovered while writing
+the check and recorded here so nobody re-derives it).
+
+Token-free, no git, no opencode binary, no model IDs (the OpenCodeWorker is
+driven with the node exe as a stub harness — `node run -m <model>` exits 1
+immediately, exercising exactly the adapter's log seam):
+
+- **A1 — the red-bar seam**: `runChildWithTimeout` (the Gate 1.12 S4 seam)
+  with `logPath` = a directory: completes, exit 0, and `cleanupFailures`
+  carries EXACTLY ONE line in the exact format naming the exact path, the
+  landed byte count (0), and the error (EISDIR). On main this is the
+  recorded silence: the drive completes with `[]` — zero trace of the loss.
+- **A2 — no-spam**: a child writing 40 spaced chunks after the first
+  failure still adds exactly ONE line.
+- **A3 — healthy byte-identity**: with a writable log the bytes are exactly
+  the child's stdout + the `$ exit code: 0` line, and `cleanupFailures` is
+  the empty array (the pre-T-053 shape).
+- **B1 — honest byte count**: chunk 1 lands through the core's drain (28
+  bytes on disk), the log goes read-only between the stub's two writes (a
+  polling handshake — deterministic, no sleep races), chunk 2 fails EPERM:
+  exactly one line with N = 28 and the EPERM error (also pins the dedup
+  across drain's failing write and the exit-line write).
+- **C1/C2 — both adapters' pre-run line** (the Gate 1.17 stub precedent):
+  MachineWorker and OpenCodeWorker with a directory as `logPath` each
+  surface EXACTLY ONE line through `WorkerResult.cleanupFailures` — the
+  pre-run argv/header write is the first failure for the path, and the
+  core's later failures for the same path add nothing (one recorder spans
+  adapter + core within the attempt). Verdict bits are pinned in BOTH
+  directions exactly as today: C1 `ok: true` (exit 0), C2 `ok: false` /
+  `exitCode: 1` — the loss changes no verdict bit either way.
+- **C3 — producer-only field**: a healthy MachineWorker result carries NO
+  `cleanupFailures` key at all, and the log bytes are exactly the pre-run
+  header + child stdout + exit line.
+- **D1-D3 — verdict inertness** (source pins, the Gate 1.12 S2 / 1.17 S4
+  precedent): the ladder computes `passedAllGates` from
+  `gates.every(passed)` + `diffBytes` alone; the runner's aggregation site
+  pushes `result.cleanupFailures` into the evidence array only; and BOTH
+  adapters route their pre-run write failures into the shared recorder.
+
+One existing pin was extended in the same change-set, not weakened
+(the Gate 1.36 key-set-extension precedent): Gate 1.17 S4's source pin of
+the adapter's core call now asserts the literal
+`runChildWithTimeout(child, { timeoutMs: req.timeoutMs, logPath:
+req.logPath, logWriteLoss })` — the routing and the cleanupFailures spread
+stay asserted verbatim; the literal tracks the call site.
+
+**Red bar (AGENTS.md #8), recorded on main's engine at the lane with the
+final check version** (tracked changes stashed, the check itself untracked
+and so present): `scripts/check-log-write-loss.mjs` exit 1, 11 failures of
+25, teed to `C:\swarm\verify-red\T-053-redbar.log` — the A1/A2/B1/C1/C2
+drives all completed with ZERO recorded trace of the loss (`[]` /
+undefined; B1's run even exit 0 with the log silently read-only), and the
+D3 wiring pin was red (no recorder existed). The healthy-path legs (A3/C3)
+and the verdict-inertness source pins (D1/D2) were green on main — exactly
+the silence this ticket removes. Post-change the check is ALL GREEN
+(35 assertions, ~4s). Gate 2 trigger analysis: **TRIGGERED and owed** —
+the change-set touches `src/worker/run-with-timeout.ts` (the worker core
+under both adapters' timed runs) and both adapter files, all on the
+trigger list (Gate 2's section); the standard real e2e run's worker legs
+ride the recorder inertly (no healthy leg ever fails a log write — A3/C3
+pin that shape), so the run's shape is unchanged; a real-run
+`LOG WRITE FAILED` is not asserted (it needs a genuinely broken log path
+mid-run) — the no-regression half is what Gate 2 pins, carried by the full
+tier. Gate 3 n/a per the ticket: the adapters' harness-directory-resolution
+surfaces (bin path, argv shape, PWD/OLDPWD pinning, stdin transport) are
+untouched — only the `appendLog` catch changed, and the diag-pwd probe's
+answer is unaffected. Carved by the ticket: probe bundle/log writes (their
+failures are already console-logged at the call site, separate slice) and
+gate output capture (CommandGate buffers in memory; its `exec` callback
+cannot lose bytes to a file). Required whenever the log-write-loss
+recording or its channel changes.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash

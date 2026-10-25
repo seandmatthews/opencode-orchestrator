@@ -1,6 +1,6 @@
 # T-053 — Log-write loss made loud: first-failure-per-path cleanup evidence (register R12)
 
-**Status:** proposed
+**Status:** done 2026-10-24
 **Category:** engine
 **Value (1-5):** 2 · **Risk (1-5):** 2
 **Depends on:** —
@@ -79,12 +79,46 @@ empty one poisons every conclusion drawn from it.
 
 ## Landed
 
+`src/worker/run-with-timeout.ts` gained the exported `LogWriteLoss`
+recorder (`createLogWriteLoss`): one per attempt, first-failure-per-path,
+counting landed bytes so the line — `LOG WRITE FAILED after <N> bytes at
+<path>: <err> — log evidence incomplete from this point` — carries the true
+evidence offset. `drain`/`appendLine` now record their write failures
+through it (the swallow stays; nothing throws), and the lines merge into
+the returned `cleanupFailures` ahead of the kill evidence. Both adapters
+(`src/worker/opencode.ts`, `src/worker/machine.ts`) create the recorder,
+route their pre-run `appendLog` failure through it, and pass it into the
+core via the new optional `RunChildTimeoutOptions.logWriteLoss` — so a
+broken log path yields exactly ONE line on `WorkerResult.cleanupFailures`
+no matter how many writes fail. No engine code outside `src/worker/`
+changed; the channel (T-011 aggregation at src/runner.ts:1138 →
+`CandidateReport.cleanupFailures`) is untouched and nothing in any verdict
+reads the line (the ladder at src/runner.ts:1323 stays
+gates-every-passed + diffBytes).
+
+Deviations from the ticket text: none in behavior — one fixture deviation
+recorded in VERIFICATION.md's Gate 1.39 section: the mid-run-loss fixture
+is the Windows read-only attribute (EPERM), not a deleted file, because
+`appendFileSync` recreates a missing file and never throws ENOENT
+(discovered while writing the check; the always-broken fixture is the
+ticket's own EISDIR-on-a-directory, verified on this host). Gate numbers
+measured: red bar (final check version vs main's engine at the lane)
+`C:\swarm\verify-red\T-053-redbar.log` — exit 1, 11 failures of 25, all
+five loss legs showing the silent `[]`/undefined face; post-change Gate
+1.39 ALL GREEN, 35 assertions, ~4s; full fast tier ALL GREEN (Gate 0 +
+Gates 1.5–1.39) in the same change-set. Gate 2: TRIGGERED and owed
+(worker core + both adapters on the trigger list) — carried by the driving
+full tier; Gate 3 n/a (no harness directory-resolution surface touched).
+
 ## Verification
 
-New fast-tier check (next free gate number at landing): EISDIR red bar,
-one-line green, no-spam, healthy-path inertness, both adapters' pre-run
-line, verdict inertness. Gate 0, full fast tier ALL GREEN; Gate 2 owed and
-recorded.
+Gate 1.39 (VERIFICATION.md, `scripts/check-log-write-loss.mjs`): EISDIR
+red bar (A1), one-line green, no-spam (A2), honest landed-byte count
+(B1), healthy-path byte-identity + empty-array shape (A3/C3), both
+adapters' pre-run line with verdict bits pinned in both directions
+(C1/C2), verdict inertness (behavioral C1/C2 + source pins D1-D3).
+Gate 0 + full fast tier ALL GREEN; Gate 2 owed and recorded as triggered;
+Gate 3 n/a.
 
 ## References
 

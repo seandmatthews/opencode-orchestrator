@@ -1050,6 +1050,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.39: log-write loss made loud (T-053) ----------
+section('Gate 1.39 — log-write loss made loud (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-log-write-loss.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'log-write-loss self-check exit 0')
+} catch (e) {
+  fail(`log-write-loss self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
