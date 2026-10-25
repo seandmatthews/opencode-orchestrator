@@ -10,13 +10,24 @@ export interface RunChildTimeoutOptions {
   /** Absolute path of the file the child's stdout/stderr and the kill outcome
    *  are appended to. */
   logPath: string
+  /**
+   * T-053: the attempt-scoped log-write-loss recorder. One recorder spans
+   * the adapter's pre-run log writes and this core's drain/appendLine
+   * writes, so a broken log path yields exactly ONE loud line in the
+   * attempt's cleanupFailures no matter how many writes fail. When omitted
+   * the core creates its own (the direct-drive shape, Gate 1.12 S4 / Gate
+   * 1.39 A/B legs).
+   */
+  logWriteLoss?: LogWriteLoss
 }
 
 export interface RunChildTimeoutResult {
   timedOut: boolean
   exitCode: number | null
-  /** The loud `CLEANUP FAIL:` lines from the timeout kill; empty when the
-   *  kill verified clean. Evidence only — never a verdict. */
+  /** The loud `CLEANUP FAIL:` lines from the timeout kill (empty when the
+   *  kill verified clean) plus, since T-053, the first-failure-per-path
+   *  `LOG WRITE FAILED` lines when the log itself could not be written.
+   *  Evidence only — never a verdict. */
   cleanupFailures: string[]
 }
 
@@ -36,6 +47,59 @@ export interface RunChildTimeoutResult {
 export const KILL_SETTLE_WINDOW_MS = 15_000
 
 /**
+ * T-053 (register R12) — log-write loss made loud, first-failure-per-path.
+ * "Logging must never break a run" stays the posture (the swallow stays; this
+ * records, it does not throw), but the loss is no longer SILENT: a full disk,
+ * a locked file (antivirus/indexer holding a handle), or an unwritable path
+ * used to yield a silently-empty worker.log that a human later read as "the
+ * worker produced nothing" — indistinguishable from the no-op derailment
+ * class, and worse than useless as forensics (worker.log is the primary
+ * derailment-forensics artifact, VERIFICATION.md Known issue #6).
+ *
+ * One recorder per attempt (created by the adapter, or by this core when
+ * driven directly): the FIRST failed append to a given path pushes exactly
+ * one line into `lines` — `LOG WRITE FAILED after <N> bytes at <path>: <err>
+ * — log evidence incomplete from this point` (N = the bytes that had actually
+ * landed on the path; successes are counted so N is honest when a loss starts
+ * mid-run) — and every subsequent failure for the same path adds nothing (no
+ * spam from a chatty child on a broken path). The lines ride the existing
+ * cleanupFailures channel (`WorkerResult.cleanupFailures` → the runner's
+ * aggregation → `CandidateReport.cleanupFailures`, T-011): evidence only,
+ * never a verdict — no ladder line, retry decision, or elimination path reads
+ * them (decisions.md 2026-10-10: gates decide survival).
+ */
+export interface LogWriteLoss {
+  /** The recorded first-failure-per-path lines, in failure order — empty on
+   *  every healthy attempt (the producer-only pattern). */
+  readonly lines: readonly string[]
+  /** Count a successful append so the byte count at a LATER failure is the
+   *  landed-bytes count, not always zero. */
+  noteWriteSuccess(logPath: string, bytes: number): void
+  /** Record a failed append; pushes the loud line only on the first failure
+   *  for this path within the recorder's lifetime (one attempt). */
+  noteWriteFailure(logPath: string, err: unknown): void
+}
+
+export function createLogWriteLoss(): LogWriteLoss {
+  const lines: string[] = []
+  const reported = new Set<string>()
+  const landed = new Map<string, number>()
+  return {
+    lines,
+    noteWriteSuccess(logPath, bytes) {
+      landed.set(logPath, (landed.get(logPath) ?? 0) + bytes)
+    },
+    noteWriteFailure(logPath, err) {
+      if (reported.has(logPath)) return
+      reported.add(logPath)
+      lines.push(
+        `LOG WRITE FAILED after ${landed.get(logPath) ?? 0} bytes at ${logPath}: ${String(err)} — log evidence incomplete from this point`,
+      )
+    },
+  }
+}
+
+/**
  * The harness-agnostic core of a timed worker run (T-011): drains the child's
  * stdout/stderr into the log, waits for exit, and at `timeoutMs` fires a
  * verified process-tree kill — alive check, pre-kill CIM snapshot, list-form
@@ -53,14 +117,27 @@ export const KILL_SETTLE_WINDOW_MS = 15_000
  * Knows nothing about any harness — Gate 1.12's S4 drives it with a plain
  * node-spawned tree, token-free, no opencode binary. The adapter keeps only
  * the harness specifics (bin path, args, PWD/OLDPWD pinning).
+ *
+ * Since T-053 log-write failures are loud evidence, never silence: the FIRST
+ * failed append to the log path pushes one `LOG WRITE FAILED after <N> bytes
+ * at <path>: <err> — log evidence incomplete from this point` line into
+ * `cleanupFailures` (see `LogWriteLoss`); later failures for the same path
+ * add nothing, and the run still never breaks.
  */
 export function runChildWithTimeout(child: ChildProcess, opts: RunChildTimeoutOptions): Promise<RunChildTimeoutResult> {
   let timedOut = false
+  // T-053: the attempt-scoped log-write-loss recorder — shared with the
+  // adapter when it passed one, owned here otherwise. Write-loss lines merge
+  // into the returned cleanupFailures ahead of the kill evidence (they
+  // chronologically precede it: drain failures on data events, kill lines at
+  // expiry).
+  const logWriteLoss = opts.logWriteLoss ?? createLogWriteLoss()
   const cleanupFailures: string[] = []
+  const merged = () => [...logWriteLoss.lines, ...cleanupFailures]
 
   const drained = Promise.all([
-    drain(child.stdout, opts.logPath),
-    drain(child.stderr, opts.logPath),
+    drain(child.stdout, opts.logPath, logWriteLoss),
+    drain(child.stderr, opts.logPath, logWriteLoss),
   ])
   const exitCode = new Promise<number | null>((resolve) => {
     child.on('exit', (code) => resolve(code))
@@ -91,7 +168,7 @@ export function runChildWithTimeout(child: ChildProcess, opts: RunChildTimeoutOp
     settleTimer = setTimeout(() => {
       if (finished) return
       const line = `CLEANUP FAIL: child did not settle ${KILL_SETTLE_WINDOW_MS / 1000}s after verified tree kill — abandoning the wait (evidence follows in the log)`
-      appendLine(opts.logPath, `${line}\n`)
+      appendLine(opts.logPath, `${line}\n`, logWriteLoss)
       cleanupFailures.push(line)
       destroyStream(child.stdout)
       destroyStream(child.stderr)
@@ -102,16 +179,16 @@ export function runChildWithTimeout(child: ChildProcess, opts: RunChildTimeoutOp
     if (child.exitCode !== null || child.signalCode !== null) return
     if (child.pid === undefined) {
       const line = 'CLEANUP FAIL: no root pid was recorded for the timed-out child'
-      appendLine(opts.logPath, `${line}\n`)
+      appendLine(opts.logPath, `${line}\n`, logWriteLoss)
       cleanupFailures.push(line)
       return
     }
     const r = killTreeVerified(child.pid)
     if (r.rootWasLive && r.verified) {
-      appendLine(opts.logPath, `${killSuccessLine(r)}\n`)
+      appendLine(opts.logPath, `${killSuccessLine(r)}\n`, logWriteLoss)
     }
     for (const line of killFailureLines(child.pid, r)) {
-      appendLine(opts.logPath, `${line}\n`)
+      appendLine(opts.logPath, `${line}\n`, logWriteLoss)
       cleanupFailures.push(line)
     }
   }, opts.timeoutMs)
@@ -123,14 +200,14 @@ export function runChildWithTimeout(child: ChildProcess, opts: RunChildTimeoutOp
     if (outcome.kind === 'abandoned') {
       // The close never delivered an exit code — null, never a guess. The
       // abandonment line above is the evidence; the run proceeds.
-      appendLine(opts.logPath, `\n$ exit code: null (timed out)\n`)
-      return { timedOut: true, exitCode: null, cleanupFailures }
+      appendLine(opts.logPath, `\n$ exit code: null (timed out)\n`, logWriteLoss)
+      return { timedOut: true, exitCode: null, cleanupFailures: merged() }
     }
     // The pre-T-011 `(timed out, tree killed)` claim is gone: the tree kill
     // is now its own verified line above, not an assertion glued to the exit
     // code.
-    appendLine(opts.logPath, `\n$ exit code: ${outcome.code}${timedOut ? ' (timed out)' : ''}\n`)
-    return { timedOut, exitCode: outcome.code, cleanupFailures }
+    appendLine(opts.logPath, `\n$ exit code: ${outcome.code}${timedOut ? ' (timed out)' : ''}\n`, logWriteLoss)
+    return { timedOut, exitCode: outcome.code, cleanupFailures: merged() }
   })
 }
 
@@ -146,14 +223,17 @@ function destroyStream(stream: Readable | null): void {
 
 /** stdout/stderr land in the log exactly as the adapter's collector did —
  *  raw chunk appends; logging must never break a run. */
-function drain(stream: Readable | null, logPath: string): Promise<void> {
+function drain(stream: Readable | null, logPath: string, loss: LogWriteLoss): Promise<void> {
   if (!stream) return Promise.resolve()
   return new Promise((resolve) => {
     stream.on('data', (chunk: Buffer) => {
       try {
         appendFileSync(logPath, chunk)
-      } catch {
-        // Logging must never break a run.
+        loss.noteWriteSuccess(logPath, chunk.length)
+      } catch (err) {
+        // Logging must never break a run — but since T-053 the loss is
+        // recorded, not silent (first failure per path).
+        loss.noteWriteFailure(logPath, err)
       }
     })
     stream.on('end', () => resolve())
@@ -161,10 +241,13 @@ function drain(stream: Readable | null, logPath: string): Promise<void> {
   })
 }
 
-function appendLine(logPath: string, text: string): void {
+function appendLine(logPath: string, text: string, loss: LogWriteLoss): void {
   try {
     appendFileSync(logPath, text)
-  } catch {
-    // Logging must never break a run.
+    loss.noteWriteSuccess(logPath, Buffer.byteLength(text))
+  } catch (err) {
+    // Logging must never break a run — but since T-053 the loss is
+    // recorded, not silent (first failure per path).
+    loss.noteWriteFailure(logPath, err)
   }
 }
