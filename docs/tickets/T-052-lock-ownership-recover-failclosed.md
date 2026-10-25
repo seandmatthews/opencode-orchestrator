@@ -1,6 +1,6 @@
 # T-052 — Lock release verifies ownership; recover's identity check fails closed (register R4)
 
-**Status:** proposed
+**Status:** done 2026-10-24
 **Category:** ops
 **Value (1-5):** 3 · **Risk (1-5):** 3
 **Depends on:** —
@@ -87,13 +87,104 @@ accepted degradation.
 
 ## Landed
 
+Lane `ticket/T-052-lock-ownership-recover-failclosed`, 2026-10-24. Two
+changes, exactly the ticket's scope:
+
+1. **Lock release verifies ownership** — `src/lock.ts`:
+   `releaseCheckoutLock` reads the lock file before unlinking and releases
+   only a lock whose recorded `pid` is `process.pid`. A foreign pid (a
+   `--force-lock` taker's replacement) skips loudly (`lock at <path> is
+   held by pid <n> — force-taken; not releasing`); an unreadable or
+   unparseable file skips loudly too (never delete what you cannot
+   identify — the line names the CLI override); a missing file stays the
+   pre-T-052 ENOENT-is-ok. New `forceReleaseCheckoutLock` is the CLI
+   `release` verb's primitive — the explicit human override, dropping ANY
+   holder, with the usage text extended to say so. Acquisition
+   (`--force-lock` semantics) untouched, per the non-goals.
+2. **Recover's identity check fails closed** — `src/recover.ts`:
+   `identityMatches` (now exported, probe-injectable) returns
+   `{ ok: false, unavailable: true }` for every identity-unavailable
+   class — probe null (PowerShell missing/blocked/AV-interfered, a
+   protected process, a non-Windows host), dispatch stamp unreadable,
+   creation time unparseable — instead of the pre-T-052 ok-with-
+   alive-check-only. The kill decision is extracted as `reconcileKills`
+   (same position in `main`, behavior for the available classes
+   unchanged) and records the new `identity-unavailable` cleanup-failure
+   class with the mandated loud message (`identity could not be
+   established (<reason>) — NOT killing pid <n>; kill it manually if it
+   is a leftover`) in stdout and recovery.json. The creation-time probe is
+   the `CreationTimeProbe` seam, defaulting to the real PowerShell spawn.
+   `recover.ts` also gained the `src/lock.ts` run-directly entry guard so
+   checks import the seam without executing a reconciliation. The
+   accepted degradation — PowerShell-broken machines degrade to
+   report-only recovery — is stated in VERIFICATION.md (Gate 1.38 + the
+   Gate 1.11 note), not left for an incident to discover.
+
+**Red bar** (AGENTS #8), recorded on main's engine at the lane before the
+change (final check version): `scripts/check-lock-ownership.mjs` exit 1,
+9 failures, teed to `C:\swarm\verify-red\T-052-redbar.log` — (a) the
+takeover sequence: A acquired, B force-acquired, A's release DELETED B's
+lock (both L2 legs failed), and the garbage lock was unlinked (L3) — no
+loud lines existed; (b) with PowerShell unresolvable (both R6
+preconditions green — resolves normally on the full PATH, ENOENT with
+every `WindowsPowerShell` PATH segment stripped), the real `recover`
+command did not refuse: it tree-killed the pid it could not verify (exit
+was not 1, the orphan was dead, recovery.json recorded the kill) — the
+fail-open posture demonstrated end to end. The injected-probe seam itself
+cannot exist on main (the R1-R5 driver died on the missing export,
+recorded as that wrapper leg's failure); the seam is introduced BY this
+change-set, and its unavailable-path red is the R6 leg above.
+
+**Gate 2 trigger analysis** (the T-041 precedent): NOT triggered — the
+change-set touches `src/lock.ts` and `src/recover.ts` only (the lock +
+recover seam); nothing on the trigger list (src/runner.ts, adapters,
+gates, workspace handling, report shape) changed; a real run takes and
+releases its own lock on every path exactly as before (Gate 1.38's L1/L5
+pin the acquire/release and force-acquire/release pairings). **Gate 3
+n/a** (no adapter; no harness spawn changed).
+
+**Review round 1** — the tier red was a single Gate 1.17
+(check-machine-worker) assertion, its name recovered from the
+review-side full log (`C:\swarm\verify-red\T-052-lane-fast.log:1919`):
+S4's strict verified-tree-kill line, while the same scenario's
+real-process-table assertion passed — the tree verifiably died and was
+reported unverified, Known issue #10's recorded transient class (fifth
+observation, first captured in this check), with zero code path shared
+by this change-set (every lock use in the check is self-paired;
+`src/recover.ts` is never imported by it). Disposition per the ledger's
+standing rule — a re-run, not a code change, and no assertion weakened:
+the identical committed tree re-ran the full fast tier ALL GREEN (teed
+`C:\swarm\verify-red\T-052-lane-fast-rerun.log`, exit 0) plus five
+standalone Gate 1.17 runs green; recorded in VERIFICATION.md as #10's
+fifth observation (diagnosis: the snapshot/verification leg, not an
+already-gone root) and #11's second.
+
 ## Verification
 
-New fast-tier check (next free gate number at landing): takeover red bar +
-intact-lock green, unreadable skip, CLI override, the three recover
-identity legs. Gate 0, full fast tier ALL GREEN (Gate 1.5's lock checks and
-the recovery checks riding green unchanged); Gate 2 trigger analysis
-recorded.
+New fast-tier check `scripts/check-lock-ownership.mjs` wired as **Gate
+1.38** (`scripts/verify.mjs`; VERIFICATION.md's Gate 1.38 section plus the
+Gate 1.5 lock-ownership note and the Gate 1.11 fail-closed note written in
+the same change-set). Lock legs: normal acquire/release pair releases
+silently; the takeover sequence (A acquires, B CLI-force-acquires, A's
+programmatic release) ends with B's lock intact byte-identical plus the
+loud skip line; a garbage lock is never unlinked by programmatic release;
+the CLI `release` verb drops a foreign-pid holder and an unreadable lock;
+a force-taker's own release pairs silently. Recover identity legs, against
+real live children on the real process table: probe-null, stamp-
+unreadable, and time-unparseable each refuse with the loud record in the
+cleanup failure and stdout, the child untouched; identity-available-and-
+matching kills exactly as today (real tree kill, child dead); MISMATCHED
+refused as `identity-mismatch` (existing behavior, pinned); and
+end-to-end through the real `recover` command with PowerShell
+unresolvable (both PATH preconditions asserted, so a machine where the
+unavailability cannot be forced fails the leg loudly instead of running
+it vacuously) — exit 1, the loud record in stdout AND recovery.json, the
+orphan still alive, the checkout lock still released. Gate 0 green; the
+new check ALL GREEN (30 ok lines, ~3s, two consecutive runs); full fast
+tier ALL GREEN via `node scripts/verify.mjs fast` — Gate 1.5's lock
+checks and Gate 1.11's recovery checks riding green unchanged; Gate 1.12
+(kill-tree) and Gate 1.18 (gc, the other lock consumer) standalone green.
+Gate 2 trigger analysis recorded above (not triggered); Gate 3 n/a.
 
 ## References
 

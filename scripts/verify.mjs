@@ -1040,6 +1040,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.38: lock ownership + fail-closed recover identity (T-052) ----------
+section('Gate 1.38 — lock ownership + fail-closed recover identity (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-lock-ownership.mjs')], { cwd: root, stdio: 'inherit', timeout: 300_000 })
+  ok(true, 'lock-ownership self-check exit 0')
+} catch (e) {
+  fail(`lock-ownership self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
