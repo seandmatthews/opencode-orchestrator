@@ -143,6 +143,22 @@ releases its own lock on every path exactly as before (Gate 1.38's L1/L5
 pin the acquire/release and force-acquire/release pairings). **Gate 3
 n/a** (no adapter; no harness spawn changed).
 
+**Review round 1** — the tier red was a single Gate 1.17
+(check-machine-worker) assertion, its name recovered from the
+review-side full log (`C:\swarm\verify-red\T-052-lane-fast.log:1919`):
+S4's strict verified-tree-kill line, while the same scenario's
+real-process-table assertion passed — the tree verifiably died and was
+reported unverified, Known issue #10's recorded transient class (fifth
+observation, first captured in this check), with zero code path shared
+by this change-set (every lock use in the check is self-paired;
+`src/recover.ts` is never imported by it). Disposition per the ledger's
+standing rule — a re-run, not a code change, and no assertion weakened:
+the identical committed tree re-ran the full fast tier ALL GREEN (teed
+`C:\swarm\verify-red\T-052-lane-fast-rerun.log`, exit 0) plus five
+standalone Gate 1.17 runs green; recorded in VERIFICATION.md as #10's
+fifth observation (diagnosis: the snapshot/verification leg, not an
+already-gone root) and #11's second.
+
 ## Verification
 
 New fast-tier check `scripts/check-lock-ownership.mjs` wired as **Gate

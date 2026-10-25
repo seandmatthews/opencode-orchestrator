@@ -5227,6 +5227,36 @@ landing in T-017's Landed section).
    diagnosis the threshold demands; the classification stays loud-by-design,
    benign, evidence-only, and the next recurrence must come with the line
    captured before any edit is considered.
+   **2026-10-24 fifth observation (T-052 lane review round 1) — the
+   captured line delivered, and the diagnosis names the leg.** One
+   fast-tier run failed inside `scripts/check-machine-worker.mjs` (Gate
+   1.17, S4 — the first capture of this class outside check-kill-tree):
+   exit 1, exactly one assertion false —
+   `FAIL: S4: the verified tree kill fired — the log carries "tree killed,
+   verified:" and the drained child stdout`
+   (`C:\swarm\verify-red\T-052-lane-fast.log:1919`, the review-side full
+   log — the capture duty the 4th observation demanded, discharged by the
+   review's own tee this time). The diagnosis: NOT an already-gone root —
+   the root was live (the timeout fired; the `timedOut true` assertion
+   passed) — but the snapshot/verification leg: the same scenario's
+   `S4: the whole planted tree is dead on the real process table` PASSED,
+   so the tree verifiably died while the log carried the unverified shape
+   (a `CLEANUP FAIL` line, which the tolerant sibling assertion explicitly
+   accepts), and the strict verified-line assertion failed on it — this
+   issue's founding signature verbatim. The T-052 change-set shares no code
+   path with the check (its diff: `src/lock.ts` + `src/recover.ts` +
+   scripts/docs; every lock use in the check is a self-paired
+   acquire/release in one process, and `src/recover.ts` is never imported
+   by it). Disposition unchanged — a re-run, not a code change: the
+   identical committed tree (5ea6529) re-ran the full fast tier ALL GREEN
+   (1,948 ok lines, exit 0, teed
+   `C:\swarm\verify-red\T-052-lane-fast-rerun.log`) plus five consecutive
+   standalone Gate 1.17 runs (37 ok / 0 fail each). Five observations,
+   seven days, five lanes, zero shared change-set code; the class stays
+   loud-by-design, benign, evidence-only — the diagnosis is now on the
+   ledger, and any future edit (a snapshot retry, say) is a ticket-owned
+   change-set that must first weigh the loud-by-design principle against
+   the observed rate.
 11. **A one-off Gate 1.17 red with a single failed assertion, not
    reproducible (observed once, 2026-10-18, T-021 lane review round 1).**
    One fast-tier run failed inside `scripts/check-machine-worker.mjs` — exit
@@ -5247,6 +5277,20 @@ landing in T-017's Landed section).
    is self-removed). Same class as Known issue #10: a loud-by-design one-off
    in a fast-tier check; benign until observed recurring — and the failing
    assertion's name must be captured before any code change is considered.
+   **2026-10-24 second observation (T-052 lane review round 1) — this time
+   the name was captured.** Identical shape to the first: one fast-tier
+   Gate 1.17 red, `check-machine-worker: 1 failure(s)`, the paste's visible
+   tail byte-for-byte the noise every green run prints. The review-side
+   full log preserved the line (see Known issue #10's 2026-10-24 entry for
+   the diagnosis): the failing assertion was S4's strict verified-line leg,
+   with the same scenario's real-process-table assertion green — the #10
+   class, first landed in this check. Not reproduced on the identical
+   committed tree: five standalone runs plus one full fast tier ALL GREEN
+   (`C:\swarm\verify-red\T-052-lane-fast-rerun.log`). Observed twice
+   (2026-10-18, 2026-10-24), different lanes, zero shared change-set code;
+   the name-capture duty this issue opened with is discharged for this
+   observation, and the classification stays loud-by-design, benign,
+   evidence-only.
 12. **A one-off Gate 2 worker stall, fatal at the old outer ceiling
     (observed once, 2026-10-19, T-023 review round 1).** In the landing
     `verify:full` attempt, candidate c01's worker — the UNCHANGED
