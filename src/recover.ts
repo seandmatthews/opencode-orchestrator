@@ -30,6 +30,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { killTree } from './kill-tree.js'
 import { acquireCheckoutLock, CheckoutLockRefused, releaseCheckoutLock } from './lock.js'
 import { recordAbandonedAttempts } from './store/index.js'
@@ -121,7 +122,7 @@ interface RunHeader {
   startedAt?: string
 }
 
-interface DispatchRecord {
+export interface DispatchRecord {
   type: 'dispatch'
   jobId: string
   attempt: number
@@ -131,7 +132,7 @@ interface DispatchRecord {
   startedAt?: string
 }
 
-interface PidRecord {
+export interface PidRecord {
   type: 'pid'
   jobId: string
   attempt: number
@@ -216,6 +217,12 @@ function isAlive(pid: number): boolean {
   }
 }
 
+/** The creation-time probe: pid → ISO creation stamp, null when unavailable
+ *  (PowerShell missing/blocked, a protected process, a non-Windows host).
+ *  Injectable (T-052) so the unavailable path is deterministic to test; the
+ *  default is the real spawn below. */
+export type CreationTimeProbe = (pid: number) => string | null
+
 /** The process's creation time as an ISO stamp; null when the platform does
  *  not expose it (non-Windows) or the query fails. Windows-only via
  *  PowerShell, list-form spawn (AGENTS.md #4) — never through a shell. */
@@ -239,9 +246,13 @@ function processCreatedAt(pid: number): string | null {
  *  process cannot be the recorded worker. */
 const IDENTITY_WINDOW_MS = 10_000
 
-interface IdentityVerdict {
+export interface IdentityVerdict {
   ok: boolean
   note: string
+  /** T-052: true when identity could not be ESTABLISHED at all (probe
+   *  unavailable, dispatch stamp unreadable, creation time unparseable) —
+   *  refuse-to-kill, a distinct class from a verified mismatch. */
+  unavailable: boolean
 }
 
 /**
@@ -251,25 +262,45 @@ interface IdentityVerdict {
  * inside the dispatch evidence's window. A process created before the
  * dispatch stamp (minus a small tolerance) cannot be a worker the run
  * spawned; a process created after the pid stamp (plus tolerance) is
- * necessarily a reused pid. When the platform does not expose creation
- * times, the alive check is all there is and the verdict says so — the
- * ticket's "as far as the platform exposes".
+ * necessarily a reused pid.
+ *
+ * T-052 — FAIL CLOSED: when identity cannot be established (the probe
+ * unavailable, the dispatch stamp unreadable, or the creation time
+ * unparseable), the verdict REFUSES the kill. The pre-T-052 posture
+ * (alive-check-only, ok) was fail-open in exactly the degraded environments
+ * recovery exists for: on a machine where PowerShell cannot run, EVERY kill
+ * degraded to alive-check-only, and Windows pid reuse means a stale dispatch
+ * pid can name an unrelated live process that recover would tree-kill —
+ * unrecoverable — while a skipped leftover is a human's one-line fix. The
+ * accepted degradation: machines where PowerShell cannot run get
+ * report-only recovery (VERIFICATION.md, stated there, not discovered in an
+ * incident).
  */
-function identityMatches(dispatch: DispatchRecord, pidRecord: PidRecord): IdentityVerdict {
-  const created = processCreatedAt(pidRecord.pid)
-  if (created === null) return { ok: true, note: 'creation time unavailable on this platform — alive check only' }
+export function identityMatches(
+  dispatch: DispatchRecord,
+  pidRecord: PidRecord,
+  probe: CreationTimeProbe = processCreatedAt,
+): IdentityVerdict {
+  const created = probe(pidRecord.pid)
+  if (created === null) {
+    return { ok: false, unavailable: true, note: 'creation time unavailable — the creation-time probe could not establish process identity' }
+  }
   const createdMs = Date.parse(created)
   const lo = typeof dispatch.startedAt === 'string' ? Date.parse(dispatch.startedAt) - IDENTITY_WINDOW_MS : Number.NaN
   const hi = typeof pidRecord.at === 'string' ? Date.parse(pidRecord.at) + IDENTITY_WINDOW_MS : Number.NaN
-  if (!Number.isFinite(lo)) return { ok: true, note: `created ${created}; dispatch stamp unreadable — alive check only` }
-  if (!Number.isFinite(createdMs)) return { ok: true, note: 'creation time unparseable — alive check only' }
+  if (!Number.isFinite(lo)) {
+    return { ok: false, unavailable: true, note: `created ${created}; dispatch stamp unreadable` }
+  }
+  if (!Number.isFinite(createdMs)) {
+    return { ok: false, unavailable: true, note: `creation time unparseable (${created})` }
+  }
   if (createdMs < lo) {
-    return { ok: false, note: `process created ${created}, before the dispatch stamp ${dispatch.startedAt} — a pid the run never owned` }
+    return { ok: false, unavailable: false, note: `process created ${created}, before the dispatch stamp ${dispatch.startedAt} — a pid the run never owned` }
   }
   if (Number.isFinite(hi) && createdMs > hi) {
-    return { ok: false, note: `process created ${created}, after the pid was recorded at ${pidRecord.at} — a reused pid` }
+    return { ok: false, unavailable: false, note: `process created ${created}, after the pid was recorded at ${pidRecord.at} — a reused pid` }
   }
-  return { ok: true, note: `created ${created}, inside the dispatch evidence window` }
+  return { ok: true, unavailable: false, note: `created ${created}, inside the dispatch evidence window` }
 }
 
 // ---------- workspace inspection (report-only) ----------
@@ -331,6 +362,81 @@ function inspectWorkspaces(
       dirty,
     }
   })
+}
+
+// ---------- the kill decision (§15.2 step 6, verify-before-kill) ----------
+
+export interface CleanupFailure {
+  jobId: string
+  attempt: number
+  pid: number | null
+  reason: 'no-pid-recorded' | 'pid-not-alive' | 'identity-mismatch' | 'identity-unavailable' | 'kill-failed'
+  message: string
+}
+
+export interface KillRecord {
+  jobId: string
+  attempt: number
+  pid: number
+  note: string
+}
+
+/**
+ * One kill decision per recorded-running attempt (T-052: extracted from
+ * main, probe-injectable, so the identity legs — unavailable / matching /
+ * mismatched — are deterministic to pin). Never blindly kills (§15.3:1080):
+ * never-recorded, already-dead, mismatched, and — since T-052 —
+ * UNVERIFIABLE pids are cleanup failures; identity-available-and-matching
+ * pids are tree-killed exactly as before, and the outcome re-checked on the
+ * real process table.
+ */
+export function reconcileKills(
+  abandoned: DispatchRecord[],
+  pids: Map<string, PidRecord>,
+  probe: CreationTimeProbe = processCreatedAt,
+): { kills: KillRecord[]; cleanupFailures: CleanupFailure[] } {
+  const kills: KillRecord[] = []
+  const cleanupFailures: CleanupFailure[] = []
+  for (const d of abandoned) {
+    const label = `${d.jobId}-a${d.attempt}`
+    const pidRecord = pids.get(attemptKey(d.jobId, d.attempt))
+    if (!pidRecord) {
+      cleanupFailures.push({ jobId: d.jobId, attempt: d.attempt, pid: null, reason: 'no-pid-recorded', message: `no pid was recorded for ${label} — report-only, never blind-killed` })
+      console.log(`cleanup failure (${label}): no pid recorded — report-only`)
+      continue
+    }
+    if (!isAlive(pidRecord.pid)) {
+      cleanupFailures.push({ jobId: d.jobId, attempt: d.attempt, pid: pidRecord.pid, reason: 'pid-not-alive', message: `pid ${pidRecord.pid} is not alive — nothing to kill` })
+      console.log(`cleanup failure (${label}): pid ${pidRecord.pid} not alive — nothing to kill`)
+      continue
+    }
+    const verdict = identityMatches(d, pidRecord, probe)
+    if (!verdict.ok) {
+      if (verdict.unavailable) {
+        // T-052 fail-closed: identity could not be established — refuse the
+        // kill. Tree-killing an innocent reused pid is unrecoverable; a
+        // skipped leftover is a human's one-line fix.
+        cleanupFailures.push({
+          jobId: d.jobId, attempt: d.attempt, pid: pidRecord.pid, reason: 'identity-unavailable',
+          message: `identity could not be established (${verdict.note}) — NOT killing pid ${pidRecord.pid}; kill it manually if it is a leftover`,
+        })
+        console.log(`cleanup failure (${label}): identity could not be established (${verdict.note}) — NOT killing pid ${pidRecord.pid}; kill it manually if it is a leftover`)
+        continue
+      }
+      cleanupFailures.push({ jobId: d.jobId, attempt: d.attempt, pid: pidRecord.pid, reason: 'identity-mismatch', message: `pid ${pidRecord.pid} is live but not the recorded worker: ${verdict.note}` })
+      console.log(`cleanup failure (${label}): pid ${pidRecord.pid} failed identity verification — ${verdict.note}`)
+      continue
+    }
+    killTree(pidRecord.pid)
+    if (isAlive(pidRecord.pid)) {
+      cleanupFailures.push({ jobId: d.jobId, attempt: d.attempt, pid: pidRecord.pid, reason: 'kill-failed', message: `pid ${pidRecord.pid} survived the tree kill` })
+      console.log(`cleanup failure (${label}): pid ${pidRecord.pid} survived the tree kill`)
+    } else {
+      kills.push({ jobId: d.jobId, attempt: d.attempt, pid: pidRecord.pid, note: verdict.note })
+      console.log(`killed process tree (${verdict.note}): pid ${pidRecord.pid} (${label})`)
+    }
+  }
+  return { kills, cleanupFailures }
 }
 
 // ---------- retry disposition (T-007's policy, from dispatch records only) ----------
@@ -398,21 +504,6 @@ function gateRetryConsumed(ev: RunEvidence, jobId: string): boolean {
 }
 
 // ---------- the command ----------
-
-interface CleanupFailure {
-  jobId: string
-  attempt: number
-  pid: number | null
-  reason: 'no-pid-recorded' | 'pid-not-alive' | 'identity-mismatch' | 'kill-failed'
-  message: string
-}
-
-interface KillRecord {
-  jobId: string
-  attempt: number
-  pid: number
-  note: string
-}
 
 function main(): void {
   const opts = parseArgs(process.argv.slice(2))
@@ -535,39 +626,11 @@ function main(): void {
       }
     }
 
-    // Step 6 — kill the recorded trees, verify-before-kill. Already-gone,
-    // unverifiable, and never-recorded pids are cleanup failures (§15.3:1080),
-    // never blind-killed.
-    const kills: KillRecord[] = []
-    const cleanupFailures: CleanupFailure[] = []
-    for (const d of abandoned) {
-      const label = `${d.jobId}-a${d.attempt}`
-      const pidRecord = ev.pids.get(attemptKey(d.jobId, d.attempt))
-      if (!pidRecord) {
-        cleanupFailures.push({ jobId: d.jobId, attempt: d.attempt, pid: null, reason: 'no-pid-recorded', message: `no pid was recorded for ${label} — report-only, never blind-killed` })
-        console.log(`cleanup failure (${label}): no pid recorded — report-only`)
-        continue
-      }
-      if (!isAlive(pidRecord.pid)) {
-        cleanupFailures.push({ jobId: d.jobId, attempt: d.attempt, pid: pidRecord.pid, reason: 'pid-not-alive', message: `pid ${pidRecord.pid} is not alive — nothing to kill` })
-        console.log(`cleanup failure (${label}): pid ${pidRecord.pid} not alive — nothing to kill`)
-        continue
-      }
-      const verdict = identityMatches(d, pidRecord)
-      if (!verdict.ok) {
-        cleanupFailures.push({ jobId: d.jobId, attempt: d.attempt, pid: pidRecord.pid, reason: 'identity-mismatch', message: `pid ${pidRecord.pid} is live but not the recorded worker: ${verdict.note}` })
-        console.log(`cleanup failure (${label}): pid ${pidRecord.pid} failed identity verification — ${verdict.note}`)
-        continue
-      }
-      killTree(pidRecord.pid)
-      if (isAlive(pidRecord.pid)) {
-        cleanupFailures.push({ jobId: d.jobId, attempt: d.attempt, pid: pidRecord.pid, reason: 'kill-failed', message: `pid ${pidRecord.pid} survived the tree kill` })
-        console.log(`cleanup failure (${label}): pid ${pidRecord.pid} survived the tree kill`)
-      } else {
-        kills.push({ jobId: d.jobId, attempt: d.attempt, pid: pidRecord.pid, note: verdict.note })
-        console.log(`killed process tree (${verdict.note}): pid ${pidRecord.pid} (${label})`)
-      }
-    }
+    // Step 6 — kill the recorded trees, verify-before-kill (T-052: the
+    // extracted, probe-injectable decision loop). Already-gone, mismatched,
+    // UNVERIFIABLE, and never-recorded pids are cleanup failures
+    // (§15.3:1080), never blind-killed.
+    const { kills, cleanupFailures } = reconcileKills(abandoned, ev.pids)
 
     // Step 7 — inspect the temporary workspaces, report-only.
     const recordedBranches = new Map<string, string>()
@@ -623,9 +686,15 @@ function main(): void {
   process.exit(exitCode)
 }
 
-try {
-  main()
-} catch (e: unknown) {
-  console.error(e instanceof Error ? e.message : e)
-  process.exit(1)
+// CLI entry only when run directly (npm run recover / tsx src/recover.ts);
+// imports never trigger it (the src/lock.ts pattern, T-052) — the identity
+// machinery and the kill decision are exported so checks can inject the
+// creation-time probe without executing a reconciliation.
+if (process.argv[1] !== undefined && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  try {
+    main()
+  } catch (e: unknown) {
+    console.error(e instanceof Error ? e.message : e)
+    process.exit(1)
+  }
 }

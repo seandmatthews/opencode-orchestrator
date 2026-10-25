@@ -17,6 +17,11 @@
 //   tsx src/lock.ts release <repo> [--run-root <path>]
 // acquire exits 0 when taken, 1 when held elsewhere; release always exits 0
 // when no lock file remains.
+//
+// T-052: programmatic release (`releaseCheckoutLock`) verifies OWNERSHIP
+// first — it never deletes a lock that names another pid (a --force-lock
+// taker's) or one it cannot identify; the CLI `release` verb is the explicit
+// human override and drops any holder.
 import { createHash } from 'node:crypto'
 import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
@@ -117,8 +122,65 @@ export function acquireCheckoutLock(
   return lockPath
 }
 
-/** Drop the lock. A missing file is already released; anything else is a real error. */
-export function releaseCheckoutLock(lockPath: string): void {
+/** What a programmatic `releaseCheckoutLock` attempt did (T-052). */
+export type LockRelease =
+  | 'released' // the file named this process — unlinked
+  | 'already-missing' // nothing at the path: the pre-T-052 ENOENT-is-ok, unchanged
+  | 'held-by-other' // the file names a different pid (a force-taker's) — skipped loudly
+  | 'unreadable' // the file exists but cannot be identified — skipped loudly
+
+/**
+ * Drop the lock, only when this process provably holds it (T-052). Before
+ * unlinking, the file is read and its recorded `pid` compared to
+ * `process.pid`: a mismatch means a `--force-lock` taker replaced our lock
+ * and our stale `finally` release must NOT delete the new holder's — that
+ * sequence (A holds, B force-takes, A finishes) broke mutual exclusion in
+ * exactly the scenario `--force-lock` exists for. A file that cannot be read
+ * or parsed is never deleted either (never delete what you cannot
+ * identify); both skips are loud on stderr. A missing file stays today's
+ * ENOENT-is-ok. The read-then-unlink window is the same order of race the
+ * exclusive-create acquire already accepts. The explicit human override is
+ * `forceReleaseCheckoutLock` (the CLI `release` verb) — never this function.
+ */
+export function releaseCheckoutLock(lockPath: string): LockRelease {
+  let raw: string
+  try {
+    raw = readFileSync(lockPath, 'utf8')
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return 'already-missing'
+    throw e
+  }
+  let holderPid: number | null = null
+  try {
+    const parsed = JSON.parse(raw) as Partial<LockContents>
+    if (typeof parsed.pid === 'number') holderPid = parsed.pid
+  } catch {
+    // unreadable JSON — held as unidentifiable below
+  }
+  if (holderPid === null) {
+    console.error(`lock at ${lockPath} is unreadable — not releasing (never delete what you cannot identify); the override is: tsx src/lock.ts release <repo>`)
+    return 'unreadable'
+  }
+  if (holderPid !== process.pid) {
+    console.error(`lock at ${lockPath} is held by pid ${holderPid} — force-taken; not releasing`)
+    return 'held-by-other'
+  }
+  try {
+    unlinkSync(lockPath)
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
+  }
+  return 'released'
+}
+
+/**
+ * Drop whatever occupies the lock path, holder or not (T-052). This is the
+ * CLI `release` verb's primitive — the explicit human override,
+ * `--force-lock`'s counterpart for release — never called by the engine's
+ * programmatic paths, whose releases go through the ownership-verified
+ * `releaseCheckoutLock`.
+ */
+export function forceReleaseCheckoutLock(lockPath: string): void {
   try {
     unlinkSync(lockPath)
   } catch (e) {
@@ -134,8 +196,11 @@ Usage:
   tsx src/lock.ts release <repo> [--run-root <path>]
 
 acquire exits 0 when the lock was taken, 1 when it is held elsewhere
-(pid, age, and lock file path are printed). release exits 0 when no lock
-file remains. Locks live under <run-root>\\locks\\, never inside the repo.`
+(pid, age, and lock file path are printed). release drops ANY holder — it
+is the explicit human override, --force-lock's counterpart for release
+(the engine's own releases verify ownership and never delete a lock they
+cannot prove their own, T-052). release exits 0 when no lock file
+remains. Locks live under <run-root>\\locks\\, never inside the repo.`
 }
 
 function cliMain(argv: string[]): void {
@@ -164,7 +229,7 @@ function cliMain(argv: string[]): void {
 
   if (verb === 'release') {
     const p = lockPathFor(runRoot, repo)
-    releaseCheckoutLock(p)
+    forceReleaseCheckoutLock(p)
     console.log(`released: ${p}`)
     return
   }
