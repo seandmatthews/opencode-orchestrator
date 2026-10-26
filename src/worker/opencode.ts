@@ -132,18 +132,41 @@ export class OpenCodeWorker implements WorkerAdapter {
 
 const RESPONSE_TAIL_CHARS = 12_000
 
+/**
+ * T-058 (register R11): the per-stream tail accumulator's hard cap, in chars.
+ * collectText used to append the child's ENTIRE stream into one string and
+ * slice the 12,000-char tail only AFTER full collection — a harness streaming
+ * gigabytes (a chatty candidate-controlled build, a runaway loop) grew this
+ * process's heap without bound, and the OOM killed the RUN — every lane's
+ * work, the lock held — not just the one candidate. Now each collector keeps
+ * only its final window: past this many chars the FRONT is dropped (the tail
+ * is the only part responseTail ever surfaces). The full stream still reaches
+ * the log file via runChildWithTimeout's disk-side drain (unchanged — disk,
+ * not heap), so no evidence is lost, only heap. Documented constant, never a
+ * knob (the MAX_RETRY_FINDINGS pattern, src/runner.ts); it MUST stay >=
+ * RESPONSE_TAIL_CHARS for the tail-window guarantee: with each stream's kept
+ * window at least the surfaced tail's length, responseTail is byte-identical
+ * to the unbounded behavior for streams under AND over the cap (both regimes
+ * pinned verbatim by Gate 1.44).
+ */
+export const MAX_TAIL_BUFFER_CHARS = 64_000
+
 function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
 }
 
 /** Response-tail collector only — no log writes (run-with-timeout owns the
- *  log); both collectors on a stream receive every chunk. */
+ *  log); both collectors on a stream receive every chunk. T-058: the
+ *  accumulator is bounded — past MAX_TAIL_BUFFER_CHARS chars the FRONT is
+ *  dropped, so a chatty child grows this heap no further; the full stream
+ *  still lands in the log file through run-with-timeout's drain. */
 function collectText(stream: Readable | null): Promise<string> {
   if (!stream) return Promise.resolve('')
   return new Promise((resolve) => {
     let text = ''
     stream.on('data', (chunk: Buffer) => {
       text += chunk.toString('utf8')
+      if (text.length > MAX_TAIL_BUFFER_CHARS) text = text.slice(-MAX_TAIL_BUFFER_CHARS)
     })
     stream.on('end', () => resolve(text))
     stream.on('error', () => resolve(text))

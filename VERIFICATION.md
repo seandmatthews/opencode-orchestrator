@@ -5194,6 +5194,100 @@ half of that assertion (every check script's inline specs still parse).
 Required whenever `src/scheduler.ts`'s gate parsing or `src/cli.ts`'s
 `--gate` parsing changes.
 
+## Gate 1.44 — bounded output accumulation: a chatty child can no longer OOM the orchestrator (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-bounded-output.mjs
+```
+
+Pins T-058 (the adversarial review 2026-10-23's R11, disposition
+`ticket-later`). The response-tail collectors in BOTH adapters
+(`collectText`, `src/worker/opencode.ts` + `src/worker/machine.ts`)
+accumulated the child's ENTIRE stdout and stderr into one string each and
+sliced the 12,000-char tail only AFTER full collection (`RESPONSE_TAIL_CHARS`)
+— a chatty candidate-controlled child (a runaway loop, a build streaming
+gigabytes) grew the orchestrator's heap without bound, and the OOM killed the
+RUN — every lane's work, the lock held — not just the one candidate. The
+probe core had the same failure class at smaller scale: per-case collection
+was capped (16 MiB, unchanged) but the benchmark/adversarial/web probes
+concatenated every case's capped output into one string and one
+`writeFileSync` — up to ~320 MiB aggregated for the adversarial probe's ~20
+cases. The change: each collector keeps only its final
+`MAX_TAIL_BUFFER_CHARS` (64,000, exported from both adapters — comfortably
+above `RESPONSE_TAIL_CHARS` = 12,000, which is the tail-window guarantee's
+precondition), dropping from the FRONT; the full stream still reaches the log
+file through `runChildWithTimeout`'s disk-side drain (unchanged — disk, not
+heap), so no evidence is lost. The probe core bounds the aggregate twice:
+`BoundedProbeLog` drops front parts past `MAX_PROBE_LOG_BYTES` (32 MiB,
+exported from `src/probe.ts`) while accumulating, and `writeProbeLog`'s
+write byte-caps the FILE the same way (tail-kept, on a UTF-8 lead byte). The
+truncation is memory hygiene, never a verdict input: capping is
+silent-by-design for the run (no new cleanupFailures noise on a capped
+adapter drive), and LOUD in the bundle — one
+`PROBE LOG TRUNCATED: kept the final <kept> of <total> bytes` line on the
+FINAL GateResult's existing `cleanupFailures` (the T-053 log-write-loss
+channel; no new bundle fields, schema-valid, `success` untouched).
+
+The check is token-free, six legs (sandbox `C:\swarm\verify-bounded-output`,
+removed afterward): **C** — the constants are exported at their documented
+values from BOTH adapters and the probe core, ≥ the surfaced tail and the
+per-case cap respectively, and no CLI knob exposes them (src/cli.ts never
+names them — the `MAX_RETRY_FINDINGS` pattern). **S** — source pins: the
+per-chunk front-trim in both adapters' `collectText`, `RESPONSE_TAIL_CHARS`
+unchanged at 12,000, the probe core's front-dropping accumulator and the
+UTF-8-safe write-time byte cap. **D1/D2** — tail byte-identity pinned
+verbatim through the REAL adapter paths (the Gate 1.17 direct-drive and Gate
+1.28 stub-binPath precedents): an under-cap drive's `responseTail` is the
+whole out+err concat byte for byte; an over-cap drive (70,150 chars on
+stdout, past the 64,000-char window, 122 chars on stderr) still surfaces the
+stream's TRUE final 12,000 chars — the tail reaching from the tiny stderr
+back into the front-trimmed stdout, which is exactly the window arithmetic
+the cap must preserve. **D3/D4** — the recorded red bar's drive, green: a
+stub child emitting ~660 MB across both streams (3.2M + 2.2M deterministic
+122-char lines), driven through the REAL `MachineWorker`/`OpenCodeWorker`
+`execute()` inside a node process constrained with `--max-old-space-size=64`,
+completes under the constraint with `responseTail` byte-identical to the
+true final 12,000 chars, zero `cleanupFailures`, and the log FILE still
+carrying the whole ~660 MB (size + first-out / out-err-boundary / last-err
+line checks — the file ends are read in windows, never whole). **P1** — the
+adversarial probe driven in-process (the Gate 1.15 way) against a fixture
+target emitting 17 MiB on EVERY case (more than the 16 MiB per-case cap,
+delivered as a script file — the corpus feeds flag-like argv such as `-0`,
+which a script path safely demotes to the script's own argv): it completes
+with `success: true` (memory hygiene never flips a verdict), the bundle is
+schema-valid, the aggregate log artifact is ≤ `MAX_PROBE_LOG_BYTES`, the
+truncation line rides the FINAL case entry only (kept within the cap, total
+above it), and the per-case results artifact still rides the bundle. **P2** —
+a healthy small command probe's log artifact is byte-identical to the
+executed output (21 bytes) with no truncation line and no `cleanupFailures`.
+
+Red bar, recorded FIRST against the unmodified sources (AGENTS.md #8), the
+constrained machine drive: the ~660 MB two-stream drive through the real
+`collectText` under `--max-old-space-size=64` THREW at the unbounded join —
+
+```
+RangeError: Invalid string length
+    at <anonymous> (src\worker\machine.ts:91:22)   <- responseText = out + err
+```
+
+exit 1. Honest sizing note, measured on this machine's Node v22.23.1 (win32):
+at the ticket's illustrative ~50 MB the same constrained drive on main
+COMPLETED (exit 0, full 52 MB log, correct tail), because V8 clamps
+`--max-old-space-size=64` up to a 112 MiB old-space floor
+(`heap_size_limit` = 117,440,512 measured) and this V8 does not enforce that
+limit against retained strings (480 MB of retained strings survived it;
+retained objects DO trip it — exit 134, the classic heap OOM). The drive was
+therefore scaled until main's red face reproduced through the criterion's
+other arm: the accumulated `out + err` crossing V8's max string length
+throws `RangeError: Invalid string length` — the same unbounded-accumulation
+death, same instrument, same constraint flag, ~3x the illustrative size. The
+post-change drive completes under the identical constraint.
+
+Required whenever an adapter's response-tail collection (`collectText`,
+`RESPONSE_TAIL_CHARS`, `MAX_TAIL_BUFFER_CHARS`) or the probe core's log
+accumulation/write path (`BoundedProbeLog`, `writeProbeLog`/`logArtifact`,
+`MAX_PROBE_LOG_BYTES`) changes.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
