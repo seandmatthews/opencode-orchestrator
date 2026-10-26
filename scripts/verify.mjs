@@ -1092,6 +1092,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.43: duplicate gate names refused at parse time (T-057) ----------
+section('Gate 1.43 — duplicate gate names refused at parse time: the store\'s last-write-wins can no longer drop gate evidence (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-duplicate-gates.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'duplicate-gates self-check exit 0')
+} catch (e) {
+  fail(`duplicate-gates self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
