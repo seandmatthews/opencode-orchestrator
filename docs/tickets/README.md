@@ -90,7 +90,7 @@ Rules:
 | T-051 | Dashboard write surface: Host/Origin validation + the approvals double-decide race closed by a guarded UPDATE (register R3) | medium | done 2026-10-24 |
 | T-052 | Lock release verifies ownership; recover's identity check fails closed — refuse-to-kill when identity cannot be established (register R4) | medium | done 2026-10-24 |
 | T-053 | Log-write loss made loud: first-failure-per-path cleanup evidence through the T-011 channel (register R12) | low | done 2026-10-24 |
-| T-054 | Known issue #10's owed code change: a provably-dead tree stops being reported as a cleanup failure — the captured fifth observation's fix | medium | proposed |
+| T-054 | Known issue #10's owed code change: a provably-dead tree stops being reported as a cleanup failure — the captured fifth observation's fix | medium | done 2026-10-25 |
 | T-055 | Verify-root evidence retention: verify:full archives prior Gate 2 run dirs instead of rmSync-ing them (the T-049 wiped-citation incident) | medium | proposed |
 | T-056 | Brief-count honesty: no silent cyclic padding — an under/over-count planner reply is a parse failure into the existing fallback (register R9) | medium | proposed |
 | T-057 | Duplicate gate names refused at parse time: the store's last-write-wins can no longer drop gate evidence (register R7a) | low | proposed |

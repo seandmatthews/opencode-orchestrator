@@ -4895,6 +4895,81 @@ gate output capture (CommandGate buffers in memory; its `exec` callback
 cannot lose bytes to a file). Required whenever the log-write-loss
 recording or its channel changes.
 
+## Gate 1.40 — verified-dead upgrade: a transient snapshot failure no longer reports a proven-dead tree as a cleanup failure (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-kill-verify-upgrade.mjs
+```
+
+Pins T-054 — Known issue #10's owed code change (the captured fifth
+observation's fix): `src/kill-tree.ts`'s snapshot-failure leg no longer
+condemns a possibly-good outcome to `verified: false` by itself. The
+diagnosed shape (the fifth observation: root live at kill time, the CIM
+snapshot's transient hiccup, the tree verifiably dead on the real process
+table, the log carrying `CLEANUP FAIL: pid N tree kill could not be
+verified (descendant verification unavailable)`) now gets two bounded
+second chances, and the kill is never skipped by either: ONE immediate
+pre-kill snapshot retry — when it lands, the full original verification
+(pre-kill pid list, post-kill sweep) runs unchanged; otherwise the kill
+fires and ONE post-kill liveness re-check gets the last word — everything
+the re-check can still link to the root proven dead UPGRADES the outcome to
+verified (with `reaped` honestly counting the re-check's own enumeration:
+the pre-kill tree's size is unknowable when its snapshot failed, and a
+descendant no longer linked to the root could evade the sweep — a bounded,
+named weakness, still strictly stronger than the unconditional
+`verified: false` it replaced); anything alive keeps its per-pid loud line;
+a re-check that also cannot run keeps the exact pre-T-054 loud
+unverifiable shape (fail-closed — the T-011 posture). Untouched invariants,
+each pinned: genuine survivors keep their per-pid lines (the normal path
+AND the re-check path); the dead-root leg keeps its named line byte-for-byte
+(Known issue #8 — a dead root never relies on taskkill reaping reparented
+descendants, and nothing about it is upgraded); `snapshotTree`'s
+throw-and-proceed never skips a kill. The verification lenses
+(`snapshotTree`, `isAlive`) are injectable per the T-052 identity-probe
+precedent (`KillTreeDeps`, defaulting to the real machinery; every call
+site unchanged).
+
+The check plants real node process trees and asserts on the real process
+table; the transient shapes are driven through the injected stubs, and the
+genuinely-unverifiable shape is driven FOR REAL — every WindowsPowerShell
+PATH segment stripped (both preconditions asserted, the T-052 check's R6
+mechanic), so a machine where the unavailability cannot be forced fails the
+leg loudly instead of running it vacuously:
+
+- **A** — the diagnosed leg (snapshot fails once, transient): verified-dead
+  with the full pre-kill tree counted in `reaped`, NO failure line, the
+  success line carrying the count, exactly one bounded retry. Red bar
+  (recorded in the ticket): on main's engine the injected stubs are inert
+  (the seam is introduced by this change-set — the T-052 red-bar pattern)
+  and this leg's call-count pin failed.
+- **B** — the reporting surface, pure: a verified-dead outcome emits NO
+  failure line and the success line carries the reaped count; survivor,
+  unverifiable, and dead-root shapes keep their named lines verbatim.
+- **C** — genuine survivors keep their per-pid lines through the NORMAL
+  path (a forced-alive liveness stub on a really-killed tree).
+- **D** — genuinely unverifiable (stub fails on every attempt): the loud
+  line verbatim, bounded attempts (two pre-kill + one re-check), the kill
+  never skipped — the tree really dead on the real table.
+- **E** — the post-kill re-check leg (stub fails twice pre-kill, the real
+  snapshot answers the re-check): upgraded to verified-when-proven-dead,
+  NO failure line. Red bar (recorded in the ticket): same seam-absence
+  failure on main.
+- **F** — the re-check stays loud in the loud direction: a live process it
+  finds (forced-alive root — a kill that did not take) keeps its per-pid
+  line.
+- **R** — the REAL-failure leg, no stubs: powershell.exe unresolvable, a
+  real planted tree killed through the real code, outcome exactly the loud
+  unverifiable shape, kill never skipped. On main's engine this leg
+  REPRODUCED the fifth observation's signature end to end (the recorded
+  red bar): `CLEANUP FAIL: pid N tree kill could not be verified
+  (descendant verification unavailable)` printed next to the same leg's
+  real-process-table proof that the tree was dead.
+
+The check sweeps everything it planted best-effort at the end (AGENTS.md #10
+mechanized for its own spawns) and its throwaway sandbox under `C:\swarm\`
+is removed afterward. Required whenever `src/kill-tree.ts`'s verification
+or reporting changes.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
@@ -4977,7 +5052,8 @@ asserts on the artifacts:
   is correct here — the run captured the evidence before disposal) (T-002).
 
 The skeleton run's outer ceiling (scripts/verify.mjs, `execFileSync` timeout
-**50 min since T-040**; 35 min T-030–T-039) bounds CI; it deliberately exceeds
+**70 min since T-054**; 50 min T-040–T-053; 35 min T-030–T-039) bounds CI; it
+deliberately exceeds
 the runner's OWN per-worker budget — `--timeout-min` default 15 (src/cli.ts),
 at which the T-011 verified tree kill resolves a stalled worker into a FAILED
 candidate verdict, plus the planner/gates/reviewer/verifier legs — so the
@@ -4987,10 +5063,14 @@ the run is a 2-round loop, and since T-040 the tier carries
 `--verifier-model` (four real verifier dispatches per healthy run, observed
 278–429s each with a bounded repair; reviews 76–150s): the healthy slow-day
 skeleton path measured ~30+ min across the two wrapper kills recorded under
-Known issue #12, so 35 min sat within noise of a HEALTHY run, and one
-stalled leg (up to 15 min before its own budget reaps it into a runner
-verdict) would SIGTERM an informative run — 50 gives the healthy path room
-plus one such stall while still reaping a genuinely stuck run. At the
+Known issue #12 — and ~55–60 min across the T-054 calibration (the fourth
+kill: run 20261026020833 killed at the 50-min ceiling mid-round-2 with every
+worker ok, every gate PASS, bounded repairs on four verifier legs and one
+review leg, workers 675s/537s on the day). 35 min sat within noise of a
+HEALTHY run and 50 min within its slow-day variance; one stalled leg (up to
+15 min before its own budget reaps it into a runner verdict) would SIGTERM
+an informative run — 70 gives the measured healthy slow-day path room plus
+one such stall while still reaping a genuinely stuck run. At the
 previous 8-minute ceiling one silent worker SIGTERM'd the whole run before the runner
 could finish — an uninformative red that also skips report writing and
 disposal, leaving stale worktree metadata, `swarm/*` branches, and a stale
@@ -5001,16 +5081,18 @@ whoever drives this gate: the ceiling raise is the same discipline as the
 T-027 wrapper raise — a driving wrapper must sit ABOVE this inner ceiling
 plus the fast tier, or it preempting the runner's stall path is its own
 misconfiguration (Known issue #12's remedy paragraph applies verbatim).
-**Since T-040 the tracked driving workflow carries the note's number:**
+**Since T-054 the tracked driving workflow carries the note's number:**
 `.zcode/workflows/ticket-implement.dwf.ts` runs the full tier at
-`timeoutMs: 3600000` (60 min — the 50-min inner ceiling + the fast tier,
-plus margin; the PAIRED-VALUE comment sits on the raise itself). The two
-1500000ms kills that calibrated this (review rounds 1 and 2) came from the
-workflow's PRE-EDIT loaded script — a lane's edit to the tracked file takes
-effect only when the driving run is amended or re-created from it, so the
-wrapper value and the inner ceiling are one paired decision. The wrapper is
-repo content and lanes may raise it when their change-set legitimately grows
-the tier — never shrink the tier's own assertions to fit a wrapper.
+`timeoutMs: 5100000` (85 min — the 70-min inner ceiling + the fast tier,
+plus margin; the PAIRED-VALUE comment sits on the raise itself; 3600000/60
+min T-040–T-053). The three kills that calibrated this lineage (the two
+1500000ms wrapper kills, then the inner ceiling's own 50-min SIGTERM) came
+from pre-edit loaded scripts and pre-raise ceilings — a lane's edit to the
+tracked file takes effect only when the driving run is amended or re-created
+from it, so the wrapper value and the inner ceiling are one paired decision.
+The wrapper is repo content and lanes may raise it when their change-set
+legitimately grows the tier — never shrink the tier's own assertions to fit
+a wrapper.
 
 Required when touching `src/runner.ts`, any adapter, gates, workspace handling, or
 anything that changes report shape. Fast tier alone does not clear you here.
@@ -5368,6 +5450,47 @@ landing in T-017's Landed section).
    ledger, and any future edit (a snapshot retry, say) is a ticket-owned
    change-set that must first weigh the loud-by-design principle against
    the observed rate.
+   **2026-10-25 disposition (T-054, landed) — the threshold clause's
+   promised fix: the diagnosed leg is FIXED by Gate 1.40; the class is
+   narrowed to what remains loud.** The fifth observation's diagnosis
+   (the snapshot/verification leg, NOT an already-gone root) drove the
+   mechanism: a snapshot failure now gets one immediate pre-kill retry
+   (when it lands, the full original verification runs unchanged) and —
+   if that also fails — the kill still fires (never skipped) and ONE
+   post-kill liveness re-check gets the last word: everything the
+   re-check can still link to the root proven dead upgrades the outcome
+   to verified (no failure line, the success line), anything alive keeps
+   its per-pid line, and a re-check that also cannot run keeps the exact
+   pre-T-054 loud unverifiable shape (fail-closed). Red-before/
+   green-after, token-free: the red bar ran the final check against
+   main's engine (`scripts/check-kill-verify-upgrade.mjs`, exit 1, 9
+   failures of 33, teed `C:\swarm\verify-red\T-054-redbar.log`) — the
+   transient legs' pins failed because the injection seam cannot exist on
+   main (the T-052 red-bar pattern: the seam is introduced BY this
+   change-set) — and the leg R REAL-failure drive reproduced this
+   issue's signature end to end on main: `CLEANUP FAIL: pid N tree kill
+   could not be verified (descendant verification unavailable)` printed
+   by a real PowerShell-unresolvable snapshot failure around a real
+   killed tree whose death the same leg proves on the real process
+   table. Post-change Gate 1.40 ALL GREEN (33 assertions, two
+   consecutive runs), Gate 1.12's suite riding green unchanged (30
+   assertions — the dead-root S3 pin and the live-kill S5 pin untouched),
+   and the fifth observation's own check (Gate 1.17) green standalone.
+   Dispositions of the five observations: all five are retroactively
+   classified as instances of this diagnosed leg (the transient CIM
+   hiccup — the loud lines sat on trees that died, per each entry's
+   process-table assertions); the response-at-the-time rule (re-run,
+   never weaken) is unchanged and was correct under the then-standing
+   no-diagnosis posture. What remains loud after the fix, by design: a
+   genuinely-unverifiable outcome (every snapshot attempt including the
+   re-check fails), genuine survivors (normal path and re-check path
+   alike), the dead-root leg (Known issue #8 untouched — a dead root
+   never relies on taskkill reaping reparented descendants), and the
+   bounded named weakness of the upgrade path (the re-check can only
+   vouch for what still links to the root; the pre-kill tree's size is
+   unknowable when its snapshot failed). The honesty property moved the
+   reported accuracy UP, never the loudness down: a proven-dead tree is
+   no longer a failure; an unproven one still is.
 11. **A one-off Gate 1.17 red with a single failed assertion, not
    reproducible (observed once, 2026-10-18, T-021 lane review round 1).**
    One fast-tier run failed inside `scripts/check-machine-worker.mjs` — exit
@@ -5512,6 +5635,33 @@ landing in T-017's Landed section).
     `timeoutMs` 2700000 → **3600000 (60 min)** — and the driving run must
     be AMENDED or re-created from the updated file before its next Gate 2
     attempt, since no lane commit can change an already-loaded script.
+    **2026-10-26 fourth kill (T-054 review round 1) — this time the INNER
+    ceiling itself fired, and the run was again HEALTHY.** The driving
+    Gate 2 died at the 50-min inner ceiling (`FAIL: skeleton run failed:
+    SIGTERM`) on run 20261026020833 with every worker `ok=true,
+    timedOut=false`, non-zero diffs (14148/7321/5746/7490 bytes), every
+    gate PASS, and the run's own kill/verify machinery never fired (grep
+    over all four worker.logs: zero `CLEANUP FAIL` lines); the kill landed
+    mid-round-2 — the last worker completed at 44.7 min (c02-r2, 537s),
+    c02-r2's verifier was inside its bounded repair, its review pending,
+    c01-r2 fully through review — a healthy run needing roughly 55–60 min
+    on a slow model day (workers 675s/537s, verifiers 686s/423s, bounded
+    repairs on four verifier legs and one review leg, each repair a second
+    full dispatch). Debris (4 worktrees, 4 swarm/* branches, 1 stale lock
+    whose holder pid 14528 was verified dead first) disposed through the
+    house path (`clean --run 20261026020833 --run-root C:\swarm\verify
+    --force --force-lock` from the T-054 lane; 8 removed, 0 refused, 0
+    failed; fixture verified pristine after; evidence kept). Remedy, per
+    this issue's twice-recorded raise discipline — repo-side narrowing was
+    refused at kill 2 and stays refused: the T-054 lane carries the PAIRED
+    raise — the inner skeleton ceiling 50 → **70 min** (scripts/verify.mjs;
+    the measured slow-day path gets room plus one stall) and the
+    workflow's Gate 2 `timeoutMs` 3600000 → **5100000 (85 min)** — and the
+    driving run must be AMENDED or re-created from the updated file before
+    its next Gate 2 attempt, since no lane commit can change an
+    already-loaded script. The change-set under review shares no code with
+    the run's speed: its engine diff (src/kill-tree.ts) touches only
+    timeout-kill verification paths, which never fired in this run.
 13. **The first auto-revert: a post-merge fast-tier red that never
     reproduced, with the red output lost (observed once, 2026-10-21,
     T-032 lane, driving run `dwfrun-b35d1c1a`).** T-032 (adversarial
