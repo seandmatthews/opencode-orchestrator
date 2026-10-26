@@ -93,7 +93,9 @@ Options:
                            validation, or any artifacts dir exists.
   --concurrency <n>        Parallel lanes (default: same as candidates)
   --base <ref>             Base commit: branch or SHA (default: HEAD)
-  --gate "name=command"    Machine gate; repeatable (e.g. --gate "build=node build.js")
+  --gate "name=command"    Machine gate; repeatable with UNIQUE names — a repeated
+                           name refuses at parse time, before any side effect
+                           (e.g. --gate "build=node build.js")
   --run-root <path>        Where runs live (default: C:\\swarm)
   --force-lock             Take the checkout lock even if another (suspected-
                            stale) holder still owns it
@@ -311,7 +313,18 @@ function parseArgs(argv: string[]): Options {
         const spec = value()
         const eq = spec.indexOf('=')
         if (eq <= 0) throw new Error(`--gate expects "name=command", got: ${spec}`)
-        opts.gates.push({ name: spec.slice(0, eq), command: spec.slice(eq + 1) })
+        // T-057: a repeated --gate name refuses at parse time. The store's
+        // gate_results is keyed (run_id, candidate_id, gate_name) with a
+        // last-write-wins upsert, so a same-named pair would record only
+        // the LAST verdict while report.json carried both. Zero side
+        // effects: this fires before repo validation, the checkout lock,
+        // and any artifacts dir (the --max-attempts parse-refusal
+        // pattern).
+        const name = spec.slice(0, eq)
+        if (opts.gates.some((g) => g.name === name)) {
+          throw new Error(`duplicate --gate name '${name}' — gate names must be unique per run (the store keeps one verdict per name; every verdict but the last would be silently dropped)`)
+        }
+        opts.gates.push({ name, command: spec.slice(eq + 1) })
         break
       }
       case '--help': case '-h': console.log(usage); process.exit(0)

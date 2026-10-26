@@ -5129,6 +5129,71 @@ Gate 0.5). Post-change: Gate 0.5 ALL GREEN, this gate ALL GREEN.
 Required whenever `src/parse.ts`'s scans or the planner repair/fallback
 path (`src/runner.ts`'s `runPlannerPhase`) changes.
 
+## Gate 1.43 — duplicate gate names refused at parse time: the store's last-write-wins can no longer drop gate evidence (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-duplicate-gates.mjs
+```
+
+Pins T-057 (the adversarial review 2026-10-23's R7a). `gate_results` is
+keyed `(run_id, candidate_id, gate_name)` with a last-write-wins upsert
+(`src/store/index.ts`), and nothing refused duplicate gate names:
+`parseJobsSpec` enforced unique probe ids but never gate names
+(`src/scheduler.ts` — no `seen` set for gates), and the run-level `--gate`
+flag accepted repeats unchecked (`src/cli.ts`). A spec or CLI invocation
+with two gates named `build` recorded BOTH verdicts in report.json but only
+the LAST one in the durable store — if the first failed and the second
+passed, the store showed an all-pass gate table for an eliminated
+candidate: evidence loss invisible to every later reader. The ladder itself
+was never affected (it reads the in-memory array), which is exactly why the
+report/store divergence went unnoticed. Both parse sites now refuse — the
+same parser-refusal pattern the repo already uses for probe ids, job ids,
+and flag pairing, zero side effects (before repo validation, the checkout
+lock, or any artifacts dir):
+
+- `parseJobsSpec`: per-job gate names are unique — the probe-id `seen` set
+  verbatim, the refusal naming the job and the duplicated name.
+- `parseArgs`: a repeated `--gate` name refuses at parse time naming the
+  duplicate. Integrate's `gateContract` is untouched — it matches gates by
+  name, so refusal upstream at the run CLI is the honest fix (integrate
+  never consumed the run CLI's argv).
+
+The store's upsert contract is unchanged; the engine can no longer PRODUCE
+a same-named gate pair.
+
+The check is token-free, three legs (sandbox `C:\swarm\verify-duplicate-gates`,
+removed afterward): **A** — parser contract: the duplicate-`build` spec
+refuses naming `job 'j1'` and `'build'`; uniqueness is PER JOB (two jobs may
+each carry a `build` — the store keys rows per candidate too); unique-named
+gates parse byte-identically to main's output (order and values verbatim);
+distinct names sharing one command parse unchanged; the duplicate-probe-id
+refusal is unmodified. **B** — CLI faces: repeated `--gate` names and the
+duplicate-gate `--jobs` spec both refuse with exit 1 through the real CLI,
+naming the offense, BEFORE repo validation (the `--repo` is deliberately
+absent, so a parse-passing invocation would surface the repo error — the
+red-bar contrast), with zero side effects (no artifacts dir, no lock under
+the sandbox run root); control faces pin the preserved path — distinct
+names (and a unique-named spec) parse past to the repo error. **C** — the
+loss mechanism for the record: ingest of a build(fail)+build(pass) pair
+upserts to ONE `gate_results` row carrying the LAST verdict.
+
+Red bar, recorded FIRST against main (AGENTS.md #8; a read-only probe
+importing main's `src/scheduler.ts` + `src/store/index.ts` and driving
+main's CLI as a subprocess, before this change-set existed): the
+duplicate-`build` spec PARSED (both gates returned); repeated
+`--gate "a=…" --gate "a=…"` PARSED — the CLI failed later at repo
+validation, not at parse; ingest of build(fail)+build(pass) left ONE row
+`{"gate_name":"build","passed":1,"exit_code":0,"output_tail":"second
+passed"}` — the first-failure evidence gone. Intentional shape (same
+probe): no JSON fixture in the repo carries a gates array with duplicate
+names, and no `--gate` literal in scripts/src/docs repeats a name (the
+T-057 ticket file itself, which quotes the red-bar example, excluded,
+stated there) — the full fast tier riding green doubles as the executed
+half of that assertion (every check script's inline specs still parse).
+
+Required whenever `src/scheduler.ts`'s gate parsing or `src/cli.ts`'s
+`--gate` parsing changes.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash

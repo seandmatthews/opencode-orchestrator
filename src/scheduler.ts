@@ -157,10 +157,11 @@ function parseStringArray(where: string, value: unknown, field: string): string[
 
 /**
  * Parse and validate the `--jobs` input (already JSON-decoded). Strict: any
- * unknown field, bad id charset, duplicate id, non-"all" completion, unknown
- * phase/dependency reference, or cycle throws with a refusal naming the
- * offense — the caller turns that into an exit-1 refusal BEFORE the checkout
- * lock, repo validation, or any artifacts dir exists. Phase-level
+ * unknown field, bad id charset, duplicate id, duplicate gate name (T-057),
+ * non-"all" completion, unknown phase/dependency reference, or cycle throws
+ * with a refusal naming the offense — the caller turns that into an exit-1
+ * refusal BEFORE the checkout lock, repo validation, or any artifacts dir
+ * exists. Phase-level
  * dependencies expand to job edges: every job of a phase depends on every
  * job of each phase it depends on, so the ready function sees one job DAG.
  */
@@ -236,10 +237,20 @@ export function parseJobsSpec(raw: unknown): JobsSpec {
     let gates: { name: string; command: string }[] | undefined
     if (j.gates !== undefined) {
       if (!Array.isArray(j.gates)) refuse(`job '${id}' gates must be an array`)
+      // T-057: gate names are unique per job — the probe-id `seen` set
+      // verbatim (below). The store's gate_results is keyed
+      // (run_id, candidate_id, gate_name) with a last-write-wins upsert, so
+      // two gates sharing a name would record only the LAST verdict in the
+      // durable record while report.json carried both: a first-failed /
+      // second-passed pair would read as an all-pass gate table for an
+      // eliminated candidate. Refused here, before any side effect.
+      const seenGates = new Set<string>()
       gates = j.gates.map((g, i) => {
         if (!isPlainObject(g) || typeof g.name !== 'string' || g.name.length === 0 || typeof g.command !== 'string' || g.command.length === 0) {
           refuse(`job '${id}' gates[${i}] must be an object with non-empty "name" and "command" strings`)
         }
+        if (seenGates.has(g.name)) refuse(`job '${id}' has duplicate gate name '${g.name}' — gate names must be unique per job`)
+        seenGates.add(g.name)
         return { name: g.name, command: g.command }
       })
     }
