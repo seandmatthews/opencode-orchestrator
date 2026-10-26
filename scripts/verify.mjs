@@ -8,10 +8,12 @@ import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { ARCHIVE_KEEP_RUNS, archiveExistingRuns, listRunDirs } from './verify-retention.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const fixture = 'C:/swarm/demo-target'
 const verifyRoot = 'C:/swarm/verify'
+const verifyArchiveRoot = 'C:/swarm/verify-archive'
 const tier = process.argv[2] ?? 'fast'
 
 if (tier !== 'fast' && tier !== 'full') {
@@ -1070,11 +1072,40 @@ try {
   finish()
 }
 
+// ---------- Gate 1.41: verify-root retention (T-055) ----------
+section('Gate 1.41 — verify-root retention: the full tier archives prior Gate 2 evidence instead of wiping it (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-verify-retention.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'verify-retention self-check exit 0')
+} catch (e) {
+  fail(`verify-retention self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
 section('Gate 2 — harness end-to-end')
-rmSync(verifyRoot, { recursive: true, force: true })
+// T-055: the reset ARCHIVES instead of wipes. Pre-T-055 this line was
+// `rmSync(verifyRoot, { recursive: true, force: true })` — every full-tier
+// invocation permanently destroyed every prior Gate 2 run dir under the
+// live root, silently voiding the repo's cite-the-artifacts citations. The
+// recorded incident: run 20261024021432, cited by name in VERIFICATION.md's
+// Known issue #6 2026-10-24 observation, was wiped from disk before T-049
+// landed (the marker literal had to be recovered from VERIFICATION.md's own
+// text). Now each existing ^\d{14}$ run DIRECTORY moves to the archive
+// root (plain same-drive rename), the archive is bounded at the
+// ARCHIVE_KEEP_RUNS most recent, and everything non-timestamped (locks/,
+// strays) is untouched. The move/keep/delete logic is pinned token-free by
+// Gate 1.41; the helper fails loud rather than proceeding after a failed
+// move (continuing would destroy the evidence it exists to retain).
+try {
+  const { moved, deleted } = archiveExistingRuns(verifyRoot, verifyArchiveRoot)
+  ok(true, `prior Gate 2 run dirs archived before the run (moved: ${moved.length ? moved.join(', ') : 'none'}, old archives pruned: ${deleted.length ? deleted.join(', ') : 'none'}; retention bound ARCHIVE_KEEP_RUNS=${ARCHIVE_KEEP_RUNS})`)
+} catch (e) {
+  fail(`verify-root archive failed: ${e?.message ?? e}`)
+  finish()
+}
 const skeletonArgs = [
   join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs'),
   join(root, 'src', 'cli.ts'),
@@ -1138,11 +1169,21 @@ try {
   finish()
 }
 
-// Run dirs are 14-digit timestamps; `locks/` (T-004) also lives under the run
-// root and is not a run dir.
-const runDirs = readdirSync(verifyRoot).filter((d) => /^\d{14}$/.test(d))
+// Run dirs are 14-digit timestamps; `locks/` (T-004) also lives under the
+// run root and is not a run dir. T-055: prior Gate 2 run dirs now live
+// under the archive root (verify-archive), moved there by the reset above,
+// so the assertion states its target explicitly: exactly one run dir in
+// the LIVE root — the run this tier just executed. Strength preserved, not
+// weakened (the T-044 strengthen-or-equal precedent; reasoning recorded in
+// the T-055 ticket): the predicate over actual run dirs is unchanged (same
+// ^\d{14}$ name test, same exact-one requirement — the pre-T-055 shape saw
+// the same single dir over a wiped root), and one edge got safer: a
+// timestamped FILE (a stray, never a run dir) no longer counts, matching
+// the helper's move rule (only run DIRECTORIES archive). The predicate is
+// the helper's exported `listRunDirs` — the exact code Gate 1.41 pins.
+const runDirs = listRunDirs(verifyRoot)
 if (runDirs.length !== 1) {
-  fail(`expected exactly one run dir under ${verifyRoot}, got: ${readdirSync(verifyRoot).join(', ')}`)
+  fail(`expected exactly one run dir in the live root ${verifyRoot} (prior runs live under ${verifyArchiveRoot}), got: ${readdirSync(verifyRoot).join(', ')}`)
   finish()
 }
 const runDir = join(verifyRoot, runDirs[0])

@@ -4970,11 +4970,96 @@ mechanized for its own spawns) and its throwaway sandbox under `C:\swarm\`
 is removed afterward. Required whenever `src/kill-tree.ts`'s verification
 or reporting changes.
 
+## Gate 1.41 — verify-root retention: the full tier archives prior Gate 2 run evidence instead of wiping it (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-verify-retention.mjs
+```
+
+Pins T-055. Pre-T-055, `scripts/verify.mjs` opened Gate 2 with
+`rmSync(verifyRoot, { recursive: true, force: true })` (then-main,
+scripts/verify.mjs:1077): every full-tier invocation permanently destroyed
+every prior Gate 2 run dir under `C:\swarm\verify`, silently voiding the
+repo's cite-the-artifacts convention behind its back. The recorded
+incident: run **20261024021432** — cited by name in Known issue #6's
+2026-10-24 observation — was wiped from disk by a later `verify:full`
+before T-049 could read its worker.logs, and the auto-reject marker
+literal had to be recovered from VERIFICATION.md's own text and
+cross-checked against an unrelated older run (T-049's Landed records it).
+That incident motivated this change.
+
+The retention rule lives in the exported helper the tier's reset now
+drives, `scripts/verify-retention.mjs` (plain ESM — `verify.mjs` runs
+under plain node): before a Gate 2 run starts, every existing `^\d{14}$`
+run DIRECTORY under the live root moves to
+**`C:\swarm\verify-archive\<runId>\`** (a plain same-drive rename — bytes
+never rewritten); the archive then keeps only the most recent
+**`ARCHIVE_KEEP_RUNS` = 10** (the documented, exported constant) archived
+runs and deletes older ones — bounded disk, evidence with a grace period
+instead of none. Everything non-timestamped is never moved or deleted by
+the helper: a timestamped FILE is a stray, not a run dir, and `locks/`
+(T-004's checkout-lock home, `<run-root>\locks\<hash>.lock`, src/lock.ts:42)
+now survives the reset where the old wipe destroyed it. The helper fails
+loud (throws) rather than letting the tier proceed after a failed move —
+continuing would destroy exactly the evidence it exists to retain. The
+exactly-one-run-dir assertion follows the layout: it states **exactly one
+run dir in the LIVE root** — archives live elsewhere — same predicate,
+same exactness over actual run dirs (the T-044 strengthen-or-equal
+precedent; the reasoning is recorded in the assertion's comment and the
+ticket), and one edge got safer: a timestamped file no longer counts as a
+run dir, matching the move rule. The assertion uses the helper's exported
+`listRunDirs` — the exact code this gate pins.
+
+The check is token-free and drives fixture run dirs only (sandbox
+`C:\swarm\verify-retention`, removed afterward):
+
+- **R** — the recorded red bar, reproduced (AGENTS.md #8): the pre-T-055
+  reset (`rmSync(live, { recursive: true, force: true })`) against a
+  fixture live root holding two run dirs wipes both with NOTHING
+  archived — asserted as the destruction the green faces replace. This
+  face runs identically pre/post change.
+- **G** — retention through the helper: both fixture run dirs land under
+  the archive root with their marker bytes byte-identical, the live root
+  holds zero run dirs, the most recent ARCHIVE_KEEP_RUNS are kept while
+  older archives are deleted (the default bound pinned exactly — eleven
+  dirs in, exactly the single oldest out; the `keep` parameter pinned at
+  2); the returned `{ moved, deleted }` lists are honest.
+- **L** — the updated full-tier assertion's predicate (`listRunDirs`
+  length, the exact code the Gate 2 assertion runs): passes with an
+  archived-history root (one live run dir, twelve archived), and stays
+  exact (0 → not one, 2 → not one).
+- **S** — non-timestamped safety: `locks/`, `verify-red/`, a stray file,
+  and a timestamped FILE are never moved or deleted by the helper (the
+  file stays in the live root, never reaches the archive); the
+  archive-side prune never touches a non-timestamped entry planted in the
+  archive root; a nonexistent live root is a no-throw no-op.
+- **H** — the check never touches the real `C:\swarm\verify` (its run-dir
+  snapshot is identical before and after).
+
+Red bar, recorded first (the lane at pre-helper main; log
+`C:\swarm\verify-red\T-055-redbar.log`): 8 failures of 12 faces, exit 1 —
+R green (the old behavior's destruction asserted as reproduced), every
+helper-driven face G/L/S failing on the absent `scripts/verify-retention.mjs`
+(the T-052 seam-absence pattern). Post-change: ALL GREEN, 29 assertions.
+
+Required whenever `scripts/verify.mjs`'s full-tier reset, the archive
+root, or `scripts/verify-retention.mjs` changes.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
 npm run verify:full
 ```
+
+Since T-055 the tier's reset archives instead of wipes: before the run
+starts, every existing `^\d{14}$` run dir under the live root moves to
+`C:\swarm\verify-archive` (most recent `ARCHIVE_KEEP_RUNS` = 10 kept,
+older deleted, nothing non-timestamped touched) — Gate 2 citations (the
+repo's cite-the-artifacts posture) survive later full-tier runs. The rule,
+the constant, the archive root, and the incident that motivated the change
+(run 20261024021432 wiped from disk after Known issue #6's 2026-10-24
+observation cited it — the T-049 incident) are pinned token-free by Gate
+1.41.
 
 Runs a real two-tier skeleton run (GLM-5.3 planner + flash workers, 2
 candidates per round) on a fresh fixture — **a real 2-round run since T-030**
