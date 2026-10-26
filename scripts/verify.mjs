@@ -1102,6 +1102,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.44: bounded output accumulation (T-058) ----------
+section('Gate 1.44 — bounded output accumulation: a chatty child can no longer OOM the orchestrator (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-bounded-output.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'bounded-output self-check exit 0')
+} catch (e) {
+  fail(`bounded-output self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

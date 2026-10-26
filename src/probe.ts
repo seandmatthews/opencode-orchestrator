@@ -427,6 +427,28 @@ export const ADVERSARIAL_PROBE_MAX_CASE_CHARS = 8192
 /** Tail length for a GateResult's outputTail — the CommandGate shape. */
 const TAIL_BYTES = 4000
 
+/**
+ * The probe log artifact's aggregate cap (T-058, register R11, pinned by
+ * Gate 1.44), in bytes. The per-case caps (executeProbeCommand's 16 MiB
+ * collection cap, the web probe's identical childOutput cap — unchanged)
+ * bound each single execution, but their AGGREGATE was unbounded: the
+ * benchmark/adversarial/web probes concatenate every execution's output into
+ * one string and one writeFileSync, so the adversarial probe's ~20 cases at
+ * ~16 MiB each built a ~320 MiB string and a ~320 MiB file — the same
+ * unbounded-heap class the adapters died of, at smaller scale. Two bounds,
+ * each simple: BoundedProbeLog drops aggregate parts from the FRONT past this
+ * many bytes (the heap stays bounded), and logArtifact enforces the same cap
+ * byte-exactly on the FILE (tail-kept, on a UTF-8 boundary), recording the
+ * truncation on the bundle via the returned marker. The truncation is memory
+ * hygiene, never a verdict input: it lands as one loud PROBE LOG TRUNCATED
+ * line on the bundle's FINAL GateResult's cleanupFailures (the T-053
+ * log-write-loss channel — existing metadata, no new fields), evidence only,
+ * success untouched. Documented constant, never a knob (the
+ * MAX_RETRY_FINDINGS pattern, src/runner.ts); comfortably above one case's
+ * 16 MiB cap so the accumulator can always make progress dropping fronts.
+ */
+export const MAX_PROBE_LOG_BYTES = 32 * 1024 * 1024
+
 // ---------- The bundle validator (the contract's enforcement point) ----------
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -777,17 +799,118 @@ function toGateResult(name: string, e: ProbeExecution, extra: { passed: boolean 
   }
 }
 
-/** Write the full combined output next to the bundle and reference it. */
+/**
+ * T-058: the bounded, tail-keeping accumulator for the aggregate probe logs —
+ * BenchmarkProbe's per-run parts, WebProbe's poll/teardown parts,
+ * AdversarialProbe's per-case parts. It joins exactly like the plain
+ * `string[]` it replaced (`parts.join('\n')` — the healthy-path, under-cap
+ * output is byte-identical), and past MAX_PROBE_LOG_BYTES aggregate bytes the
+ * FRONT parts are dropped, so a fixture target that maxes the per-case cap on
+ * every one of ~20 cases grows this heap no further (the last part alone is
+ * itself capped at the 16 MiB per-case collection cap, under the aggregate —
+ * and logArtifact's write-time byte cap below is the file-side guarantee
+ * regardless).
+ */
+class BoundedProbeLog {
+  private parts: string[] = []
+  private bytes = 0
+  /** T-058: bytes dropped from the FRONT by the aggregate cap — 0 on the
+   *  healthy path. The caller passes this to writeProbeLog so the drop is
+   *  RECORDED on the bundle (loud evidence), never silent memory loss. */
+  droppedBytes = 0
+
+  push(part: string): void {
+    this.parts.push(part)
+    this.bytes += Buffer.byteLength(part)
+    while (this.parts.length > 1 && this.bytes > MAX_PROBE_LOG_BYTES) {
+      const dropped = this.parts.shift()!
+      this.bytes -= Buffer.byteLength(dropped)
+      this.droppedBytes += Buffer.byteLength(dropped)
+    }
+  }
+
+  /** The aggregate log text — the exact join shape the string[] version had. */
+  text(): string {
+    return this.parts.join('\n')
+  }
+}
+
+/**
+ * T-058: the raw write behind writeProbeLog — the FILE is tail-kept at
+ * MAX_PROBE_LOG_BYTES byte-exactly. Healthy-path (under-cap) writes are
+ * byte-identical to the pre-T-058 string write. Over the cap, the kept tail
+ * starts on a UTF-8 lead byte (the byte-cut never lands mid-sequence — at
+ * most 3 continuation bytes are dropped with the front); the returned
+ * `truncatedFromBytes` names the un-capped length when the write-time cap
+ * fired (normally it does not — the BoundedProbeLog keeps the string under
+ * the cap — but it is the file-side guarantee for any path that hands a
+ * single oversized string).
+ */
 function logArtifact(
   environment: EnvironmentSpec,
   probeId: string,
   output: string,
-): EvidenceArtifactRef {
+): { ref: EvidenceArtifactRef; truncatedFromBytes: number | null } {
   const dir = probeEvidenceDir(environment.artifactsDir, environment.candidateId)
   mkdirSync(dir, { recursive: true })
   const path = join(dir, `${probeId}.log`)
-  writeFileSync(path, output)
-  return { name: `${probeId}.log`, path, kind: 'log', sizeBytes: Buffer.byteLength(output) }
+  const full = Buffer.from(output, 'utf8')
+  let buf = full
+  let truncatedFromBytes: number | null = null
+  if (full.length > MAX_PROBE_LOG_BYTES) {
+    let start = full.length - MAX_PROBE_LOG_BYTES
+    while (start < full.length && (full[start]! & 0xc0) === 0x80) start++
+    buf = full.subarray(start)
+    truncatedFromBytes = full.length
+  }
+  writeFileSync(path, buf)
+  return {
+    ref: { name: `${probeId}.log`, path, kind: 'log', sizeBytes: buf.length },
+    truncatedFromBytes,
+  }
+}
+
+/**
+ * T-058: write the probe's aggregate log next to the bundle and reference it,
+ * tail-kept at MAX_PROBE_LOG_BYTES byte-exactly. Healthy-path (under-cap)
+ * writes are byte-identical to the pre-T-058 string write. Over the cap, the
+ * kept tail starts on a UTF-8 lead byte (the byte-cut never lands mid-sequence
+ * — at most 3 continuation bytes are dropped with the front). Every probe
+ * writes through this helper, and the returned `truncation` marker is the ONE
+ * honest record of what the caps dropped: `totalBytes` is everything the
+ * probe produced for this artifact (the accumulator's front-dropped bytes —
+ * `droppedBeforeBytes` — plus what reached the write), `keptBytes` is what
+ * the file actually holds. Null on the healthy path: kept === total.
+ */
+function writeProbeLog(
+  environment: EnvironmentSpec,
+  probeId: string,
+  output: string,
+  droppedBeforeBytes = 0,
+): { ref: EvidenceArtifactRef; truncation: { keptBytes: number; totalBytes: number } | null } {
+  const { ref, truncatedFromBytes } = logArtifact(environment, probeId, output)
+  const totalBytes = Math.max(droppedBeforeBytes + Buffer.byteLength(output), truncatedFromBytes ?? 0)
+  const truncation = totalBytes > ref.sizeBytes
+    ? { keptBytes: ref.sizeBytes, totalBytes }
+    : null
+  return { ref, truncation }
+}
+
+/**
+ * T-058: record the probe log's truncation on the bundle — one loud
+ * `PROBE LOG TRUNCATED` line on a GateResult's existing `cleanupFailures`
+ * (the T-053 log-write-loss channel: evidence only, never a verdict input, no
+ * new bundle fields, schema-valid by the existing validator). The bundle's
+ * `success` is the target's own outcome and is never touched — a truncated
+ * log is memory hygiene, not a failing face. Multi-entry bundles (benchmark
+ * runs, adversarial cases) attach the one line to their FINAL entry — the
+ * execution that completed the aggregate artifact; single-entry bundles
+ * attach it to their only entry.
+ */
+function withLogTruncation(g: GateResult, truncation: { keptBytes: number; totalBytes: number } | null): GateResult {
+  if (truncation === null) return g
+  const line = `PROBE LOG TRUNCATED: kept the final ${truncation.keptBytes} of ${truncation.totalBytes} bytes (cap MAX_PROBE_LOG_BYTES=${MAX_PROBE_LOG_BYTES}) — log evidence incomplete from the front`
+  return { ...g, cleanupFailures: [...(g.cleanupFailures ?? []), line] }
 }
 
 /** The machine-readable per-run table of a benchmark probe (T-018) — the
@@ -869,13 +992,14 @@ export class CommandProbe implements Probe {
     } else if (execution.timedOut) {
       error = `command timed out after ${timeoutMs}ms`
     }
+    const log = writeProbeLog(input.environment, this.id, execution.output)
     const bundle: EvidenceBundle = {
       probeId: this.id,
       scenarioId: s.id,
       success,
-      artifacts: [logArtifact(input.environment, this.id, execution.output)],
+      artifacts: [log.ref],
       measurements: [],
-      gateResults: [toGateResult(this.id, execution, { passed: success })],
+      gateResults: [withLogTruncation(toGateResult(this.id, execution, { passed: success }), log.truncation)],
       ...(error !== undefined ? { error } : {}),
     }
     return bundle
@@ -959,17 +1083,18 @@ export class TestProbe implements Probe {
     } else {
       success = true
     }
+    const log = writeProbeLog(input.environment, this.id, execution.output)
     const bundle: EvidenceBundle = {
       probeId: this.id,
       scenarioId: s.id,
       success,
-      artifacts: [logArtifact(input.environment, this.id, execution.output)],
+      artifacts: [log.ref],
       measurements: tap === null ? [] : [
         { name: 'tests', value: tap.tests },
         { name: 'pass', value: tap.pass },
         { name: 'fail', value: tap.fail },
       ],
-      gateResults: [toGateResult(this.id, execution, { passed: success })],
+      gateResults: [withLogTruncation(toGateResult(this.id, execution, { passed: success }), log.truncation)],
       ...(error !== undefined ? { error } : {}),
     }
     return bundle
@@ -1033,7 +1158,10 @@ export class BenchmarkProbe implements Probe {
     const durations: number[] = []
     const measurements: Measurement[] = []
     const gateResults: GateResult[] = []
-    const logParts: string[] = []
+    // T-058: the aggregate log accumulator is bounded (tail-kept) — a target
+    // that maxes the per-case cap on every repeat can no longer grow this
+    // heap with the join.
+    const logParts = new BoundedProbeLog()
     let firstError: string | undefined
     for (let i = 1; i <= repeats; i++) {
       logParts.push(`=== run ${i} ===`)
@@ -1077,12 +1205,13 @@ export class BenchmarkProbe implements Probe {
     // bundles): repeats >= 1 && durations.length === repeats is exactly
     // "every requested repeat spawned cleanly", which success also requires.
     const success = firstError === undefined && repeats >= 1 && durations.length === repeats
+    const log = writeProbeLog(input.environment, this.id, logParts.text(), logParts.droppedBytes)
     const bundle: EvidenceBundle = {
       probeId: this.id,
       scenarioId: s.id,
       success,
       artifacts: [
-        logArtifact(input.environment, this.id, logParts.join('\n')),
+        log.ref,
         resultsArtifact(input.environment, {
           probeId: this.id,
           scenarioId: s.id,
@@ -1094,7 +1223,11 @@ export class BenchmarkProbe implements Probe {
         }),
       ],
       measurements,
-      gateResults,
+      // T-058: the aggregate log's truncation rides the FINAL entry — the
+      // run that completed the artifact.
+      gateResults: gateResults.map((g, i) => i === gateResults.length - 1
+        ? withLogTruncation(g, log.truncation)
+        : g),
       ...(firstError !== undefined ? { error: firstError } : {}),
     }
     return bundle
@@ -1176,7 +1309,8 @@ export class ScreenshotProbe implements Probe {
     } else {
       success = true
     }
-    const logRef = logArtifact(input.environment, this.id, execution.output)
+    const log = writeProbeLog(input.environment, this.id, execution.output)
+    const logRef = log.ref
     let imageRef: EvidenceArtifactRef | undefined
     if (success && captureBytes !== null) {
       // The durable copy (the workspace goes away at dispose — this copy is
@@ -1198,7 +1332,7 @@ export class ScreenshotProbe implements Probe {
       success,
       artifacts: imageRef !== undefined ? [logRef, imageRef] : [logRef],
       measurements,
-      gateResults: [toGateResult(this.id, execution, { passed: success })],
+      gateResults: [withLogTruncation(toGateResult(this.id, execution, { passed: success }), log.truncation)],
       ...(error !== undefined ? { error } : {}),
     }
     return bundle
@@ -1302,7 +1436,10 @@ export class WebProbe implements Probe {
     const timeoutMs = s.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS
     const started = Date.now()
     const deadline = started + timeoutMs
-    const logParts: string[] = []
+    // T-058: the aggregate log accumulator is bounded (tail-kept) — a chatty
+    // target's child output (itself per-case capped) can no longer grow this
+    // heap through the join.
+    const logParts = new BoundedProbeLog()
     const measurements: Measurement[] = []
     let responseRef: EvidenceArtifactRef | undefined
 
@@ -1426,12 +1563,14 @@ export class WebProbe implements Probe {
       error = `readiness deadline expired after ${timeoutMs}ms (last poll error: ${lastPollError ?? 'none recorded'})`
     }
 
+    const logText = logParts.text()
+    const log = writeProbeLog(input.environment, this.id, logText, logParts.droppedBytes)
     const gateResult: GateResult = {
       name: this.id,
       passed: success,
       exitCode: target.spawnError === undefined ? preTeardownExit : null,
       durationMs,
-      outputTail: logParts.join('\n').slice(-TAIL_BYTES),
+      outputTail: logText.slice(-TAIL_BYTES),
       ...(cleanupFailures.length > 0 ? { cleanupFailures } : {}),
     }
     const bundle: EvidenceBundle = {
@@ -1439,10 +1578,10 @@ export class WebProbe implements Probe {
       scenarioId: s.id,
       success,
       artifacts: responseRef !== undefined
-        ? [logArtifact(input.environment, this.id, logParts.join('\n')), responseRef]
-        : [logArtifact(input.environment, this.id, logParts.join('\n'))],
+        ? [log.ref, responseRef]
+        : [log.ref],
       measurements,
-      gateResults: [gateResult],
+      gateResults: [withLogTruncation(gateResult, log.truncation)],
       ...(error !== undefined ? { error } : {}),
     }
     return bundle
@@ -1638,7 +1777,11 @@ export class AdversarialProbe implements Probe {
     const measurements: Measurement[] = []
     const gateResults: GateResult[] = []
     const caseRows: AdversarialCaseRecord[] = []
-    const logParts: string[] = []
+    // T-058: the aggregate log accumulator is bounded (tail-kept) — a target
+    // that maxes the per-case cap on EVERY case (~16 MiB × 20 ≈ 320 MiB
+    // aggregated, the recorded failure this constant kills) can no longer
+    // grow this heap with the join.
+    const logParts = new BoundedProbeLog()
     let casesRun = 0
     let casesCrashed = 0
     let firstError: string | undefined
@@ -1692,12 +1835,13 @@ export class AdversarialProbe implements Probe {
     // AND every case survived; zero completed cases is never a pass
     // (AGENTS.md #7 applied to bundles).
     const success = cases.length > 0 && casesRun === cases.length && casesCrashed === 0
+    const log = writeProbeLog(input.environment, this.id, logParts.text(), logParts.droppedBytes)
     const bundle: EvidenceBundle = {
       probeId: this.id,
       scenarioId: s.id,
       success,
       artifacts: [
-        logArtifact(input.environment, this.id, logParts.join('\n')),
+        log.ref,
         adversarialResultsArtifact(input.environment, {
           probeId: this.id,
           scenarioId: s.id,
@@ -1708,7 +1852,12 @@ export class AdversarialProbe implements Probe {
         }),
       ],
       measurements,
-      gateResults,
+      // T-058: the aggregate log's truncation rides the FINAL entry — the
+      // case that completed the artifact. Memory hygiene, never a verdict
+      // input: success above is the target's own outcome, untouched.
+      gateResults: gateResults.map((g, i) => i === gateResults.length - 1
+        ? withLogTruncation(g, log.truncation)
+        : g),
       ...(firstError !== undefined ? { error: firstError } : {}),
     }
     return bundle

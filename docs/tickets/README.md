@@ -94,4 +94,4 @@ Rules:
 | T-055 | Verify-root evidence retention: verify:full archives prior Gate 2 run dirs instead of rmSync-ing them (the T-049 wiped-citation incident) | medium | done 2026-10-25 |
 | T-056 | Brief-count honesty: no silent cyclic padding — an under/over-count planner reply is a parse failure into the existing fallback (register R9) | medium | done 2026-10-26 |
 | T-057 | Duplicate gate names refused at parse time: the store's last-write-wins can no longer drop gate evidence (register R7a) | low | done 2026-10-26 |
-| T-058 | Bounded output accumulation: capped tail buffers in both adapters + capped probe log aggregate — a chatty child can no longer OOM the orchestrator (register R11) | medium | proposed |
+| T-058 | Bounded output accumulation: capped tail buffers in both adapters + capped probe log aggregate — a chatty child can no longer OOM the orchestrator (register R11) | medium | done 2026-10-26 |
