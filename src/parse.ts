@@ -3,10 +3,25 @@
 // scan for the last JSON payload in prose so surrounding chatter is tolerated.
 //
 // parseBriefs carries two LAST-RESORT repairs, each run only on input the
-// plain scan already failed, so every input that parses today parses
-// byte-identically (Gate 0.5 pins both directions); the original bytes are
-// never rewritten anywhere — planner-raw.txt / planner-r2-raw.txt keep them
-// verbatim.
+// plain scan already failed, so structurally every input either scan accepts
+// parses byte-identically (Gate 0.5 pins both directions); the original bytes
+// are never rewritten anywhere — planner-raw.txt / planner-r2-raw.txt keep
+// them verbatim.
+//
+// Exact-count honesty (T-056, a DELIBERATE documented behavior change): every
+// scan below returns its parsed array ONLY when its valid-brief count is
+// EXACTLY the requested count; any other count parses null. The previous
+// pad/truncate tail — cyclic repetition for a short reply, silent truncation
+// for a long one — laundered a 1-brief reply for N candidates as N "distinct"
+// briefs at full token cost, invisible in the report (ok: true, no trace).
+// A count-mismatched reply is now a FAILED planner output: it flows through
+// the runner's existing bounded repair attempt and, still mismatched, the
+// raw-goal fallback (fallbackUsed: true, recorded loudly). Exactly-count
+// replies — the overwhelming case — are untouched byte-for-byte: the
+// inertness contract's purpose (never break working inputs) is honored;
+// its scope is narrowed to exactly that (Gate 0.5 + Gate 1.42 pin both
+// directions; the red bar — main's pad `["a"]`@2 → ["a","a"] and truncate
+// `["a","b","c"]`@2 → ["a","b"] — was recorded on main before this change).
 //
 // Repair 1 (T-029 review round 1; red bar recorded from real run
 // 20261020053845's planner-raw.txt, the Gate 2 red): when NO [..] slice
@@ -55,9 +70,12 @@ function scanBriefs(text: string, count: number): string[] | null {
           .filter((b): b is string => typeof b === 'string' && b.trim().length > 0)
           .map((b) => b.trim())
         if (briefs.length === 0) continue
-        const original = briefs.length
-        while (briefs.length < count) briefs.push(briefs[briefs.length % original]!)
-        return briefs.slice(0, count)
+        // T-056 exact-count: a slice whose valid-brief count is not exactly
+        // the requested count is not a payload — skip it like any invalid
+        // slice (the all-or-nothing rule's exact-count clause). The deleted
+        // pad/truncate tail lived exactly here.
+        if (briefs.length !== count) continue
+        return briefs
       } catch {
         // Try the next '[' to the left.
       }
@@ -70,8 +88,8 @@ function scanBriefs(text: string, count: number): string[] | null {
  *  Mirrors scanBriefs' prose-tolerant bracket scan; a candidate slice parses
  *  only when its EVERY element is an object carrying a non-empty string
  *  `brief` — the all-or-nothing rule that keeps the repair from fabricating
- *  briefs (one bad element sinks the slice). The pad/truncate tail is
- *  scanBriefs' verbatim. */
+ *  briefs (one bad element sinks the slice). The exact-count clause is
+ *  scanBriefs' verbatim (T-056). */
 function scanBriefObjects(text: string, count: number): string[] | null {
   const lastBracket = text.lastIndexOf(']')
   if (lastBracket === -1) return null
@@ -85,9 +103,9 @@ function scanBriefObjects(text: string, count: number): string[] | null {
           && typeof (el as Record<string, unknown>).brief === 'string'
           && ((el as Record<string, unknown>).brief as string).trim().length > 0)) continue
         const briefs = parsed.map((el) => ((el as Record<string, unknown>).brief as string).trim())
-        const original = briefs.length
-        while (briefs.length < count) briefs.push(briefs[briefs.length % original]!)
-        return briefs.slice(0, count)
+        // T-056 exact-count — scanBriefs' clause, verbatim.
+        if (briefs.length !== count) continue
+        return briefs
       } catch {
         // Try the next '[' to the left.
       }
