@@ -4895,6 +4895,81 @@ gate output capture (CommandGate buffers in memory; its `exec` callback
 cannot lose bytes to a file). Required whenever the log-write-loss
 recording or its channel changes.
 
+## Gate 1.40 — verified-dead upgrade: a transient snapshot failure no longer reports a proven-dead tree as a cleanup failure (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-kill-verify-upgrade.mjs
+```
+
+Pins T-054 — Known issue #10's owed code change (the captured fifth
+observation's fix): `src/kill-tree.ts`'s snapshot-failure leg no longer
+condemns a possibly-good outcome to `verified: false` by itself. The
+diagnosed shape (the fifth observation: root live at kill time, the CIM
+snapshot's transient hiccup, the tree verifiably dead on the real process
+table, the log carrying `CLEANUP FAIL: pid N tree kill could not be
+verified (descendant verification unavailable)`) now gets two bounded
+second chances, and the kill is never skipped by either: ONE immediate
+pre-kill snapshot retry — when it lands, the full original verification
+(pre-kill pid list, post-kill sweep) runs unchanged; otherwise the kill
+fires and ONE post-kill liveness re-check gets the last word — everything
+the re-check can still link to the root proven dead UPGRADES the outcome to
+verified (with `reaped` honestly counting the re-check's own enumeration:
+the pre-kill tree's size is unknowable when its snapshot failed, and a
+descendant no longer linked to the root could evade the sweep — a bounded,
+named weakness, still strictly stronger than the unconditional
+`verified: false` it replaced); anything alive keeps its per-pid loud line;
+a re-check that also cannot run keeps the exact pre-T-054 loud
+unverifiable shape (fail-closed — the T-011 posture). Untouched invariants,
+each pinned: genuine survivors keep their per-pid lines (the normal path
+AND the re-check path); the dead-root leg keeps its named line byte-for-byte
+(Known issue #8 — a dead root never relies on taskkill reaping reparented
+descendants, and nothing about it is upgraded); `snapshotTree`'s
+throw-and-proceed never skips a kill. The verification lenses
+(`snapshotTree`, `isAlive`) are injectable per the T-052 identity-probe
+precedent (`KillTreeDeps`, defaulting to the real machinery; every call
+site unchanged).
+
+The check plants real node process trees and asserts on the real process
+table; the transient shapes are driven through the injected stubs, and the
+genuinely-unverifiable shape is driven FOR REAL — every WindowsPowerShell
+PATH segment stripped (both preconditions asserted, the T-052 check's R6
+mechanic), so a machine where the unavailability cannot be forced fails the
+leg loudly instead of running it vacuously:
+
+- **A** — the diagnosed leg (snapshot fails once, transient): verified-dead
+  with the full pre-kill tree counted in `reaped`, NO failure line, the
+  success line carrying the count, exactly one bounded retry. Red bar
+  (recorded in the ticket): on main's engine the injected stubs are inert
+  (the seam is introduced by this change-set — the T-052 red-bar pattern)
+  and this leg's call-count pin failed.
+- **B** — the reporting surface, pure: a verified-dead outcome emits NO
+  failure line and the success line carries the reaped count; survivor,
+  unverifiable, and dead-root shapes keep their named lines verbatim.
+- **C** — genuine survivors keep their per-pid lines through the NORMAL
+  path (a forced-alive liveness stub on a really-killed tree).
+- **D** — genuinely unverifiable (stub fails on every attempt): the loud
+  line verbatim, bounded attempts (two pre-kill + one re-check), the kill
+  never skipped — the tree really dead on the real table.
+- **E** — the post-kill re-check leg (stub fails twice pre-kill, the real
+  snapshot answers the re-check): upgraded to verified-when-proven-dead,
+  NO failure line. Red bar (recorded in the ticket): same seam-absence
+  failure on main.
+- **F** — the re-check stays loud in the loud direction: a live process it
+  finds (forced-alive root — a kill that did not take) keeps its per-pid
+  line.
+- **R** — the REAL-failure leg, no stubs: powershell.exe unresolvable, a
+  real planted tree killed through the real code, outcome exactly the loud
+  unverifiable shape, kill never skipped. On main's engine this leg
+  REPRODUCED the fifth observation's signature end to end (the recorded
+  red bar): `CLEANUP FAIL: pid N tree kill could not be verified
+  (descendant verification unavailable)` printed next to the same leg's
+  real-process-table proof that the tree was dead.
+
+The check sweeps everything it planted best-effort at the end (AGENTS.md #10
+mechanized for its own spawns) and its throwaway sandbox under `C:\swarm\`
+is removed afterward. Required whenever `src/kill-tree.ts`'s verification
+or reporting changes.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
@@ -5368,6 +5443,47 @@ landing in T-017's Landed section).
    ledger, and any future edit (a snapshot retry, say) is a ticket-owned
    change-set that must first weigh the loud-by-design principle against
    the observed rate.
+   **2026-10-25 disposition (T-054, landed) — the threshold clause's
+   promised fix: the diagnosed leg is FIXED by Gate 1.40; the class is
+   narrowed to what remains loud.** The fifth observation's diagnosis
+   (the snapshot/verification leg, NOT an already-gone root) drove the
+   mechanism: a snapshot failure now gets one immediate pre-kill retry
+   (when it lands, the full original verification runs unchanged) and —
+   if that also fails — the kill still fires (never skipped) and ONE
+   post-kill liveness re-check gets the last word: everything the
+   re-check can still link to the root proven dead upgrades the outcome
+   to verified (no failure line, the success line), anything alive keeps
+   its per-pid line, and a re-check that also cannot run keeps the exact
+   pre-T-054 loud unverifiable shape (fail-closed). Red-before/
+   green-after, token-free: the red bar ran the final check against
+   main's engine (`scripts/check-kill-verify-upgrade.mjs`, exit 1, 9
+   failures of 33, teed `C:\swarm\verify-red\T-054-redbar.log`) — the
+   transient legs' pins failed because the injection seam cannot exist on
+   main (the T-052 red-bar pattern: the seam is introduced BY this
+   change-set) — and the leg R REAL-failure drive reproduced this
+   issue's signature end to end on main: `CLEANUP FAIL: pid N tree kill
+   could not be verified (descendant verification unavailable)` printed
+   by a real PowerShell-unresolvable snapshot failure around a real
+   killed tree whose death the same leg proves on the real process
+   table. Post-change Gate 1.40 ALL GREEN (33 assertions, two
+   consecutive runs), Gate 1.12's suite riding green unchanged (30
+   assertions — the dead-root S3 pin and the live-kill S5 pin untouched),
+   and the fifth observation's own check (Gate 1.17) green standalone.
+   Dispositions of the five observations: all five are retroactively
+   classified as instances of this diagnosed leg (the transient CIM
+   hiccup — the loud lines sat on trees that died, per each entry's
+   process-table assertions); the response-at-the-time rule (re-run,
+   never weaken) is unchanged and was correct under the then-standing
+   no-diagnosis posture. What remains loud after the fix, by design: a
+   genuinely-unverifiable outcome (every snapshot attempt including the
+   re-check fails), genuine survivors (normal path and re-check path
+   alike), the dead-root leg (Known issue #8 untouched — a dead root
+   never relies on taskkill reaping reparented descendants), and the
+   bounded named weakness of the upgrade path (the re-check can only
+   vouch for what still links to the root; the pre-kill tree's size is
+   unknowable when its snapshot failed). The honesty property moved the
+   reported accuracy UP, never the loudness down: a proven-dead tree is
+   no longer a failure; an unproven one still is.
 11. **A one-off Gate 1.17 red with a single failed assertion, not
    reproducible (observed once, 2026-10-18, T-021 lane review round 1).**
    One fast-tier run failed inside `scripts/check-machine-worker.mjs` — exit

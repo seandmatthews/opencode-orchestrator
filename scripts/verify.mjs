@@ -1060,6 +1060,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.40: verified-dead upgrade (T-054) ----------
+section('Gate 1.40 — verified-dead upgrade: a transient snapshot failure stops reporting proven-dead trees (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-kill-verify-upgrade.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'kill-verify-upgrade self-check exit 0')
+} catch (e) {
+  fail(`kill-verify-upgrade self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
