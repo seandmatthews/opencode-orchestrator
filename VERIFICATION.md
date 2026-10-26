@@ -5052,7 +5052,8 @@ asserts on the artifacts:
   is correct here — the run captured the evidence before disposal) (T-002).
 
 The skeleton run's outer ceiling (scripts/verify.mjs, `execFileSync` timeout
-**50 min since T-040**; 35 min T-030–T-039) bounds CI; it deliberately exceeds
+**70 min since T-054**; 50 min T-040–T-053; 35 min T-030–T-039) bounds CI; it
+deliberately exceeds
 the runner's OWN per-worker budget — `--timeout-min` default 15 (src/cli.ts),
 at which the T-011 verified tree kill resolves a stalled worker into a FAILED
 candidate verdict, plus the planner/gates/reviewer/verifier legs — so the
@@ -5062,10 +5063,14 @@ the run is a 2-round loop, and since T-040 the tier carries
 `--verifier-model` (four real verifier dispatches per healthy run, observed
 278–429s each with a bounded repair; reviews 76–150s): the healthy slow-day
 skeleton path measured ~30+ min across the two wrapper kills recorded under
-Known issue #12, so 35 min sat within noise of a HEALTHY run, and one
-stalled leg (up to 15 min before its own budget reaps it into a runner
-verdict) would SIGTERM an informative run — 50 gives the healthy path room
-plus one such stall while still reaping a genuinely stuck run. At the
+Known issue #12 — and ~55–60 min across the T-054 calibration (the fourth
+kill: run 20261026020833 killed at the 50-min ceiling mid-round-2 with every
+worker ok, every gate PASS, bounded repairs on four verifier legs and one
+review leg, workers 675s/537s on the day). 35 min sat within noise of a
+HEALTHY run and 50 min within its slow-day variance; one stalled leg (up to
+15 min before its own budget reaps it into a runner verdict) would SIGTERM
+an informative run — 70 gives the measured healthy slow-day path room plus
+one such stall while still reaping a genuinely stuck run. At the
 previous 8-minute ceiling one silent worker SIGTERM'd the whole run before the runner
 could finish — an uninformative red that also skips report writing and
 disposal, leaving stale worktree metadata, `swarm/*` branches, and a stale
@@ -5076,16 +5081,18 @@ whoever drives this gate: the ceiling raise is the same discipline as the
 T-027 wrapper raise — a driving wrapper must sit ABOVE this inner ceiling
 plus the fast tier, or it preempting the runner's stall path is its own
 misconfiguration (Known issue #12's remedy paragraph applies verbatim).
-**Since T-040 the tracked driving workflow carries the note's number:**
+**Since T-054 the tracked driving workflow carries the note's number:**
 `.zcode/workflows/ticket-implement.dwf.ts` runs the full tier at
-`timeoutMs: 3600000` (60 min — the 50-min inner ceiling + the fast tier,
-plus margin; the PAIRED-VALUE comment sits on the raise itself). The two
-1500000ms kills that calibrated this (review rounds 1 and 2) came from the
-workflow's PRE-EDIT loaded script — a lane's edit to the tracked file takes
-effect only when the driving run is amended or re-created from it, so the
-wrapper value and the inner ceiling are one paired decision. The wrapper is
-repo content and lanes may raise it when their change-set legitimately grows
-the tier — never shrink the tier's own assertions to fit a wrapper.
+`timeoutMs: 5100000` (85 min — the 70-min inner ceiling + the fast tier,
+plus margin; the PAIRED-VALUE comment sits on the raise itself; 3600000/60
+min T-040–T-053). The three kills that calibrated this lineage (the two
+1500000ms wrapper kills, then the inner ceiling's own 50-min SIGTERM) came
+from pre-edit loaded scripts and pre-raise ceilings — a lane's edit to the
+tracked file takes effect only when the driving run is amended or re-created
+from it, so the wrapper value and the inner ceiling are one paired decision.
+The wrapper is repo content and lanes may raise it when their change-set
+legitimately grows the tier — never shrink the tier's own assertions to fit
+a wrapper.
 
 Required when touching `src/runner.ts`, any adapter, gates, workspace handling, or
 anything that changes report shape. Fast tier alone does not clear you here.
@@ -5628,6 +5635,33 @@ landing in T-017's Landed section).
     `timeoutMs` 2700000 → **3600000 (60 min)** — and the driving run must
     be AMENDED or re-created from the updated file before its next Gate 2
     attempt, since no lane commit can change an already-loaded script.
+    **2026-10-26 fourth kill (T-054 review round 1) — this time the INNER
+    ceiling itself fired, and the run was again HEALTHY.** The driving
+    Gate 2 died at the 50-min inner ceiling (`FAIL: skeleton run failed:
+    SIGTERM`) on run 20261026020833 with every worker `ok=true,
+    timedOut=false`, non-zero diffs (14148/7321/5746/7490 bytes), every
+    gate PASS, and the run's own kill/verify machinery never fired (grep
+    over all four worker.logs: zero `CLEANUP FAIL` lines); the kill landed
+    mid-round-2 — the last worker completed at 44.7 min (c02-r2, 537s),
+    c02-r2's verifier was inside its bounded repair, its review pending,
+    c01-r2 fully through review — a healthy run needing roughly 55–60 min
+    on a slow model day (workers 675s/537s, verifiers 686s/423s, bounded
+    repairs on four verifier legs and one review leg, each repair a second
+    full dispatch). Debris (4 worktrees, 4 swarm/* branches, 1 stale lock
+    whose holder pid 14528 was verified dead first) disposed through the
+    house path (`clean --run 20261026020833 --run-root C:\swarm\verify
+    --force --force-lock` from the T-054 lane; 8 removed, 0 refused, 0
+    failed; fixture verified pristine after; evidence kept). Remedy, per
+    this issue's twice-recorded raise discipline — repo-side narrowing was
+    refused at kill 2 and stays refused: the T-054 lane carries the PAIRED
+    raise — the inner skeleton ceiling 50 → **70 min** (scripts/verify.mjs;
+    the measured slow-day path gets room plus one stall) and the
+    workflow's Gate 2 `timeoutMs` 3600000 → **5100000 (85 min)** — and the
+    driving run must be AMENDED or re-created from the updated file before
+    its next Gate 2 attempt, since no lane commit can change an
+    already-loaded script. The change-set under review shares no code with
+    the run's speed: its engine diff (src/kill-tree.ts) touches only
+    timeout-kill verification paths, which never fired in this run.
 13. **The first auto-revert: a post-merge fast-tier red that never
     reproduced, with the red output lost (observed once, 2026-10-21,
     T-032 lane, driving run `dwfrun-b35d1c1a`).** T-032 (adversarial

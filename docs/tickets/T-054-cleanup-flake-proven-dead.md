@@ -180,6 +180,36 @@ now upgrades to verified-dead instead of recording a spurious
 `cleanupFailures` entry (evidence-only; no verdict reads it). **Gate 3
 n/a** (no adapter, no harness spawn changed).
 
+**Review round 1** — the driving Gate 2 (verify:full) died at the 50-min
+INNER skeleton ceiling (`FAIL: skeleton run failed: SIGTERM`) on run
+20261026020833, and the run was HEALTHY at the kill: every worker
+`ok=true, timedOut=false` (675s/537s/247s/537s), non-zero diffs
+(14148/7321/5746/7490 bytes), every gate PASS, reviews and verifiers
+parsing after bounded repairs (four verifier legs + one review leg, each
+repair a second full dispatch — a slow model day), the run's own
+kill/verify machinery never fired (grep over all four worker.logs: zero
+`CLEANUP FAIL` lines — this change-set's engine surface was INERT in the
+run), and the kill landed mid-round-2 (last worker done at 44.7 min;
+c02-r2's verifier inside its bounded repair, its review pending) — a
+healthy run needing roughly 55–60 min. VERIFICATION.md Known issue #12's
+fourth budget kill, diagnosed from the kept run artifacts; debris (4
+worktrees, 4 swarm/* branches, 1 stale lock whose holder pid was verified
+dead first) disposed through the house path (`clean --run 20261026020833
+--run-root C:\swarm\verify --force --force-lock`; 8 removed, 0 refused, 0
+failed; fixture verified pristine; evidence kept). Remedy per the ledger's
+twice-recorded raise discipline (kill 2: "repo-side narrowing levers all
+weaken Gate 2 ... and were refused"; kill 3: the paired raise is
+lane-settable) — NOT an assertion weakened, the harness time budget
+raised: the lane carries the PAIRED raise, the inner skeleton ceiling
+50 → **70 min** (scripts/verify.mjs) and the tracked driving workflow's
+Gate 2 `timeoutMs` 3600000 → **5100000 (85 min)**
+(.zcode/workflows/ticket-implement.dwf.ts — inner + fast tier + margin,
+the PAIRED-VALUE comment updated on both sides), and the driving run must
+be AMENDED or re-created from the updated file before its next Gate 2
+attempt (no lane commit can change an already-loaded script — the kill-3
+record's standing consequence). Whether the next driving Gate 2 completes
+inside the raised ceiling is that run's record, not this lane's claim.
+
 ## Verification
 
 Gate 1.40 (VERIFICATION.md, `scripts/check-kill-verify-upgrade.mjs`): the

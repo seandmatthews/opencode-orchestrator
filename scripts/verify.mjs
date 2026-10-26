@@ -1119,16 +1119,20 @@ console.log('$ tsx src/cli.ts', skeletonArgs.slice(3).join(' '))
 // per-call budget. Since T-030 the run is a real 2-round loop, and since
 // T-040 the tier also carries --verifier-model (four real verifier
 // dispatches per healthy run, observed 278-429s each with a bounded repair;
-// reviews 76-150s — see the two wrapper kills recorded under Known issue
-// #12): the healthy slow-day skeleton path measured ~30+ min, so 35 min sat
-// within noise of a HEALTHY run and one stalled leg (up to 15 min before its
-// own budget reaps it into a runner verdict) would SIGTERM an informative
-// run. 50 gives the healthy path room plus one such stall while still
-// reaping a genuinely stuck run; the driving wrapper must sit ABOVE this
-// plus the fast tier (the tracked workflow carries 60 min — the pairing is
-// documented in VERIFICATION.md's Gate 2 section).
+// reviews 76-150s — see the wrapper kills recorded under Known issue #12):
+// the healthy slow-day skeleton path measured ~30+ min by the T-040
+// calibration and ~55-60 min by the T-054 calibration (run 20261026020833:
+// workers 675s/537s, verifiers 686s/423s with bounded repairs on four
+// verifier legs and one review leg, killed at the 50-min ceiling mid-round-2
+// with every worker ok and every gate PASS — the run's own kill/verify
+// machinery never fired). 70 gives that measured healthy slow-day path room
+// plus one such stall while still reaping a genuinely stuck run (every leg
+// resolves into a runner verdict at its own 15-min budget, several minutes
+// inside this ceiling); the driving wrapper must sit ABOVE this plus the
+// fast tier (the tracked workflow carries 85 min — the pairing is documented
+// in VERIFICATION.md's Gate 2 section).
 try {
-  run(process.execPath, skeletonArgs, { cwd: root, stdio: 'inherit', timeout: 50 * 60_000 })
+  run(process.execPath, skeletonArgs, { cwd: root, stdio: 'inherit', timeout: 70 * 60_000 })
 } catch (e) {
   fail(`skeleton run failed: ${e.status ?? e.signal ?? e.message}`)
   finish()
