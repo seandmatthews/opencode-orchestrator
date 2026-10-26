@@ -105,7 +105,7 @@ A worker killed at the deadline whose partial edit passes gates records
 disagree with each other, which is not. **Disposition: dated decisions.md
 entry either way, then align the summary/integrate text.**
 
-### R7 — Store evidence gaps `ticket-later` · [subagent]
+### R7 — Store evidence gaps `partially ticketed (R7a → T-057)` · [subagent]
 
 (a) Duplicate gate names within one job: `gate_results` keys on
 `(run_id, candidate_id, gate_name)` with upsert, and `parseJobsSpec`
@@ -126,7 +126,7 @@ but the ladder requires `gates.length > 0` (`src/runner.ts:1201`) — everyone
 FAILS. **Disposition: fold into the next cli-touching ticket (T-043 is the
 likely vehicle).**
 
-### R9 — Brief padding: N candidates on one sample `ticket-later` · [code-read]
+### R9 — Brief padding: N candidates on one sample `ticketed T-056` · [code-read]
 
 `parseBriefs` pads short planner arrays by cyclic repetition
 (`src/parse.ts:58-59`) and truncates over-long ones silently; "distinct"
@@ -141,7 +141,7 @@ cores; a clean exit-0 at the deadline is recorded `timedOut: true`,
 exit null, `ok: false`. Fail-closed but wrong. **Disposition: fold into
 T-046 (same two sites).**
 
-### R11 — Unbounded in-memory output accumulation `ticket-later` · [code-read + subagent]
+### R11 — Unbounded in-memory output accumulation `ticketed T-058` · [code-read + subagent]
 
 `collectText` in both adapters accumulates the entire stdout+stderr with no
 cap (tail sliced only after full collection) beside the file drain — a
