@@ -19,7 +19,25 @@ node node_modules/tsx/dist/cli.mjs scripts/check-parse.mjs
 ```
 
 Pins the JSON extraction rules for planner briefs and reviewer observations
-(prose-tolerant scanning, cycling, rejection shapes) without spending model tokens.
+(prose-tolerant scanning, exact-count, rejection shapes) without spending model
+tokens. **Since T-056 the scans behind `parseBriefs` carry an EXACT-COUNT
+clause, a deliberate documented behavior change:** a planner reply whose
+valid-brief count is not exactly the requested count is a PARSE FAILURE — the
+scan skips the mismatched slice (the all-or-nothing rule's exact-count clause),
+the planner's bounded repair attempt runs, and a still-mismatched reply falls
+back to the raw goal (`fallbackUsed: true`, the loud console line). The former
+pad/truncate tail — cyclic repetition for a short reply, silent truncation for
+a long one — silently laundered one brief into N "distinct" candidates at full
+token cost with `ok: true` and no trace (adversarial review 2026-10-23, R9);
+it is deleted. The inertness contract's scope is narrowed accordingly and
+honestly: every EXACTLY-COUNT input — the overwhelming case — parses
+byte-identically (pinned explicitly, both recorded fixtures included);
+count-MISMATCHED inputs, which previously "parsed" into padded or truncated
+output, now fail. The red bar was recorded on main before the change
+(`parseBriefs('["a"]', 2)` → `["a","a"]`; `parseBriefs('["a","b","c"]', 2)` →
+`["a","b"]`) and both green replacements are pinned — by this gate and by
+Gate 1.42 (which also pins the fallback end to end). No exactly-N fixture
+changed. Required whenever `src/parse.ts` changes.
 Since T-029's review round 1 it also pins `parseBriefs`'s FIRST LAST-RESORT
 repair: when no `[..]` slice parses, the scan retries once over text with the
 observed LLM slip repaired — a duplicated closing quote at an element boundary
@@ -31,9 +49,9 @@ exactly that recorded shape (inner brackets + the captured OpenCode final
 frame included), that the repair never fabricates briefs from hopeless input,
 and that it is INERT whenever the plain scan parses — valid input whose string
 content contains the slip's byte pattern parses through the plain path with
-content intact. Every input that parsed before this change parses
-byte-identically; no existing fixture changed. Required whenever `src/parse.ts`
-changes.
+content intact. Every EXACTLY-COUNT input that parsed before this change
+parses byte-identically; no existing fixture changed. Required whenever
+`src/parse.ts` changes.
 
 Since the T-040 lane's review round 1 it also pins `parseBriefs`'s SECOND
 LAST-RESORT repair, the objects-shape READ (run only when BOTH the plain scan
@@ -54,18 +72,21 @@ final frame included — the T-029 fixture-faithfulness rule) and the repair
 READS the model's own labeled briefs out of them: a candidate `[..]` slice
 parses only when its EVERY element is an object carrying its own non-empty
 string `brief` (the all-or-nothing rule — one bad element sinks the slice;
-nothing is fabricated or rewritten), with `scanBriefs`'s pad/truncate
-semantics verbatim. Fixtures pin the recorded payload yielding exactly the
+nothing is fabricated or rewritten), with `scanBriefs`'s exact-count clause
+verbatim (T-056 — the pad/truncate tail both scans carried is deleted).
+Fixtures pin the recorded payload yielding exactly the
 model's own two briefs (each output byte found in the recorded payload),
-cycle/truncate parity with the plain scan, the never-fabricates refusals
+count-mismatch refusals in parity with the plain scan (the T-056 exact-count
+clause — 1 object for count 2 and 3 objects for count 4 parse null), the never-fabricates refusals
 (missing/non-string/empty `brief`, non-object elements, empty arrays — all
 null), that a mixed object+string array still parses through the PLAIN path
 unchanged (the resort never fires), that string content embedding the
 objects pattern parses byte-identically through the plain path (the T-029
 inertness pin, second instance), and that the recorded frame's trailing
-OpenCode footer and in-brief brackets do not derail the scan. Every input
-that parsed before either repair parses byte-identically by construction;
-no existing fixture changed. Required whenever `src/parse.ts` changes.
+OpenCode footer and in-brief brackets do not derail the scan. Every
+EXACTLY-COUNT input that parsed before either repair parses byte-identically
+by construction; no existing fixture changed. Required whenever `src/parse.ts`
+changes.
 
 ## Gate 1 — fixture baseline (seconds)
 
@@ -5045,6 +5066,69 @@ helper-driven face G/L/S failing on the absent `scripts/verify-retention.mjs`
 Required whenever `scripts/verify.mjs`'s full-tier reset, the archive
 root, or `scripts/verify-retention.mjs` changes.
 
+## Gate 1.42 — brief-count honesty: an under/over-count planner reply is a parse failure, not silent padding (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-brief-count.mjs
+```
+
+Pins T-056. `parseBriefs`'s scans (`src/parse.ts`) used to pad a SHORT
+planner array by cyclic repetition and truncate a LONG one: a 1-brief reply
+for N candidates dispatched the same brief N times at full token cost,
+laundered as N "distinct" briefs with `planner.ok: true` and no trace in the
+report — corrupting exactly the metric the yield block (Gate 1.36) counts
+survivors by (the adversarial review 2026-10-23's R9: "N candidates
+frequently buy ~1 independent sample"). The pad/truncate tail is deleted;
+every scan now returns its parsed array ONLY when the valid-brief count is
+EXACTLY the requested count (the all-or-nothing rule's exact-count clause —
+a mismatched slice is skipped like any invalid slice). The consequence path
+is the existing one: null → one bounded repair attempt → still null → the
+raw-goal fallback with `fallbackUsed: true` and the loud console line — same
+tokens, honest provenance. This is a deliberate, documented narrowing of
+parse.ts's byte-identity inertness contract FOR THE COUNT-MISMATCH CASE ONLY
+(stated plainly in Gate 0.5 above): exactly-count replies — the
+overwhelming case — are untouched byte-for-byte. Non-goals kept: no
+accepting k<count briefs as k candidates (the candidate contract), no
+model-composed top-up (mechanical composition only), `--jobs` briefs never
+parsed by parseBriefs.
+
+The check is token-free, two legs (sandbox `C:\swarm\verify-brief-count`,
+removed afterward):
+
+- **A** — parser contract: the ticket's red-bar shapes parse null
+  (`["a"]`@2, `["a","b","c"]`@2); a short array in prose never manufactures
+  the missing briefs; the exact-count clause holds through the objects scan
+  and through the separator-repair path (the recorded duplicated-quote
+  shape — 2 briefs after repair — parses null for count 3, and still parses
+  both briefs for count 2); exactly-N arrays return main's exact output,
+  trim parity and the mixed-array filtered-count case included; and the
+  Gate 0.5 recorded fixture `planner-r2-objects-raw.txt` parses to exactly
+  its count — the model's own two briefs, asserted, not weakened.
+- **B** — fallback e2e (the Gate 1.22 leg-B fake-adapter pattern):
+  `runSkeleton` driven end-to-end with a stub planner whose reply is SHORT
+  for 2 candidates — `planner.ok: false`, `fallbackUsed: true`, both
+  attempts spent, the console line `planner: no valid output, using raw
+  goal in Ns (2 attempts)`, every candidate riding the RAW GOAL (no worker
+  prompt ever carries the padded brief), `planner-raw.txt` keeping the
+  short reply's bytes verbatim, and the run still completing with
+  gate-decided verdicts. Control face: an exactly-N reply dispatches its
+  parsed briefs in order on one attempt with the plain success console
+  line — the preserved case end to end.
+
+Red bar, recorded FIRST against main (AGENTS.md #8; a read-only probe
+importing main's `src/parse.ts` before this change-set existed):
+`parseBriefs('["a"]', 2)` → `["a","a"]` (the pad asserted),
+`parseBriefs('["a","b","c"]', 2)` → `["a","b"]` (the truncate asserted).
+Intermediate red, post-parser-change: Gate 0.5's three padded pins red
+(short cycles / long truncates / objects cycle-truncate), every exactly-N
+and recorded-fixture pin green — exactly the intended blast radius. The
+padded pins were REPLACED with the exact-count expectation, strengthened
+not weakened (the T-044 precedent; reasoning recorded at the pins and in
+Gate 0.5). Post-change: Gate 0.5 ALL GREEN, this gate ALL GREEN.
+
+Required whenever `src/parse.ts`'s scans or the planner repair/fallback
+path (`src/runner.ts`'s `runPlannerPhase`) changes.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
@@ -5060,6 +5144,17 @@ the constant, the archive root, and the incident that motivated the change
 (run 20261024021432 wiped from disk after Known issue #6's 2026-10-24
 observation cited it — the T-049 incident) are pinned token-free by Gate
 1.41.
+
+Since T-056 the planner assertions here are also the real-token proof of
+brief-count honesty: `parseBriefs` now fails a short/long planner reply into
+the raw-goal fallback instead of silently padding/truncating it (Gate 1.42
+pins the mechanics token-free), so a healthy run's green `planner.ok` /
+`fallbackUsed: false` assertions prove the exact-count clause did not
+disturb exactly-count replies on a real model; a future run whose planner
+genuinely returns a mismatched count records the fallback honestly (and goes
+red here) rather than laundering one brief into N candidates. Gate 2 owed at
+T-056 landing (planner-phase behavior changed) — trigger analysis in the
+ticket's Landed; the driving full run IS the evidence.
 
 Runs a real two-tier skeleton run (GLM-5.3 planner + flash workers, 2
 candidates per round) on a fresh fixture — **a real 2-round run since T-030**

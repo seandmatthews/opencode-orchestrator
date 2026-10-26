@@ -1082,6 +1082,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.42: brief-count honesty (T-056) ----------
+section('Gate 1.42 — brief-count honesty: an under/over-count planner reply is a parse failure, not silent padding (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-brief-count.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'brief-count honesty self-check exit 0')
+} catch (e) {
+  fail(`brief-count honesty self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

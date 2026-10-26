@@ -16,8 +16,26 @@ const t = (name, cond) => {
 t('plain array passes through', JSON.stringify(parseBriefs('["a","b"]', 2)) === '["a","b"]')
 t('array embedded in prose is found', parseBriefs('Sure! Here you go: ["a"] hope that helps', 1)?.[0] === 'a')
 t('scan survives a stray bracket in prose', parseBriefs('options [see docs] then ["a","b"]', 2)?.[1] === 'b')
-t('short array cycles to fill count', JSON.stringify(parseBriefs('["a"]', 3)) === '["a","a","a"]')
-t('long array truncates to count', parseBriefs('["a","b","c","d"]', 2)?.length === 2)
+// T-056 (brief-count honesty): the two pins below asserted the pad/truncate
+// tail and were REPLACED with the exact-count expectation — strengthened, not
+// weakened (the T-044 precedent; reasoning recorded here and in VERIFICATION.md
+// Gate 0.5). On main, parseBriefs('["a"]', 3) returned '["a","a","a"]' (cyclic
+// padding) and parseBriefs('["a","b","c","d"]', 2) returned 2 (silent
+// truncation) — the recorded red bar (asserted against main's parse.ts before
+// this change-set; also pinned in the ticket shapes by Gate 1.42). A reply
+// whose valid-brief count is not exactly the requested count is now a parse
+// failure: the scan skips the slice (the all-or-nothing rule's exact-count
+// clause), the planner's bounded repair runs, and the raw-goal fallback
+// records the failure loudly — same tokens, honest provenance, instead of one
+// brief masquerading as N distinct briefs (adversarial review R9).
+t('count-mismatch is a parse failure: a SHORT array is no longer cyclically padded — 1 brief for count 3 parses null (was ["a","a","a"] on main, the recorded red bar)',
+  parseBriefs('["a"]', 3) === null)
+t('count-mismatch is a parse failure: a LONG array is no longer truncated — 4 briefs for count 2 parses null (was 2 on main, the recorded red bar)',
+  parseBriefs('["a","b","c","d"]', 2) === null)
+t('exactly-N arrays are untouched byte-for-byte (the inertness contract\'s narrowed scope — the preserved case, T-056)',
+  JSON.stringify(parseBriefs('["a","b"]', 2)) === '["a","b"]'
+  && JSON.stringify(parseBriefs('[" x ","y "]', 2)) === JSON.stringify(['x', 'y'])
+  && parseBriefs('[1,{"x":2},"a"]', 1)?.length === 1)
 t('non-string elements filtered', parseBriefs('[1,{"x":2},"a"]', 1)?.[0] === 'a')
 t('no json at all returns null', parseBriefs('no json here', 1) === null)
 t('empty strings rejected', parseBriefs('["", "  "]', 1) === null)
@@ -59,9 +77,12 @@ t('separator repair does not fabricate briefs from hopeless input', parseBriefs(
 // reads the model's OWN labeled briefs — it never fabricates one: every
 // element of the parsed slice must be an object carrying its own non-empty
 // string `brief`, else the candidate slice is skipped. The resort runs only
-// when BOTH existing scans return null, so every input that parsed before
-// parses byte-identically by construction (pinned below, the T-029 inertness
-// pattern).
+// when BOTH existing scans return null, so it stays structurally unreachable
+// while either scan parses (pinned below, the T-029 inertness pattern).
+// Since T-056 the scans' exact-count clause deliberately narrows the older
+// byte-identity claim: every EXACTLY-COUNT input that parsed before parses
+// byte-identically; a count-mismatched reply now parses null through every
+// scan (see the T-056 pins above and VERIFICATION.md Gate 0.5).
 const objectsRaw = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'planner-r2-objects-raw.txt'), 'utf8')
 const objectsBriefs = parseBriefs(objectsRaw, 2)
 t('objects repair: the recorded round-2 planner payload yields exactly 2 briefs (run 20261022211937 red bar, green bar)',
@@ -70,9 +91,15 @@ t('objects repair: the recorded round-2 planner payload yields exactly 2 briefs 
 t('objects repair: the briefs are the model\'s own bytes, read out of the recorded payload — never fabricated',
   objectsBriefs?.every((b) => objectsRaw.includes(b)) === true
   && objectsBriefs?.[0] !== objectsBriefs?.[1])
-t('objects repair: one-object payload cycles to fill count, longer truncates — the scanBriefs semantics',
-  JSON.stringify(parseBriefs('[{"brief":"only one"}]', 3)) === JSON.stringify(['only one', 'only one', 'only one'])
-  && JSON.stringify(parseBriefs('[{"brief":"a"},{"brief":"b"},{"brief":"c"}]', 2)) === JSON.stringify(['a', 'b']))
+// T-056: this pin asserted the objects scan's pad/truncate tail (scanBriefs'
+// verbatim) and is REPLACED with the exact-count expectation — strengthened,
+// not weakened (the T-044 precedent): both shapes are now parse failures that
+// flow to the planner's bounded repair and the raw-goal fallback, instead of
+// one object brief riding N candidates (the strings-scan red bar above; Gate
+// 1.42 pins the preserved exactly-N case and the fallback end to end).
+t('objects repair: count-mismatched payloads parse null — 1 brief for count 3 no longer cycles (was ["only one" x3] on main) and 3 briefs for count 2 no longer truncate (was ["a","b"] on main)',
+  parseBriefs('[{"brief":"only one"}]', 3) === null
+  && parseBriefs('[{"brief":"a"},{"brief":"b"},{"brief":"c"}]', 2) === null)
 t('objects repair never fabricates: missing/non-string/empty brief values and empty arrays all stay null',
   parseBriefs('[{"text":"no brief key"}]', 1) === null
   && parseBriefs('[{"brief":"a"},{"brief":42}]', 1) === null
