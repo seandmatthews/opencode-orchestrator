@@ -192,28 +192,58 @@
 //     of least change — stdin is carved). Each case gets the FULL timeoutMs
 //     budget (default DEFAULT_PROBE_TIMEOUT_MS) — a per-case budget, total
 //     wall time bounded by case count × timeoutMs (the BenchmarkProbe
-//     per-repeat budget posture). Crash/survival vocabulary: a case
-//     SURVIVES when the target spawned cleanly, exited 0, and did not time
-//     out; it CRASHES when it ran and exited non-zero or timed out; a
-//     SPAWN-REFUSED case (e.g. ENOENT) produced NO run — neither survived
-//     nor crashed (a target cannot crash on an input it never received). A
-//     case that crashes still ran: its durationMs is real wall-clock
-//     evidence. Success = the case list is non-empty AND every case spawned
-//     cleanly AND every case survived (the no-crash target passes); zero
-//     completed cases is success: false, NEVER a pass (AGENTS.md #7 applied
-//     to bundles). `error` names the FIRST breaking case with counts ("case
-//     3/20 exited with code 1" / "case 5/20 timed out after Nms" / "case
-//     1/20 could not be spawned: ENOENT"). Measurements are recorded
-//     regardless of success — evidence about crashes is the point: one
-//     `case-<i> duration` (unit ms) per case that actually ran, plus
-//     `cases-run` and `cases-crashed` counts (unit 'cases'). Artifacts: the
-//     combined output of all cases in one .log artifact with `=== case <i>
-//     ===` separators, plus one 'report'-kind per-case table artifact
-//     <probeId>.results.json (the kind's THIRD producer):
-//     {probeId, scenarioId, seed, cases: [{index, input, outcome,
-//     durationMs?}], casesRun, casesCrashed} with outcome ∈ survived |
-//     crashed-exit | crashed-timeout | spawn-refused and every recorded
-//     input truncated to ADVERSARIAL_PROBE_MAX_CASE_CHARS — cases ride argv
+//     per-repeat budget posture). EXPECTED-OUTCOME vocabulary (T-062,
+//     register R16 — the inversion fix): every case carries an ENGINE-AUTHORED
+//     expectation, 'exit-0' or 'reject', a pure function of the engine-authored
+//     corpus (adversarialCaseExpectations below) — never of the target's
+//     behavior, never inferred after watching the target run, and never of the
+//     seed's random tail (the corpus prefix carries the authored expectations;
+//     every generated case — soup and permutations alike — expects exit-0).
+//     The corpus entries whose INPUT IS INVALID BY CONSTRUCTION (the exact
+//     split, fixed at implementation and pinned by Gate 1.48: the empty-input
+//     edge; the control-character case; the three malformed-JSON-looking
+//     strings) expect REJECTION; everything else expects exit-0. Outcome
+//     vocabulary: a case SURVIVES when it spawned cleanly, exited 0, did not
+//     time out, and exit-0 was the expectation; it is REJECTED-AS-EXPECTED
+//     when it spawned cleanly, exited non-zero within the budget, and reject
+//     was the expectation (correct input validation — counts toward survival);
+//     it is UNEXPECTED-EXIT-0 when it spawned cleanly, exited 0, and reject was
+//     the expectation (the no-op handler that never reads argv — an unmet
+//     expectation, exactly the undetectable no-op R16 names); it CRASHES
+//     (crashed-exit / crashed-timeout) when it ran, exit-0 was the
+//     expectation, and it exited non-zero or timed out; a SPAWN-REFUSED case
+//     (e.g. ENOENT) produced NO run — none of the above (a target cannot crash
+//     on an input it never received). A TIMEOUT OR SPAWN REFUSAL IS NEVER
+//     SURVIVAL, on either expectation — the T-032 refusal vocabulary unchanged
+//     (a reject-expected case that times out records crashed-timeout, not
+//     rejection). The honest boundary, stated in the ticket and here: a clean
+//     non-zero exit is indistinguishable at the process boundary from an
+//     unhandled throw on the same input — both record rejected-as-expected;
+//     non-zero exit is non-zero exit. A case that ran still ran: its
+//     durationMs is real wall-clock evidence whatever the outcome. Success =
+//     the case list is non-empty AND every case spawned cleanly AND every case
+//     met its expectation (passed = outcome 'survived' OR
+//     'rejected-as-expected' at the case-gate mapping); zero completed cases
+//     is success: false, NEVER a pass (AGENTS.md #7 applied to bundles).
+//     `error` names the FIRST breaking case with counts ("case 3/20 exited
+//     with code 1" / "case 5/20 timed out after Nms" / "case 1/20 could not be
+//     spawned: ENOENT" / "case 1/20 exited 0 where rejection was expected
+//     (input invalid by construction)"). Measurements are recorded regardless
+//     of success — evidence about crashes is the point: one `case-<i>
+//     duration` (unit ms) per case that actually ran, plus `cases-run`,
+//     `cases-crashed`, `cases-rejected`, and `cases-unexpected-exit-0` counts
+//     (unit 'cases') — cases-crashed keeps its T-032 meaning (crashed-exit +
+//     crashed-timeout ONLY; rejected-as-expected is counted honestly beside it
+//     in cases-rejected, never silently merged into survived or crashed).
+//     Artifacts: the combined output of all cases in one .log artifact with
+//     `=== case <i> ===` separators, plus one 'report'-kind per-case table
+//     artifact <probeId>.results.json (the kind's THIRD producer):
+//     {probeId, scenarioId, seed, cases: [{index, input, expectation,
+//     outcome, durationMs?}], casesRun, casesCrashed, casesRejected,
+//     casesUnexpectedExit0} with expectation ∈ exit-0 | reject and outcome ∈
+//     survived | rejected-as-expected | unexpected-exit-0 | crashed-exit |
+//     crashed-timeout | spawn-refused, and every recorded input truncated to
+//     ADVERSARIAL_PROBE_MAX_CASE_CHARS — cases ride argv
 //     and Windows bounds a spawned command line (CreateProcess's ~32k
 //     limit), so that constant bounds every emitted case with margin (the
 //     operator's base command is expected to stay small — documented
@@ -1590,15 +1620,30 @@ export class WebProbe implements Probe {
 
 // ---------- AdversarialProbe: the seeded argv-fuzz probe (T-032) ----------
 
-/** One recorded adversarial case (T-032): what was fed and what happened.
+/** The engine-authored per-case expected outcome (T-062, register R16):
+ *  'exit-0' — surviving the case (a clean exit 0 within the budget) is the
+ *  expectation; 'reject' — the case's input is invalid by construction and a
+ *  clean non-zero exit within the budget is the expectation (correct input
+ *  validation). Authored per-case by the engine on the corpus, a function of
+ *  the case's corpus identity — never inferred from the target's behavior,
+ *  never reclassified after watching the target run, never a function of the
+ *  seed's random tail (every generated case — soup and permutations alike —
+ *  expects exit-0). */
+export type AdversarialCaseExpectation = 'exit-0' | 'reject'
+
+/** One recorded adversarial case (T-032; expectation + outcome classes since
+ *  T-062): what was fed, what the engine expected, and what happened.
  *  `durationMs` is present only when the case actually ran — a
  *  spawn-refused case produced no run (a target cannot crash on an input
- *  it never received), so it carries neither survived nor crashed
- *  vocabulary and no duration. */
+ *  it never received), so it carries no run-class vocabulary and no
+ *  duration. */
 interface AdversarialCaseRecord {
   index: number
   input: string
-  outcome: 'survived' | 'crashed-exit' | 'crashed-timeout' | 'spawn-refused'
+  /** The engine-authored expectation (T-062) — see
+   *  AdversarialCaseExpectation. */
+  expectation: AdversarialCaseExpectation
+  outcome: 'survived' | 'rejected-as-expected' | 'unexpected-exit-0' | 'crashed-exit' | 'crashed-timeout' | 'spawn-refused'
   durationMs?: number
 }
 
@@ -1607,20 +1652,29 @@ interface AdversarialCaseRecord {
  *  string, control characters, non-ASCII, numeric edges, and
  *  malformed-JSON-looking strings, in corpus order. The seeded randomized
  *  portion (ASCII soup + corpus permutations) fills the list up to
- *  ADVERSARIAL_PROBE_CASE_COUNT. */
-const ADVERSARIAL_EDGE_CORPUS: readonly string[] = [
-  '',
-  'a\tb\nc\x01d',
-  'ünïcödé ✓ 中文 🙃',
-  'NaN',
-  'Infinity',
-  '1e308',
-  '-0',
-  '0x10',
-  '1,000',
-  '{"a":',
-  '[1,2,',
-  '"unterminated',
+ *  ADVERSARIAL_PROBE_CASE_COUNT.
+ *
+ *  Since T-062 every corpus entry carries its ENGINE-AUTHORED expectation
+ *  (register R16's inversion fix): the entries whose INPUT IS INVALID BY
+ *  CONSTRUCTION — the empty-input edge (index 0), the control-character case
+ *  (index 1), and the three malformed-JSON-looking strings (indices 9-11) —
+ *  expect 'reject' (a clean non-zero exit is correct input validation, not a
+ *  crash); every other corpus entry expects 'exit-0'. This is the exact
+ *  split, fixed at implementation and pinned by Gate 1.48; the strings and
+ *  their order are byte-identical to the pre-T-062 string[] corpus. */
+const ADVERSARIAL_EDGE_CORPUS: readonly { readonly input: string; readonly expectation: AdversarialCaseExpectation }[] = [
+  { input: '', expectation: 'reject' },
+  { input: 'a\tb\nc\x01d', expectation: 'reject' },
+  { input: 'ünïcödé ✓ 中文 🙃', expectation: 'exit-0' },
+  { input: 'NaN', expectation: 'exit-0' },
+  { input: 'Infinity', expectation: 'exit-0' },
+  { input: '1e308', expectation: 'exit-0' },
+  { input: '-0', expectation: 'exit-0' },
+  { input: '0x10', expectation: 'exit-0' },
+  { input: '1,000', expectation: 'exit-0' },
+  { input: '{"a":', expectation: 'reject' },
+  { input: '[1,2,', expectation: 'reject' },
+  { input: '"unterminated', expectation: 'reject' },
 ]
 
 /** The ASCII-soup alphabet (T-032): printable ASCII only, no whitespace —
@@ -1662,7 +1716,7 @@ function mulberry32(seed: number): () => number {
  */
 export function generateAdversarialCases(seed: number): string[] {
   const rand = mulberry32(seed)
-  const cases: string[] = [...ADVERSARIAL_EDGE_CORPUS]
+  const cases: string[] = ADVERSARIAL_EDGE_CORPUS.map((e) => e.input)
   const soupCount = 4
   const permutationCount = ADVERSARIAL_PROBE_CASE_COUNT - ADVERSARIAL_EDGE_CORPUS.length - soupCount
   for (let i = 0; i < soupCount; i++) {
@@ -1674,7 +1728,7 @@ export function generateAdversarialCases(seed: number): string[] {
     cases.push(s)
   }
   for (let i = 0; i < permutationCount; i++) {
-    const shuffled = [...ADVERSARIAL_EDGE_CORPUS]
+    const shuffled = ADVERSARIAL_EDGE_CORPUS.map((e) => e.input)
     for (let j = shuffled.length - 1; j > 0; j--) {
       const k = Math.floor(rand() * (j + 1))
       const tmp = shuffled[j]!
@@ -1686,12 +1740,36 @@ export function generateAdversarialCases(seed: number): string[] {
   return cases.map((c) => c.slice(0, ADVERSARIAL_PROBE_MAX_CASE_CHARS))
 }
 
+/**
+ * The engine-authored per-case expectations for a generated case list (T-062,
+ * register R16 — the exported, pure seam beside generateAdversarialCases):
+ * corpus-position cases (the list's seed-independent prefix, matched by index
+ * AND content against ADVERSARIAL_EDGE_CORPUS) carry their authored
+ * expectation; every other case — the seeded soup and corpus permutations,
+ * whatever their content — expects 'exit-0'. Expectations are therefore a
+ * function of the ENGINE-AUTHORED corpus alone, never of the seed's random
+ * tail: same seed → byte-identical case list AND byte-identical expectation
+ * list, and different seeds share the identical expectation list too (the
+ * corpus prefix is seed-independent, the tail uniformly 'exit-0'). Total and
+ * deterministic: for any list without a corpus match at an index the answer
+ * is 'exit-0'. Gate 1.48 recomputes and pins both byte-equalities.
+ */
+export function adversarialCaseExpectations(cases: readonly string[]): AdversarialCaseExpectation[] {
+  return cases.map((c, i) => {
+    const authored = ADVERSARIAL_EDGE_CORPUS[i]
+    return authored !== undefined && authored.input === c ? authored.expectation : 'exit-0'
+  })
+}
+
 /** The machine-readable per-case table of an adversarial probe (T-032) —
  *  the 'report' evidence-artifact kind's THIRD producer (T-018's benchmark
  *  results table the first, T-024's web response the second): written
  *  beside the bundle as <probeId>.results.json. Every recorded input is
  *  truncated to ADVERSARIAL_PROBE_MAX_CASE_CHARS, so the file stays bounded
- *  whatever the generated cases were. */
+ *  whatever the generated cases were. Since T-062 each case row carries its
+ *  engine-authored expectation beside the outcome class, and the table
+ *  counts the new classes honestly beside the unchanged casesRun /
+ *  casesCrashed (casesRejected, casesUnexpectedExit0 — no silent merge). */
 function adversarialResultsArtifact(
   environment: EnvironmentSpec,
   results: {
@@ -1701,6 +1779,8 @@ function adversarialResultsArtifact(
     cases: AdversarialCaseRecord[]
     casesRun: number
     casesCrashed: number
+    casesRejected: number
+    casesUnexpectedExit0: number
   },
 ): EvidenceArtifactRef {
   const dir = probeEvidenceDir(environment.artifactsDir, environment.candidateId)
@@ -1724,10 +1804,25 @@ function adversarialResultsArtifact(
  *     holds the contract too for a directly constructed scenario — a
  *     refusal here is a thrown Error, recorded by the runner's failedBundle
  *     path, never a crash of the run, and never a silent unseeded fuzz.
- *   - Crash/survival vocabulary: a case SURVIVES when the target spawned
- *     cleanly, exited 0, and did not time out; it CRASHES when it ran and
- *     exited non-zero or timed out; a SPAWN-REFUSED case produced no run —
- *     neither survived nor crashed.
+ *   - Crash/survival vocabulary (expectation-aware since T-062, register
+ *     R16): every case carries its ENGINE-AUTHORED expectation ('exit-0' or
+ *     'reject', adversarialCaseExpectations — a function of the corpus, never
+ *     of the target or the seed's random tail). A case SURVIVES when the
+ *     target spawned cleanly, exited 0, did not time out, and exit-0 was the
+ *     expectation; it is REJECTED-AS-EXPECTED when it spawned cleanly, exited
+ *     non-zero within the budget, and reject was the expectation (correct
+ *     input validation — counts toward survival); it is UNEXPECTED-EXIT-0
+ *     when it spawned cleanly, exited 0, and reject was the expectation (the
+ *     no-op handler that never reads argv — an unmet expectation); it CRASHES
+ *     (crashed-exit / crashed-timeout) when it ran, exit-0 was the
+ *     expectation, and it exited non-zero or timed out; a SPAWN-REFUSED case
+ *     produced no run — none of the above. A timeout or spawn refusal is
+ *     NEVER survival on either expectation (a reject-expected case that times
+ *     out records crashed-timeout, not rejection — the T-032 refusal
+ *     vocabulary unchanged). Honest boundary: a clean non-zero exit is
+ *     indistinguishable at the process boundary from an unhandled throw on
+ *     the same input — both record rejected-as-expected; non-zero exit is
+ *     non-zero exit.
  *   - Every case runs, sequentially, regardless of earlier outcomes —
  *     evidence about crashes is the point. Each case gets the FULL
  *     timeoutMs budget (default DEFAULT_PROBE_TIMEOUT_MS): a per-case
@@ -1736,21 +1831,27 @@ function adversarialResultsArtifact(
  *     duration` (unit ms) per case that actually ran (a crashing or
  *     timing-out case still ran — its durationMs is real wall-clock
  *     evidence; a spawn-refused case produced no run and gets none), plus
- *     `cases-run` and `cases-crashed` counts (unit 'cases').
+ *     `cases-run`, `cases-crashed`, `cases-rejected`, and
+ *     `cases-unexpected-exit-0` counts (unit 'cases') — cases-crashed keeps
+ *     its T-032 meaning (crashed-exit + crashed-timeout only).
  *   - Success = the case list is non-empty AND every case spawned cleanly
- *     AND every case survived. Zero completed cases is success: false,
+ *     AND every case met its expectation (survived or rejected-as-expected;
+ *     `passed: outcome === 'survived' || outcome === 'rejected-as-expected'`
+ *     at the case-gate mapping). Zero completed cases is success: false,
  *     never a pass (AGENTS.md #7 applied to bundles). `error` names the
  *     FIRST breaking case with counts ("case 3/20 exited with code 1" /
  *     "case 5/20 timed out after Nms" / "case 1/20 could not be spawned:
- *     ENOENT").
+ *     ENOENT" / "case 1/20 exited 0 where rejection was expected (input
+ *     invalid by construction)").
  *   - NO verdict input of any kind: no threshold, no assertion, no model
  *     opinion — the probe records, never judges (decisions.md 2026-10-10),
  *     and a success:false adversarial bundle changes nothing downstream.
  *   - Artifacts: the combined output of all cases in one .log artifact
  *     with `=== case <i> ===` separators, plus the 'report'-kind per-case
  *     table <probeId>.results.json — {probeId, scenarioId, seed, cases:
- *     [{index, input, outcome, durationMs?}], casesRun, casesCrashed},
- *     every input truncated to ADVERSARIAL_PROBE_MAX_CASE_CHARS.
+ *     [{index, input, expectation, outcome, durationMs?}], casesRun,
+ *     casesCrashed, casesRejected, casesUnexpectedExit0}, every input
+ *     truncated to ADVERSARIAL_PROBE_MAX_CASE_CHARS.
  *   - gateResults: one GateResult entry per case, in case order, named
  *     '<probeId>#case-<i>' so each case's evidence row is self-naming. */
 export class AdversarialProbe implements Probe {
@@ -1773,6 +1874,10 @@ export class AdversarialProbe implements Probe {
       throw new Error(`adversarial probe '${this.id}': seed must be a positive integer >= 1 (got ${JSON.stringify(seed)})`)
     }
     const cases = generateAdversarialCases(seed)
+    // T-062: the engine-authored per-case expectations, recomputed from the
+    // generated list (a pure function of the corpus — never of the target's
+    // behavior, never of the seed's random tail beyond the list itself).
+    const expectations = adversarialCaseExpectations(cases)
     const timeoutMs = s.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS
     const measurements: Measurement[] = []
     const gateResults: GateResult[] = []
@@ -1784,10 +1889,13 @@ export class AdversarialProbe implements Probe {
     const logParts = new BoundedProbeLog()
     let casesRun = 0
     let casesCrashed = 0
+    let casesRejected = 0
+    let casesUnexpectedExit0 = 0
     let firstError: string | undefined
     for (let i = 0; i < cases.length; i++) {
       const n = i + 1
       const c = cases[i]!
+      const expectation = expectations[i]!
       logParts.push(`=== case ${n} ===`)
       const execution = await executeProbeCommand(
         { exe: s.command.exe, args: [...s.command.args, c] },
@@ -1795,14 +1903,26 @@ export class AdversarialProbe implements Probe {
         timeoutMs,
       )
       logParts.push(execution.output)
+      // T-062: the outcome class is expectation-aware. A timeout or spawn
+      // refusal keeps exactly its T-032 meaning on either expectation (never
+      // survival); a non-zero exit records rejected-as-expected exactly when
+      // the engine authored 'reject' for the case (correct input validation),
+      // crashed-exit otherwise; an exit 0 records survived exactly when
+      // exit-0 was the expectation — the no-op handler that accepts an
+      // invalid-by-construction input records unexpected-exit-0, an unmet
+      // expectation, never survival (register R16's inversion fixed).
       const outcome: AdversarialCaseRecord['outcome'] = execution.spawnError !== undefined
         ? 'spawn-refused'
         : execution.timedOut
           ? 'crashed-timeout'
-          : execution.exitCode !== 0
-            ? 'crashed-exit'
-            : 'survived'
-      gateResults.push(toGateResult(`${this.id}#case-${n}`, execution, { passed: outcome === 'survived' }))
+          : expectation === 'reject' && execution.exitCode !== 0
+            ? 'rejected-as-expected'
+            : execution.exitCode !== 0
+              ? 'crashed-exit'
+              : expectation === 'reject'
+                ? 'unexpected-exit-0'
+                : 'survived'
+      gateResults.push(toGateResult(`${this.id}#case-${n}`, execution, { passed: outcome === 'survived' || outcome === 'rejected-as-expected' }))
       if (outcome !== 'spawn-refused') {
         // The case ran — its wall-clock duration is evidence even when it
         // crashed or timed out. A spawn-refused case produced no run.
@@ -1810,9 +1930,12 @@ export class AdversarialProbe implements Probe {
         measurements.push({ name: `case-${n} duration`, value: execution.durationMs, unit: 'ms' })
       }
       if (outcome === 'crashed-exit' || outcome === 'crashed-timeout') casesCrashed++
+      if (outcome === 'rejected-as-expected') casesRejected++
+      if (outcome === 'unexpected-exit-0') casesUnexpectedExit0++
       caseRows.push({
         index: n,
         input: c.slice(0, ADVERSARIAL_PROBE_MAX_CASE_CHARS),
+        expectation,
         outcome,
         ...(outcome !== 'spawn-refused' ? { durationMs: execution.durationMs } : {}),
       })
@@ -1823,18 +1946,24 @@ export class AdversarialProbe implements Probe {
           firstError = `case ${n}/${cases.length} timed out after ${timeoutMs}ms`
         } else if (outcome === 'crashed-exit') {
           firstError = `case ${n}/${cases.length} exited with code ${execution.exitCode}`
+        } else if (outcome === 'unexpected-exit-0') {
+          firstError = `case ${n}/${cases.length} exited 0 where rejection was expected (input invalid by construction)`
         }
       }
     }
     // Recorded regardless of success — evidence about crashes is the point.
+    // cases-crashed keeps its T-032 meaning; the T-062 classes are counted
+    // honestly beside it (no silent merge into survived or crashed).
     measurements.push(
       { name: 'cases-run', value: casesRun, unit: 'cases' },
       { name: 'cases-crashed', value: casesCrashed, unit: 'cases' },
+      { name: 'cases-rejected', value: casesRejected, unit: 'cases' },
+      { name: 'cases-unexpected-exit-0', value: casesUnexpectedExit0, unit: 'cases' },
     )
     // Success = the case list is non-empty AND every case spawned cleanly
-    // AND every case survived; zero completed cases is never a pass
-    // (AGENTS.md #7 applied to bundles).
-    const success = cases.length > 0 && casesRun === cases.length && casesCrashed === 0
+    // AND every case met its expectation (survived or rejected-as-expected);
+    // zero completed cases is never a pass (AGENTS.md #7 applied to bundles).
+    const success = cases.length > 0 && casesRun === cases.length && casesCrashed === 0 && casesUnexpectedExit0 === 0
     const log = writeProbeLog(input.environment, this.id, logParts.text(), logParts.droppedBytes)
     const bundle: EvidenceBundle = {
       probeId: this.id,
@@ -1849,6 +1978,8 @@ export class AdversarialProbe implements Probe {
           cases: caseRows,
           casesRun,
           casesCrashed,
+          casesRejected,
+          casesUnexpectedExit0,
         }),
       ],
       measurements,

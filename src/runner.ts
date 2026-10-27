@@ -1648,12 +1648,19 @@ async function runProbes(job: ResolvedJob, opts: SkeletonOptions, lease: Workspa
     console.log(`[${job.id}] probe ${probe.id}: ${bundle.success ? 'PASS' : 'FAIL'} (${((Date.now() - started) / 1000).toFixed(1)}s)`)
     try {
       const bundlePath = writeEvidenceBundle(bundle, { artifactsDir: opts.artifactsDir, candidateId: job.id })
+      // T-062 (register R16): carry the bundle's rejected-as-expected count
+      // onto the summary — present ONLY when non-zero (adversarial probes;
+      // the CandidateReport.probes optional-field pattern), so the composer
+      // can render correct argv validation as validated input handling and
+      // every other report is byte-identical. Evidence, never a verdict.
+      const rejected = bundle.measurements.find((m) => m.name === 'cases-rejected' && m.unit === 'cases')
       summaries.push({
         probeId: probe.id,
         scenarioId: probe.scenario.id,
         success: bundle.success,
         durationMs: Date.now() - started,
         bundlePath,
+        ...(rejected !== undefined && rejected.value > 0 ? { casesRejected: rejected.value } : {}),
       })
     } catch (e) {
       console.log(`[${job.id}] probe ${probe.id}: evidence write failed: ${errorMessage(e)}`)

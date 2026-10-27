@@ -1,6 +1,10 @@
 // Probe-layer self-check (Gate 1.15, fast tier, T-015; extended in place by
 // T-018 — the benchmark probe — T-019 — the screenshot probe — T-024 —
-// the web/server probe — and T-032 — the adversarial probe) — run under tsx:
+// the web/server probe — T-032 — the adversarial probe — and T-062, which
+// rewired the adversarial faces onto the expectation-aware outcome classes:
+// rejected-as-expected / unexpected-exit-0 beside the unchanged
+// crashed-exit / crashed-timeout / spawn-refused, per-case engine-authored
+// expectations on the corpus) — run under tsx:
 //   node node_modules/tsx/dist/cli.mjs scripts/check-probe.mjs
 // Three legs, zero model tokens (the tickets' Verification sections):
 //   1. contract fixtures — the EvidenceBundle validator's accept/refuse faces
@@ -47,6 +51,7 @@ import {
   PNG_MAGIC,
   WEB_PROBE_MAX_BODY_BYTES,
   WEB_PROBE_SNIPPET_BYTES,
+  adversarialCaseExpectations,
   createProbe,
   evidenceBundlePath,
   generateAdversarialCases,
@@ -111,6 +116,37 @@ const ADV_FUZZEE_SOURCE = [
   '}',
   "console.log('survived')",
 ].join('\n') + '\n'
+
+// T-062: the expectation-aware derivation over the fuzzee's known weak spot
+// — shared by the P3 direct faces and the P5 e2e face. advFuzzeeOutcomes
+// recomputes the per-case outcome classes (weak-spot exit × the recomputed
+// authored expectation); advIdxWhere selects the case indices carrying one
+// of the given classes; advFuzzeeFirstError renders the expected FIRST
+// breaking-case error (the fuzzee's crash exit code is always 1). Every
+// value is derived from the exported pure functions + the known weak spot,
+// never trusted from the bundle.
+const advCrashesOn = (c) => !Number.isFinite(Number(c))
+const advFuzzeeOutcomeOf = (c, expectation) => (advCrashesOn(c)
+  ? (expectation === 'reject' ? 'rejected-as-expected' : 'crashed-exit')
+  : (expectation === 'reject' ? 'unexpected-exit-0' : 'survived'))
+const advFuzzeeOutcomes = (cases) => {
+  const expectations = adversarialCaseExpectations(cases)
+  return cases.map((c, i) => advFuzzeeOutcomeOf(c, expectations[i]))
+}
+const advIdxWhere = (outcomes, classes) => outcomes
+  .map((o, i) => (classes.includes(o) ? i + 1 : 0))
+  .filter((i) => i > 0)
+const advFuzzeeFirstError = (outcomes) => {
+  for (let i = 0; i < outcomes.length; i++) {
+    if (outcomes[i] === 'unexpected-exit-0') {
+      return `case ${i + 1}/${outcomes.length} exited 0 where rejection was expected (input invalid by construction)`
+    }
+    if (outcomes[i] === 'crashed-exit') {
+      return `case ${i + 1}/${outcomes.length} exited with code 1`
+    }
+  }
+  return undefined
+}
 
 rmSync(sandbox, { recursive: true, force: true })
 mkdirSync(sandbox, { recursive: true })
@@ -963,16 +999,18 @@ async function main() {
     // check recomputes the case list from the scenario's seed via the
     // exported generateAdversarialCases and derives the expected crash
     // subset from the strings themselves, so every face pins the probe
-    // against an independently-computed expectation.
+    // against an independently-computed expectation. Since T-062 the
+    // derivation is EXPECTATION-AWARE: the recomputed per-case expectations
+    // (adversarialCaseExpectations) overlay the weak-spot subset — the
+    // malformed inputs the fuzzee exits 1 on are rejected-as-expected
+    // (correct validation, passed rows), its exit 0 on the reject-expected
+    // empty string is unexpected-exit-0 (the no-op acceptance, a failed
+    // row), and only the exit-0-expected crashes stay crashed-exit.
     const advFx = join(sandbox, 'adv-fx')
     mkdirSync(advFx, { recursive: true })
     const advArtifacts = join(advFx, 'artifacts')
     const advEnv = directEnv(advArtifacts)
     const advWs = directLease(advFx)
-    const advCrashesOn = (c) => !Number.isFinite(Number(c))
-    const crashIndicesOf = (cases) => cases
-      .map((c, i) => (advCrashesOn(c) ? i + 1 : 0))
-      .filter((i) => i > 0)
 
     // Determinism of the generator itself, token-free (the exported pure
     // function recomputed here, never trusted from the bundle).
@@ -987,38 +1025,52 @@ async function main() {
     writeFileSync(join(advFx, 'adv-fuzzee.js'), ADV_FUZZEE_SOURCE)
     const advScenario = (id, seed) => ({ id, type: 'adversarial', command: { exe: process.execPath, args: ['adv-fuzzee.js'] }, seed })
 
-    // Crash face — the weak-spot fixture crashes on the known subset.
+    // Crash face — the weak-spot fixture: the T-062 outcome classes over the
+    // independently-known weak-spot subset. The fuzzee VALIDATES the
+    // malformed corpus inputs (rejected-as-expected, passed rows), accepts
+    // the reject-expected empty string (unexpected-exit-0, the FIRST
+    // breaking case), and crashes the exit-0-expected non-finite cases.
     const advCrash = await runDirect(advScenario('adv-crash', 42), advWs, advEnv)
-    const advExpectedCrashIdx = crashIndicesOf(advSeedCases)
-    const advExpectedSurviveIdx = advSeedCases.map((_, i) => i + 1).filter((i) => !advExpectedCrashIdx.includes(i))
+    const advExpectedOutcomes = advFuzzeeOutcomes(advSeedCases)
+    const advSeedExpectations = adversarialCaseExpectations(advSeedCases)
+    const advExpectedFailedIdx = advIdxWhere(advExpectedOutcomes, ['crashed-exit', 'unexpected-exit-0'])
+    const advExpectedPassedIdx = advIdxWhere(advExpectedOutcomes, ['survived', 'rejected-as-expected'])
+    const advExpectedCrashedIdx = advIdxWhere(advExpectedOutcomes, ['crashed-exit'])
+    const advExpectedRejectedIdx = advIdxWhere(advExpectedOutcomes, ['rejected-as-expected'])
+    const advExpectedUnexpectedIdx = advIdxWhere(advExpectedOutcomes, ['unexpected-exit-0'])
     const advCrashResultsRef = advCrash.artifacts.find((a) => a.kind === 'report')
     const advCrashResults = advCrashResultsRef !== undefined && existsSync(advCrashResultsRef.path)
       ? JSON.parse(read(advCrashResultsRef.path))
       : null
-    t('P3 (T-032): crash face — the weak-spot fuzzee crashes on the independently-known subset: success false, error names the FIRST breaking case with counts',
+    t('P3 (T-032/T-062): crash face — the weak-spot fuzzee under expectations: success false (the empty-string acceptance breaks first), error names the FIRST breaking case with the T-062 vocabulary',
       advCrash.success === false
-      && advExpectedCrashIdx.length > 0 && advExpectedCrashIdx.length < ADVERSARIAL_PROBE_CASE_COUNT
-      && advCrash.error === `case ${advExpectedCrashIdx[0]}/${ADVERSARIAL_PROBE_CASE_COUNT} exited with code 1`)
-    t('P3 (T-032): crash face — exactly that subset recorded as failed <id>#case-<i> rows (in case order), every other row passed',
+      && advExpectedFailedIdx.length > 0 && advExpectedFailedIdx.length < ADVERSARIAL_PROBE_CASE_COUNT
+      && advExpectedRejectedIdx.length > 0
+      && advCrash.error === advFuzzeeFirstError(advExpectedOutcomes))
+    t('P3 (T-032/T-062): crash face — exactly the crashed-exit + unexpected-exit-0 cases recorded as failed <id>#case-<i> rows (in case order), every survived AND rejected-as-expected row passed',
       advCrash.gateResults.length === ADVERSARIAL_PROBE_CASE_COUNT
-      && eq(advCrash.gateResults.filter((g) => !g.passed).map((g) => g.name), advExpectedCrashIdx.map((i) => `adv-crash#case-${i}`))
-      && eq(advCrash.gateResults.filter((g) => g.passed).map((g) => g.name), advExpectedSurviveIdx.map((i) => `adv-crash#case-${i}`)))
-    t('P3 (T-032): crash face — cases-crashed equals the subset size, cases-run the full count, one duration per ran case (all ran), durations unit ms',
-      advCrash.measurements.some((m) => m.name === 'cases-crashed' && m.unit === 'cases' && m.value === advExpectedCrashIdx.length)
+      && eq(advCrash.gateResults.filter((g) => !g.passed).map((g) => g.name), advExpectedFailedIdx.map((i) => `adv-crash#case-${i}`))
+      && eq(advCrash.gateResults.filter((g) => g.passed).map((g) => g.name), advExpectedPassedIdx.map((i) => `adv-crash#case-${i}`)))
+    t('P3 (T-032/T-062): crash face — cases-crashed keeps its T-032 meaning (crashed-exit only, the malformed-input exits NOT merged into it), cases-rejected and cases-unexpected-exit-0 counted honestly beside it, cases-run the full count, durations unit ms',
+      advCrash.measurements.some((m) => m.name === 'cases-crashed' && m.unit === 'cases' && m.value === advExpectedCrashedIdx.length)
+      && advCrash.measurements.some((m) => m.name === 'cases-rejected' && m.unit === 'cases' && m.value === advExpectedRejectedIdx.length)
+      && advCrash.measurements.some((m) => m.name === 'cases-unexpected-exit-0' && m.unit === 'cases' && m.value === advExpectedUnexpectedIdx.length)
       && advCrash.measurements.some((m) => m.name === 'cases-run' && m.unit === 'cases' && m.value === ADVERSARIAL_PROBE_CASE_COUNT)
       && advCrash.measurements.filter((m) => /^case-\d+ duration$/.test(m.name)).length === ADVERSARIAL_PROBE_CASE_COUNT
-      && advCrash.measurements.every((m) => m.unit === (m.name === 'cases-run' || m.name === 'cases-crashed' ? 'cases' : 'ms')))
-    t('P3 (T-032): crash face — the report-kind results artifact parses; its recorded inputs match the recomputed list case-for-case (every input bounded); outcomes match the independently-derived subset',
+      && advCrash.measurements.every((m) => m.unit === (/^cases-/.test(m.name) ? 'cases' : 'ms')))
+    t('P3 (T-032/T-062): crash face — the report-kind results artifact parses; its recorded inputs match the recomputed list case-for-case (every input bounded); expectations match the recomputed list; outcomes match the independently-derived expectation-aware mapping; the count fields agree',
       advCrashResultsRef !== undefined && advCrashResultsRef.kind === 'report' && advCrashResultsRef.sizeBytes > 0
       && advCrashResultsRef.name === 'adv-crash.results.json'
       && advCrashResultsRef.path === join(advArtifacts, 'probes', 'direct', 'adv-crash.results.json')
       && advCrashResults !== null
       && advCrashResults.probeId === 'adv-crash' && advCrashResults.scenarioId === 'adv-crash' && advCrashResults.seed === 42
-      && advCrashResults.casesRun === ADVERSARIAL_PROBE_CASE_COUNT && advCrashResults.casesCrashed === advExpectedCrashIdx.length
+      && advCrashResults.casesRun === ADVERSARIAL_PROBE_CASE_COUNT && advCrashResults.casesCrashed === advExpectedCrashedIdx.length
+      && advCrashResults.casesRejected === advExpectedRejectedIdx.length && advCrashResults.casesUnexpectedExit0 === advExpectedUnexpectedIdx.length
       && advCrashResults.cases.length === ADVERSARIAL_PROBE_CASE_COUNT
       && advCrashResults.cases.every((r, i) => r.index === i + 1 && r.input === advSeedCases[i])
       && advCrashResults.cases.every((r) => r.input.length <= ADVERSARIAL_PROBE_MAX_CASE_CHARS)
-      && advCrashResults.cases.every((r) => r.outcome === (advCrashesOn(r.input) ? 'crashed-exit' : 'survived'))
+      && advCrashResults.cases.every((r, i) => r.expectation === advSeedExpectations[i])
+      && advCrashResults.cases.every((r, i) => r.outcome === advExpectedOutcomes[i])
       && advCrashResults.cases.every((r) => typeof r.durationMs === 'number'))
     t('P3 (T-032): the crash bundle passes the validator and its combined .log carries the === case <i> === separators',
       validateEvidenceBundle(JSON.parse(JSON.stringify(advCrash))).success === false
@@ -1037,29 +1089,46 @@ async function main() {
       && eq(outcomeShape(advReplay), outcomeShape(advCrash))
       && advReplay.error === advCrash.error)
 
-    // No-crash face — a robust target: success true with cases-crashed 0.
+    // No-op face — the T-062 flip of the old "no-crash face": a target that
+    // exits 0 on EVERY input without ever reading argv was probe-success
+    // before T-062 (register R16's undetectable no-op handler, the exact
+    // inversion the ticket fixes). Since T-062 the engine-authored corpus
+    // expects rejection of the invalid-by-construction inputs, so this
+    // target records exactly the reject-expected cases as unexpected-exit-0
+    // (failed rows, probe success false) while every exit-0-expected case
+    // still survives — validation is detectable, no-op is not rewardable.
     writeFileSync(join(advFx, 'adv-robust.js'), [
       "console.log('robust got ' + JSON.stringify(process.argv[2] ?? ''))",
       "console.log('survived')",
     ].join('\n') + '\n')
     const advRobust = await runDirect({ id: 'adv-robust', type: 'adversarial', command: { exe: process.execPath, args: ['adv-robust.js'] }, seed: 7 }, advWs, advEnv)
-    t('P3 (T-032): no-crash face — a robust target: success true, cases-crashed 0, cases-run the full count, every <id>#case-<i> row passed',
-      advRobust.success === true && advRobust.error === undefined
+    const advRobustCases = generateAdversarialCases(7)
+    const advRobustExpectations = adversarialCaseExpectations(advRobustCases)
+    const advRobustNoopOutcomes = advRobustCases.map((_, i) => (advRobustExpectations[i] === 'reject' ? 'unexpected-exit-0' : 'survived'))
+    const advRobustUnexpectedIdx = advIdxWhere(advRobustNoopOutcomes, ['unexpected-exit-0'])
+    t('P3 (T-062): no-op face — a target that never reads argv: success FALSE (the T-032-era success true was R16\'s inversion), exactly the reject-expected cases recorded unexpected-exit-0 with failed rows and error naming case 1, every exit-0-expected case survived and passed',
+      advRobust.success === false
+      && advRobust.error === `case 1/${ADVERSARIAL_PROBE_CASE_COUNT} exited 0 where rejection was expected (input invalid by construction)`
       && advRobust.gateResults.length === ADVERSARIAL_PROBE_CASE_COUNT
-      && advRobust.gateResults.every((g, i) => g.name === `adv-robust#case-${i + 1}` && g.passed && g.exitCode === 0)
+      && eq(advRobust.gateResults.filter((g) => !g.passed).map((g) => g.name), advRobustUnexpectedIdx.map((i) => `adv-robust#case-${i}`))
+      && advRobust.gateResults.filter((g) => !g.passed).every((g) => g.exitCode === 0)
       && advRobust.measurements.some((m) => m.name === 'cases-run' && m.value === ADVERSARIAL_PROBE_CASE_COUNT)
       && advRobust.measurements.some((m) => m.name === 'cases-crashed' && m.value === 0)
+      && advRobust.measurements.some((m) => m.name === 'cases-rejected' && m.value === 0)
+      && advRobust.measurements.some((m) => m.name === 'cases-unexpected-exit-0' && m.value === advRobustUnexpectedIdx.length)
       && advRobust.measurements.filter((m) => /^case-\d+ duration$/.test(m.name)).length === ADVERSARIAL_PROBE_CASE_COUNT
-      && validateEvidenceBundle(JSON.parse(JSON.stringify(advRobust))).success === true)
+      && validateEvidenceBundle(JSON.parse(JSON.stringify(advRobust))).success === false)
 
     // Spawn-refusal / zero-completed face — a non-existent exe: success
     // false with ZERO case durations, never a pass (AGENTS.md #7).
     const advRefused = await runDirect({ id: 'adv-refused', type: 'adversarial', command: { exe: 'definitely-not-a-real-exe-4f8a2b', args: [] }, seed: 42 }, advWs, advEnv)
-    t(`P3 (T-032): spawn-refusal / zero-completed face — a non-existent exe: success false, zero case-<i> durations, cases-run 0, every row spawn-refused, error names case 1, never a pass`,
+    t(`P3 (T-032/T-062): spawn-refusal / zero-completed face — a non-existent exe: success false, zero case-<i> durations, cases-run 0, cases-crashed/rejected/unexpected-exit-0 all 0 (a refusal is never survival on any expectation), every row spawn-refused, error names case 1, never a pass`,
       advRefused.success === false
       && advRefused.measurements.filter((m) => /^case-\d+ duration$/.test(m.name)).length === 0
       && advRefused.measurements.some((m) => m.name === 'cases-run' && m.value === 0)
       && advRefused.measurements.some((m) => m.name === 'cases-crashed' && m.value === 0)
+      && advRefused.measurements.some((m) => m.name === 'cases-rejected' && m.value === 0)
+      && advRefused.measurements.some((m) => m.name === 'cases-unexpected-exit-0' && m.value === 0)
       && advRefused.gateResults.length === ADVERSARIAL_PROBE_CASE_COUNT
       && advRefused.gateResults.every((g, i) => g.name === `adv-refused#case-${i + 1}` && !g.passed && g.exitCode === null)
       && typeof advRefused.error === 'string'
@@ -1406,21 +1475,32 @@ async function main() {
     // T-032: the adversarial probe in a real pipeline — bundle
     // correspondence, the on-disk 'report' per-case results artifact (every
     // recorded input bounded and matching the recomputed seed-7 list), and
-    // survival untouched by the adversarial outcome.
+    // survival untouched by the adversarial outcome. Since T-062 the
+    // expected outcomes/counts are derived through the recomputed
+    // expectations (the P3 expectation-aware derivation): the fuzzee
+    // validates the malformed corpus inputs (rejected-as-expected), accepts
+    // the reject-expected empty string (unexpected-exit-0 — the FIRST
+    // breaking case at seed 7), and crashes the exit-0-expected subset.
     const advBundleA = JSON.parse(read(join(rA.artifactsDir, 'probes', 'job-a', 'adv-check.json')))
     const advReportA = advBundleA.artifacts?.find((a2) => a2.kind === 'report')
     const advE2eCases = generateAdversarialCases(7)
-    const advE2eCrashIdx = advE2eCases.findIndex((c) => !Number.isFinite(Number(c))) + 1
-    const advE2eCrashed = advE2eCases.filter((c) => !Number.isFinite(Number(c))).length
-    t('P5: the adversarial bundle is validator-clean (success false), its summary agrees, one GateResult row per case self-named <id>#case-<i>, error names the FIRST breaking case, and the counts match the independently recomputed seed-7 list',
+    const advE2eOutcomes = advFuzzeeOutcomes(advE2eCases)
+    const advE2eExpectations = adversarialCaseExpectations(advE2eCases)
+    const advE2eCrashed = advIdxWhere(advE2eOutcomes, ['crashed-exit']).length
+    const advE2eRejected = advIdxWhere(advE2eOutcomes, ['rejected-as-expected']).length
+    const advE2eUnexpected = advIdxWhere(advE2eOutcomes, ['unexpected-exit-0']).length
+    t('P5: the adversarial bundle is validator-clean (success false), its summary agrees — carrying casesRejected, one GateResult row per case self-named <id>#case-<i>, error names the FIRST breaking case, and the counts match the independently recomputed expectation-aware seed-7 derivation',
       validateEvidenceBundle(advBundleA).success === false
       && cA?.probes?.[5]?.success === false && cA?.probes?.[5]?.probeId === 'adv-check'
-      && advBundleA.error === `case ${advE2eCrashIdx}/${ADVERSARIAL_PROBE_CASE_COUNT} exited with code 1`
+      && cA?.probes?.[5]?.casesRejected === advE2eRejected
+      && advBundleA.error === advFuzzeeFirstError(advE2eOutcomes)
       && advBundleA.measurements.some((m) => m.name === 'cases-run' && m.value === ADVERSARIAL_PROBE_CASE_COUNT)
       && advBundleA.measurements.some((m) => m.name === 'cases-crashed' && m.value === advE2eCrashed)
+      && advBundleA.measurements.some((m) => m.name === 'cases-rejected' && m.value === advE2eRejected)
+      && advBundleA.measurements.some((m) => m.name === 'cases-unexpected-exit-0' && m.value === advE2eUnexpected)
       && advBundleA.gateResults.length === ADVERSARIAL_PROBE_CASE_COUNT
       && advBundleA.gateResults.every((g, i) => g.name === `adv-check#case-${i + 1}`))
-    t('P5: the adversarial report-kind results artifact is real on disk (under the artifacts dir), parses, records the seed, and every recorded input is bounded by ADVERSARIAL_PROBE_MAX_CASE_CHARS and matches the recomputed list case-for-case',
+    t('P5: the adversarial report-kind results artifact is real on disk (under the artifacts dir), parses, records the seed, and every recorded input is bounded by ADVERSARIAL_PROBE_MAX_CASE_CHARS and matches the recomputed list case-for-case, expectations and outcomes matching the expectation-aware derivation',
       advReportA !== undefined && advReportA.kind === 'report' && advReportA.name === 'adv-check.results.json'
       && advReportA.path === join(rA.artifactsDir, 'probes', 'job-a', 'adv-check.results.json')
       && typeof cA?.workspacePath === 'string' && cA.workspacePath.length > 0 && !advReportA.path.startsWith(cA.workspacePath)
@@ -1429,9 +1509,11 @@ async function main() {
         const table = JSON.parse(read(advReportA.path))
         return table.probeId === 'adv-check' && table.scenarioId === 'adv-check' && table.seed === 7
           && table.casesRun === ADVERSARIAL_PROBE_CASE_COUNT && table.casesCrashed === advE2eCrashed
+          && table.casesRejected === advE2eRejected && table.casesUnexpectedExit0 === advE2eUnexpected
           && table.cases.length === ADVERSARIAL_PROBE_CASE_COUNT
           && table.cases.every((r, i) => r.index === i + 1 && r.input === advE2eCases[i])
           && table.cases.every((r) => r.input.length <= ADVERSARIAL_PROBE_MAX_CASE_CHARS)
+          && table.cases.every((r, i) => r.expectation === advE2eExpectations[i] && r.outcome === advE2eOutcomes[i])
       })())
     t('P5: a passing-gates/FAILING-adversarial job still PASSES — the adversarial outcome never enters a verdict',
       cA?.passedAllGates === true
