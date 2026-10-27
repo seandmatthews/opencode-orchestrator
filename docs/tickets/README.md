@@ -100,4 +100,4 @@ Rules:
 | T-061 | Embedded-evidence fencing: fenced, capped, role-labeled blocks at the retry-brief and round-composer seams (register R5) | medium | done 2026-10-27 |
 | T-062 | Adversarial-probe expected outcomes: correct input validation stops recording as a crash — per-case expectations on the engine-authored corpus (register R16) | medium | done 2026-10-27 |
 | T-063 | Probe construction-path validation: the capture-path contract enforced at the class boundary, not only in parseJobsSpec (register R18) | low | done 2026-10-27 |
-| T-064 | The no-gates warning tells the truth: elimination, not vacuous passing (register R8 — the T-043 fold never landed) | low | proposed |
+| T-064 | The no-gates warning tells the truth: elimination, not vacuous passing (register R8 — the T-043 fold never landed) | low | done 2026-10-27 |

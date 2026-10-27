@@ -5882,6 +5882,79 @@ helpers (`probeEvidenceDir`, `evidenceBundlePath`, `probeArtifactName`,
 `parseJobsSpec` change — the two sides are pinned non-divergent, so a
 change on either side must re-run this gate.
 
+## Gate 1.50 — the no-gates warning tells the truth: elimination, not vacuous passing (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-no-gates-warning.mjs
+```
+
+Pins T-064 (register R8, the T-043 fold that never landed): the pre-T-064
+no-gates console line read `warning: no --gate given; every candidate
+passes vacuously` while the ladder does the opposite —
+`base.passedAllGates = base.gates.length > 0 && …` (src/runner.ts) — so a
+run with no gates FAILS every candidate on the zero-gate leg, and an
+operator who read the warning and proceeded lost every candidate to a rule
+they were told did not exist. The change is the line and its trigger,
+nothing else: the warning now states elimination ("the ladder eliminates
+every candidate on the zero-gate leg (passing requires at least one
+gate)") and names both remedies (pass `--gate "name=command"` for a
+survival bar; `--jobs` probes for an evidence-only run), and it fires on
+the run's EFFECTIVE gate set — the same deduplicated union the baseline
+check uses (`distinctGatesFor`, src/cli.ts) — because a `--jobs` run whose
+jobs carry their own gates HAS a survival bar, and warning "eliminates
+every candidate" there would be the same lie in the other direction
+(pre-T-064 the old line fired in that face too). A no-gates run still
+proceeds (probe-only / evidence-gathering runs are legitimate); report
+shape, exit-code semantics, and the ladder are untouched.
+
+The check is token-free (the check-baseline-gate pattern: the REAL CLI,
+`src/cli.ts`, driven against throwaway fixture repos with `machine`
+workers), 18 assertions across three leg groups: **W1** the warning pair's
+green face — exactly one no-gates warning fires in a no-gates run, it names
+elimination ("eliminates every candidate"), names the zero-gate leg as the
+mechanism, names the remedy (`--gate`) and the evidence-only pointer
+(`--jobs`), and "passes vacuously" appears nowhere in the output; **W2**
+the no-behavior-change pin on the SAME run — exit 0 (nothing refused or
+altered), report.json keeps the completed-run top-level shape (the
+9-key set, baseSha and runId agreeing with the run dir), and the single
+candidate is eliminated BY THE ZERO-GATE LEG specifically (`gates` `[]`,
+`workerOk` true, `diffBytes` > 0 — the machine worker wrote a real diff, so
+both other ladder legs are green; only the missing-gate leg fails),
+`passedAllGates` false; **W3** the trigger's truth-scoping — a `--jobs` run
+whose job carries its own base-green gate prints NO no-gates warning (the
+run has a survival bar) and its candidate genuinely passes (gate PASS,
+`diffBytes` > 0, `passedAllGates` true) — the silence is truthful, not
+suppression.
+
+Red bar (AGENTS.md #8), recorded BEFORE the change, token-free, on the
+pristine lane worktree (= main a9f22d4), by running this check against the
+unchanged sources (the Gate 1.28 pattern): **5 failures** — the four W1
+truth legs (the line said `passes vacuously`, named no elimination, no
+zero-gate leg, no `--jobs`; only the `--gate` remedy substring matched by
+accident of the old prefix) and the W3 trigger leg (the old warning ALSO
+fired on the jobs-with-gates face, whose candidate genuinely passed — the
+lie in the second direction, visible in the recorded output as
+`warning: no --gate given; every candidate passes vacuously` printed
+beside a `j1 … build PASS => PASS` summary). All seven W2 behavior legs
+were GREEN on that same pre-change run — exit 0, report shape, verdicts,
+zero-gate elimination — which is the mechanical no-behavior-change record:
+identical inputs, identical reported properties, both sides of the change.
+
+**Gate 2 not owed** (the trigger analysis, recorded at landing): a console
+string. No report shape change (Gate 1.50's W2 pins the 9-key shape
+unchanged), no runner/adapter/gate/workspace touch (`src/runner.ts`,
+`src/worker/`, `src/gate/`, `src/workspace/` byte-unchanged — the diff is
+one `console.warn` block in `src/cli.ts`, this check, this file, and the
+ticket docs), and the pipeline's decisions are byte-identical (the ladder
+line in src/runner.ts is untouched; a no-gates run still runs, still
+eliminates everyone, still exits 0 — pinned leg by leg in W2). Gate 3 n/a
+(no adapter touched).
+
+Required whenever the no-gates warning text/trigger in
+`src/cli.ts:runPipeline` changes, or the zero-gate ladder leg in
+`src/runner.ts` changes — the two are pinned agreeing, so a change on
+either side must re-run this gate.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash

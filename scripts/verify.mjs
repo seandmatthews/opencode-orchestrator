@@ -1162,6 +1162,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.50: no-gates warning honesty (T-064) ----------
+section('Gate 1.50 — the no-gates warning tells the truth: elimination, not vacuous passing (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-no-gates-warning.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'no-gates-warning self-check exit 0')
+} catch (e) {
+  fail(`no-gates-warning self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
