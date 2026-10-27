@@ -40,6 +40,17 @@ Options:
   --planner-model <id>     Planner-tier model ID that turns the goal into N
                            distinct briefs (default: zai-coding-plan/glm-5.3)
   --no-planner             Skip the planner; all candidates get the raw goal
+  --no-planner-context     Omit the planner repo digest (T-059). Default ON:
+                           a deterministic file-tree/manifest digest of the
+                           TARGET repo at the run's base commit (git ls-tree
+                           order, forward-slash paths, package.json
+                           name/version; capped by documented constants with
+                           loud truncation lines) rides the planner prompt of
+                           BOTH rounds as context — bytes, never access: the
+                           planner's scratch cwd and capability posture are
+                           unchanged. Evidence: planner-digest.txt under the
+                           run artifacts dir, its sha256 in report.json.
+                           Inert in --jobs/--no-planner runs (no planner).
   --reviewer-model <id>    Reviewer-tier model ID for advisory post-gate review
                            of passing candidates (default: zai-coding-plan/glm-5.3)
   --no-review              Skip the reviewer phase
@@ -162,6 +173,11 @@ interface Options {
   candidates: number
   /** T-030 bounded R&D loop rounds; 1 = today's single-pass behavior. */
   rounds: number
+  /** T-059: the planner repo digest rides the planner prompts. Default ON
+   *  (--no-planner-context opts out, the --no-planner/--no-review idiom);
+   *  always passed through to runSkeleton, whose seam treats false as
+   *  today's exact prompt bytes. */
+  plannerContext: boolean
   concurrency: number
   base: string
   runRoot: string
@@ -214,6 +230,7 @@ function parseArgs(argv: string[]): Options {
     reviewerCommand: null,
     candidates: 3,
     rounds: 1,
+    plannerContext: true,
     concurrency: 0,
     base: 'HEAD',
     runRoot: 'C:\\swarm',
@@ -244,6 +261,9 @@ function parseArgs(argv: string[]): Options {
       case '--model': opts.model = value(); break
       case '--planner-model': opts.plannerModel = value(); break
       case '--no-planner': opts.plannerModel = null; break
+      // T-059: the repo digest's opt-out (default ON above; the
+      // --no-planner/--no-review boolean idiom — a bare flag, never a knob).
+      case '--no-planner-context': opts.plannerContext = false; break
       case '--reviewer-model': opts.reviewerModel = value(); break
       case '--no-review': opts.reviewerModel = null; break
       case '--verifier-model': opts.verifierModel = value(); break
@@ -726,6 +746,10 @@ async function runPipeline(opts: Options, jobsSpec: JobsSpec | null): Promise<vo
     concurrency: opts.concurrency,
     // T-030: the bounded loop flag; 1 (the default) = today's single pass.
     rounds: opts.rounds,
+    // T-059: the planner repo digest — the CLI's run-level default TRUE
+    // (--no-planner-context opts out), always passed so every real run
+    // carries it; the seam treats false as today's exact prompt bytes.
+    plannerContext: opts.plannerContext,
     timeoutMs: opts.timeoutMs,
     maxAttempts: opts.maxAttempts,
     // T-038: the bounded gate-failure retry flag; false (the default) =

@@ -1112,6 +1112,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.45: planner repo digest (T-059) ----------
+section('Gate 1.45 — planner repo digest: deterministic tree/manifest context in the planner prompt (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-planner-digest.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'planner-digest self-check exit 0')
+} catch (e) {
+  fail(`planner-digest self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
@@ -1220,6 +1230,18 @@ const runDir = join(verifyRoot, runDirs[0])
 const report = JSON.parse(readFileSync(join(runDir, 'report.json'), 'utf8'))
 
 ok(report.planner?.ok === true && report.planner?.fallbackUsed === false, `planner produced briefs (attempts=${report.planner?.attempts})`)
+
+// T-059: the planner repo digest rode this run (the CLI's default ON — the
+// real-run face of Gate 1.45's token-free pins). Strengthen-only: no existing
+// assertion touched. The verbatim prompt-embedding half is pinned token-free
+// by Gate 1.45 E1; here the real CLI run proves the default produced the
+// evidence and the recorded hash matches the on-disk bytes.
+ok(report.plannerDigest !== undefined && typeof report.plannerDigest?.path === 'string' && existsSync(report.plannerDigest.path),
+  'the planner repo digest evidence exists on the real run (planner-digest.txt under the run artifacts dir)')
+if (report.plannerDigest && existsSync(report.plannerDigest.path)) {
+  ok(createHash('sha256').update(readFileSync(report.plannerDigest.path, 'utf8'), 'utf8').digest('hex') === report.plannerDigest.sha256,
+    'the recorded digest sha256 matches the on-disk planner-digest.txt bytes')
+}
 
 // T-030 loop assertions on the real 2-round run. The `rounds` block must be
 // present (the run passed --rounds 2), round 1 must have produced survivors

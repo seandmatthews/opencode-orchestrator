@@ -5288,6 +5288,103 @@ Required whenever an adapter's response-tail collection (`collectText`,
 accumulation/write path (`BoundedProbeLog`, `writeProbeLog`/`logArtifact`,
 `MAX_PROBE_LOG_BYTES`) changes.
 
+## Gate 1.45 — planner repo digest: deterministic tree/manifest context in the planner prompt (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-planner-digest.mjs
+```
+
+Pins T-059 (the adversarial review 2026-10-23's R14, disposition
+`ticket-later`): the planner is repo-blind — `plannerPrompt`
+(`src/runner.ts`) carried goal + count only, and the planner's cwd is a
+scratch dir under the run artifacts dir, so briefs could not reference real
+modules or conventions (every hedged-path annotation the T-050 premise guard
+fires on, and the 2026-10-23 premise-lie class itself, trace to the specifier
+not seeing the code). The change — R14's own "minimal version" disposition:
+a DETERMINISTIC digest of the TARGET repo at the run's baseSha
+(`src/planner-digest.ts`, list-form git only: `git ls-tree -r --name-only
+<baseSha>` for the tracked tree — forward-slash by git's own emission — plus
+one manifest identity line per recognized root manifest, package.json's
+name/version from the COMMIT's bytes, presence and identity, never full
+contents) rides the planner prompt through the EXISTING `contextBlock` seam:
+round 1's context block is the digest alone; round 2's is digest + the
+composed survivor block with a fixed `\n\n` join. Bytes, never access: the
+digest names no repo path (Gate 1.20 S1's planner-prompt posture holds), and
+the planner's scratch cwd, capability posture (`--agent plan`, T-023), and
+parse path are untouched. Caps are documented exported constants —
+`MAX_DIGEST_PATHS` (500) and `MAX_DIGEST_CHARS` (12,000) — and truncation is
+LOUD (the context system's budgets-spent-are-budgets-stated rule): the tree
+section's header states listed-of-total and one `TRUNCATED` line names the
+binding cap's constant and the not-shown count; the char cap re-cuts below
+the path cap's cut until the composed text fits. Evidence: the digest bytes
+land in `planner-digest.txt` under the run artifacts dir with their sha256
+in `report.json` (`RunReport.plannerDigest`, producer-only) — one
+composition, two consumers (prompt bytes and recorded hash cannot drift).
+`--no-planner-context` opts out (default ON); a composition failure
+degrades loudly to today's digest-less prompts, no file, no report field
+(the premise-guard posture). **Seam note, deliberate and precedented:** the
+`runSkeleton` option (`plannerContext?: boolean`) treats absent/false as
+today's exact prompt bytes — the `rounds`/`gateRetry` seam pattern — so every
+existing direct-drive prompt/key-set face (Gates 1.20/1.21/1.22/1.25's
+pinned bytes) is unchanged by construction; the CLI resolves the run-level
+default TRUE and always passes it, so every real CLI run carries the digest
+(pinned: C1's source pins + the Gate 2 assertions below).
+
+The check is token-free (fake adapters + the real runner, the Gate 1.35
+pattern), ten legs: **M** — the module loads; both caps exported ≥ 1;
+`RECOGNIZED_MANIFESTS` a non-empty string array. **D1** — byte-determinism:
+two compositions byte-identical (text + sha256), and unchanged across
+working-tree mutations AND later commits (the digest reads the COMMIT,
+never the tree). **D2** — content/provenance: the header carries the
+contract and `BASE COMMIT:` with baseSha verbatim; the package.json identity
+line is an exact pinned literal from the commit's bytes; every tracked path
+lists forward-slash in ls-tree order and exists at base (`cat-file -e`);
+under the caps there is NO truncation line; NO repo path anywhere. **D3** —
+path cap: a repo 61 paths over the constant lists exactly the cap, the
+section header states listed-of-total, the `TRUNCATED` line names the cut
+count and the path-cap constant, total chars within the char cap. **D4** —
+char cap: a 401-path repo of ~91-char names (≈34K chars of paths) is re-cut
+BELOW the path cap until the text fits, the `TRUNCATED` line names the
+char-cap constant, and the capped digest is still byte-deterministic.
+**D5** — loud failure: composing against a non-git dir throws (never a
+silent empty tree); source pin that the runner wraps composition in
+try/catch with a loud degradation log. **E1** — evidence + verbatim
+embedding (digest ON): `planner-digest.txt` under the artifacts dir;
+`report.plannerDigest` records exactly that path and the sha256 of the
+on-disk bytes, equal to the module-recomposed digest; the round-1 planner
+prompt carries the FILE's bytes verbatim between the GOAL line and the
+output contract; the digest names the real tree (calc.js at root — the R14
+premise fix). **E2** — opt-out inertness (the T-056 pattern): with the
+digest OFF and with the option ABSENT, the captured prompt is byte-identical
+to main's hard-coded no-block template (a template drift in `src/runner.ts`
+fails the check), no digest file, no report key, today's exact top-level
+key set. **E3** — both rounds: digest ON at `rounds: 2` — round 1 carries
+the digest alone; round 2 carries digest + recomputed composed block with
+the EXACT join; a digest-less rounds drive is byte-identical to main's
+round-1 and round-2 forms. **C1** — CLI face: `--help` documents the flag;
+the flag parses (a trailing `--rounds 3` refusal fires its own message,
+never `unknown option`); source pins that the CLI defaults it true and
+passes it through.
+
+Red bar, recorded FIRST on main (AGENTS.md #8), token-free:
+`C:\swarm\verify-red\T-059-red.log` — the demo-fixture probe drives the real
+`runSkeleton` with a fake planner against `C:\swarm\demo-target`; all three
+T-059 assertions fail on main (no digest bytes in the round-1 planner
+prompt, no `planner-digest.txt`, no report sha256), and the probe's
+RED-RECORD legs state the red's content positively: main's planner prompt
+carries no tree/manifest bytes. The same probe against the lane build goes
+green (`C:\swarm\verify-red\T-059-green-probe.log`).
+
+Gate 2 carries the real-run face since T-059 (strengthen-only, no existing
+assertion touched): the report's `plannerDigest` block must exist with the
+evidence file on disk and the recorded sha256 must match the file's bytes —
+the CLI-default-ON path proven on real model tokens (the verbatim
+prompt-embedding half is pinned token-free by E1).
+
+Required whenever the digest producer (`src/planner-digest.ts`), its caps,
+the runner's contextBlock wiring for the planner (`runPlannerPhase`/
+`plannerPrompt`), or the CLI flag changes.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
