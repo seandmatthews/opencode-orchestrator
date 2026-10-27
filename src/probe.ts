@@ -40,6 +40,18 @@
 //     unparseable test output. Evidence, never a verdict input.
 //   - probeId and scenarioId carry the same value this slice: the --jobs
 //     probe entry has one id (src/scheduler.ts), used for both.
+//   - Class-boundary contracts (T-063, register R18): the docblocks here
+//     claim the probe classes hold the --jobs shape rules for DIRECTLY
+//     constructed scenarios too, and since T-063 they actually do where
+//     claimed — ScreenshotProbe.captureRefusal mirrors parseJobsSpec's
+//     capture refusals (absolute paths and '..' segments refused with the
+//     parser's own vocabulary), and every id interpolated into an evidence
+//     path (EnvironmentSpec.candidateId, ScenarioSpec.id) is checked
+//     against the engine's id charset SPEC_ID_PATTERN before it reaches
+//     join() (requireEvidenceSafeId below). Neither layer replaces the
+//     other: parseJobsSpec is the --jobs enforcement point, the class is
+//     the hand-built-scenario enforcement point, and the two must not
+//     diverge (Gate 1.49 pins the parity).
 //   - The spec's Probe interface (§12:885-893) carries only `id` and receives
 //     the scenario through run(input). This slice's probes are constructed
 //     FROM their ScenarioSpec (the --jobs probe entry) and expose it as
@@ -269,9 +281,14 @@
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, win32 } from 'node:path'
 import { killFailureLines, killSuccessLine, killTreeVerified } from './kill-tree.js'
 import { KILL_SETTLE_WINDOW_MS } from './worker/run-with-timeout.js'
+// The engine's id charset (T-063, register R18), imported — never
+// re-declared — so the evidence-path checks below and parseJobsSpec's
+// --jobs id checks cannot drift apart. No runtime cycle: scheduler.ts's
+// import of this module is type-only (erased at compile time).
+import { SPEC_ID_PATTERN } from './scheduler.js'
 import type { GateResult, WorkspaceLease } from './types.js'
 
 /** The generic probe types landed so far (§34:2061-2072's start list;
@@ -299,7 +316,13 @@ export type EvidenceArtifactKind = 'log' | 'report' | 'screenshot'
  *  ScenarioSpec, chosen here): what to run, where its id lives, and the
  *  optional wall-clock limit. */
 export interface ScenarioSpec {
-  /** Unique per job; names the probe's evidence files. */
+  /** Unique per job; names the probe's evidence files. Since T-063 the
+   *  evidence-path writers enforce the engine's id charset
+   *  (SPEC_ID_PATTERN, [a-z0-9][a-z0-9-]* — the same rule parseJobsSpec
+   *  holds --jobs probe ids to) at the class boundary: an id outside the
+   *  charset cannot name an evidence file (requireEvidenceSafeId — it is
+   *  interpolated into file names under the artifacts dir, and join()
+   *  normalizes '..' segments away). */
   id: string
   type: ProbeType
   /** List-form command (AGENTS.md #4): the executable plus its arguments. */
@@ -351,6 +374,15 @@ export interface EnvironmentSpec {
    *  <artifactsDir>/probes/<candidateId>/ — never the worktree as the
    *  durable copy (decisions.md 2026-10-10: run root C:\swarm\). */
   artifactsDir: string
+  /** The candidate whose evidence this is (the --jobs JOB id in-pipeline —
+   *  operator-supplied and charset-checked one layer up by parseJobsSpec;
+   *  engine-generated c01..cNN in default mode, where no probes run).
+   *  Since T-063 the evidence-path writers enforce the engine's id charset
+   *  (SPEC_ID_PATTERN) at the class boundary: the id is interpolated into
+   *  the run-folder path, and join() normalizes '..' segments away, so an
+   *  unchecked id could point the "run folder" outside the artifacts dir
+   *  (requireEvidenceSafeId — the captureRefusal class-boundary rule,
+   *  applied to the folder segment). */
   candidateId: string
 }
 
@@ -564,20 +596,66 @@ export function validateEvidenceBundle(raw: unknown): EvidenceBundle {
 
 // ---------- The evidence writer ----------
 
+/**
+ * T-063 (register R18): every id this module interpolates into an evidence
+ * path is checked against the engine's id charset (SPEC_ID_PATTERN,
+ * src/scheduler.ts — the same rule parseJobsSpec holds --jobs job and probe
+ * ids to) BEFORE it reaches join(): node:path's join normalizes '..'
+ * segments away, so an unchecked id could point a "run folder" or an
+ * evidence file outside the run's artifacts dir. The read that picked the
+ * VALIDATE branch over a pinned engine-generated-invariant comment: neither
+ * id is provably engine-generated AT THIS MODULE'S BOUNDARY — the
+ * candidateId is the --jobs JOB id (operator-supplied; charset-checked one
+ * layer up by parseJobsSpec for spec-driven runs ONLY) and the probeId is
+ * the ScenarioSpec id (operator-supplied, same one-layer-up check); a
+ * directly constructed environment or scenario — the same hand-built path
+ * the capture contract covers — can carry either id as any string.
+ * In-pipeline ids are unaffected by construction: parseJobsSpec violators
+ * never reach a probe, default-mode candidate ids are engine-generated
+ * c01..cNN, and rounds' -r2 suffixes stay inside the charset
+ * (src/cli.ts's BASELINE_LEASE_ID note). A refusal is a thrown Error:
+ * inside a probe's run() the runner's failedBundle path records it as a
+ * success:false bundle (src/runner.ts runProbes), and at
+ * writeEvidenceBundle the runner's evidence-write path logs it and skips
+ * the summary — never a crash of the run, and never a byte written outside
+ * the artifacts dir.
+ */
+function requireEvidenceSafeId(kind: 'candidateId' | 'probeId', id: string): void {
+  if (typeof id !== 'string' || !SPEC_ID_PATTERN.test(id)) {
+    throw new Error(
+      `evidence path ${kind} ${JSON.stringify(id)} does not match [a-z0-9][a-z0-9-]* — it is interpolated into evidence paths under the run's artifacts dir`,
+    )
+  }
+}
+
 /** Where a probe's evidence lives under the run artifacts dir. */
 export function probeEvidenceDir(artifactsDir: string, candidateId: string): string {
+  requireEvidenceSafeId('candidateId', candidateId)
   return join(artifactsDir, 'probes', candidateId)
+}
+
+/** The evidence FILE NAME for one probe artifact — `<probeId>.<suffix>`
+ *  with the probeId charset-checked here (requireEvidenceSafeId): every
+ *  artifact name this module writes under probeEvidenceDir interpolates
+ *  the probe id, and it reaches these writers as a plain string that only
+ *  parseJobsSpec charset-checks, one layer up (the captureRefusal
+ *  class-boundary rule, applied to file names). */
+function probeArtifactName(probeId: string, suffix: string): string {
+  requireEvidenceSafeId('probeId', probeId)
+  return `${probeId}.${suffix}`
 }
 
 /** The validated-bundle artifact path: <artifactsDir>/probes/<candidateId>/<probeId>.json */
 export function evidenceBundlePath(artifactsDir: string, candidateId: string, probeId: string): string {
-  return join(probeEvidenceDir(artifactsDir, candidateId), `${probeId}.json`)
+  return join(probeEvidenceDir(artifactsDir, candidateId), probeArtifactName(probeId, 'json'))
 }
 
 /**
  * Validate, then write a bundle to <artifactsDir>/probes/<candidateId>/<probeId>.json.
  * Returns the bundle path (what CandidateReport.probes[].bundlePath carries).
- * An unvalidated bundle is never written to disk.
+ * An unvalidated bundle is never written to disk; since T-063 an id outside
+ * the engine's charset is refused before any path is built (neither id is
+ * ever written into a file name unchecked).
  */
 export function writeEvidenceBundle(
   bundle: EvidenceBundle,
@@ -883,7 +961,8 @@ function logArtifact(
 ): { ref: EvidenceArtifactRef; truncatedFromBytes: number | null } {
   const dir = probeEvidenceDir(environment.artifactsDir, environment.candidateId)
   mkdirSync(dir, { recursive: true })
-  const path = join(dir, `${probeId}.log`)
+  const fileName = probeArtifactName(probeId, 'log')
+  const path = join(dir, fileName)
   const full = Buffer.from(output, 'utf8')
   let buf = full
   let truncatedFromBytes: number | null = null
@@ -895,7 +974,7 @@ function logArtifact(
   }
   writeFileSync(path, buf)
   return {
-    ref: { name: `${probeId}.log`, path, kind: 'log', sizeBytes: buf.length },
+    ref: { name: fileName, path, kind: 'log', sizeBytes: buf.length },
     truncatedFromBytes,
   }
 }
@@ -962,10 +1041,11 @@ function resultsArtifact(
 ): EvidenceArtifactRef {
   const dir = probeEvidenceDir(environment.artifactsDir, environment.candidateId)
   mkdirSync(dir, { recursive: true })
-  const path = join(dir, `${results.probeId}.results.json`)
+  const fileName = probeArtifactName(results.probeId, 'results.json')
+  const path = join(dir, fileName)
   const body = JSON.stringify(results, null, 2)
   writeFileSync(path, body)
-  return { name: `${results.probeId}.results.json`, path, kind: 'report', sizeBytes: Buffer.byteLength(body) }
+  return { name: fileName, path, kind: 'report', sizeBytes: Buffer.byteLength(body) }
 }
 
 /** The machine-readable capture record of a web probe (T-024) — the
@@ -989,10 +1069,11 @@ function responseArtifact(
 ): EvidenceArtifactRef {
   const dir = probeEvidenceDir(environment.artifactsDir, environment.candidateId)
   mkdirSync(dir, { recursive: true })
-  const path = join(dir, `${response.probeId}.response.json`)
+  const fileName = probeArtifactName(response.probeId, 'response.json')
+  const path = join(dir, fileName)
   const body = JSON.stringify(response, null, 2)
   writeFileSync(path, body)
-  return { name: `${response.probeId}.response.json`, path, kind: 'report', sizeBytes: Buffer.byteLength(body) }
+  return { name: fileName, path, kind: 'report', sizeBytes: Buffer.byteLength(body) }
 }
 
 // ---------- CommandProbe: the exit-0 evidence probe ----------
@@ -1275,10 +1356,13 @@ export class BenchmarkProbe implements Probe {
  *  workspace-relative path.
  *
  *   - capture: required non-empty workspace-relative path (parseJobsSpec
- *     enforces; absolute paths and '..' segments refused there, and the
- *     class holds the contract too for a directly constructed scenario —
- *     a refusal here is a thrown Error, recorded by the runner's
- *     failedBundle path, never a crash of the run).
+ *     enforces on --jobs specs; since T-063, register R18, the class holds
+ *     the FULL contract for a directly constructed scenario too — absolute
+ *     paths (drive-letter, forward-slash-rooted, UNC) and '..' segments
+ *     refused with the parser's own vocabulary and message shapes, the two
+ *     sides pinned non-divergent; a refusal here is a thrown Error,
+ *     recorded by the runner's failedBundle path, never a crash of the
+ *     run, and the capture command never runs).
  *   - Success = the command exited 0 AND the capture file exists AND is
  *     >= MIN_PNG_BYTES AND starts with PNG_MAGIC — PNG-only this slice.
  *     `error` names the FIRST failed face, in that order.
@@ -1303,9 +1387,14 @@ export class ScreenshotProbe implements Probe {
 
   async run(input: ProbeInput): Promise<EvidenceBundle> {
     const s = input.scenario
-    const capture = s.capture ?? ''
-    const captureError = this.captureRefusal(capture)
+    // The RAW value reaches captureRefusal (a missing capture renders as
+    // `(got undefined)` exactly like parseJobsSpec's own message — the
+    // non-divergence contract; normalizing to '' first would diverge).
+    const captureError = this.captureRefusal(s.capture)
     if (captureError !== null) throw new Error(`screenshot probe '${this.id}': ${captureError}`)
+    // Post-refusal, s.capture is a validated non-empty workspace-relative
+    // string; the ?? only satisfies the optional-field type.
+    const capture = s.capture ?? ''
     const timeoutMs = s.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS
     const execution = await executeProbeCommand(s.command, input.workspace.path, timeoutMs)
     const capturePath = join(input.workspace.path, capture)
@@ -1347,10 +1436,11 @@ export class ScreenshotProbe implements Probe {
       // what outlives it): <artifactsDir>/probes/<candidateId>/<probeId>.png
       const dir = probeEvidenceDir(input.environment.artifactsDir, input.environment.candidateId)
       mkdirSync(dir, { recursive: true })
-      const imagePath = join(dir, `${this.id}.png`)
+      const imageName = probeArtifactName(this.id, 'png')
+      const imagePath = join(dir, imageName)
       copyFileSync(capturePath, imagePath)
       imageRef = {
-        name: `${this.id}.png`,
+        name: imageName,
         path: imagePath,
         kind: 'screenshot',
         sizeBytes: statSync(imagePath).size,
@@ -1370,10 +1460,27 @@ export class ScreenshotProbe implements Probe {
 
   /** The capture-path contract for a directly constructed scenario (the
    *  parseJobsSpec refusals are the --jobs enforcement point; this keeps a
-   *  hand-built scenario from silently escaping the same rule). */
-  private captureRefusal(capture: string): string | null {
+   *  hand-built scenario from silently escaping the same rule). Since T-063
+   *  (register R18) the class holds the FULL contract the spec parser
+   *  holds — same vocabulary, same message shapes, the two sides must not
+   *  diverge (Gate 1.49 pins the parity): before, only the non-empty check
+   *  lived here, and a hand-built scenario could point its capture path at
+   *  any PNG-magic file reachable from the worktree (a '..' chain escapes
+   *  through join()'s normalization — the recorded red bar copied the
+   *  fixture PNG from five levels above the workspace into the run's
+   *  evidence, success:true) — the docblock claimed a contract the code
+   *  did not hold. win32.isAbsolute regardless of host OS (the parse-side
+   *  rule) so drive-letter, forward-slash-rooted, and UNC forms are
+   *  refused deterministically. */
+  private captureRefusal(capture: unknown): string | null {
     if (typeof capture !== 'string' || capture.length === 0) {
-      return 'capture must be a non-empty workspace-relative path'
+      return `capture must be a non-empty workspace-relative path on a screenshot probe (got ${JSON.stringify(capture)})`
+    }
+    if (win32.isAbsolute(capture)) {
+      return `capture must be workspace-relative; absolute paths are refused (got ${JSON.stringify(capture)})`
+    }
+    if (capture.split(/[\\/]/).includes('..')) {
+      return `capture must not contain a '..' segment (got ${JSON.stringify(capture)})`
     }
     return null
   }
@@ -1785,10 +1892,11 @@ function adversarialResultsArtifact(
 ): EvidenceArtifactRef {
   const dir = probeEvidenceDir(environment.artifactsDir, environment.candidateId)
   mkdirSync(dir, { recursive: true })
-  const path = join(dir, `${results.probeId}.results.json`)
+  const fileName = probeArtifactName(results.probeId, 'results.json')
+  const path = join(dir, fileName)
   const body = JSON.stringify(results, null, 2)
   writeFileSync(path, body)
-  return { name: `${results.probeId}.results.json`, path, kind: 'report', sizeBytes: Buffer.byteLength(body) }
+  return { name: fileName, path, kind: 'report', sizeBytes: Buffer.byteLength(body) }
 }
 
 /** The adversarial probe (T-032; the semantics are the module-docblock

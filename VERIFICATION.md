@@ -5770,6 +5770,118 @@ Required whenever the adversarial expectation seam
 AdversarialProbe outcome classes, `ProbeRunSummary.casesRejected`, or the
 composer's probe-line rendering change.
 
+## Gate 1.49 — probe capture-path + evidence-id validation at the class boundary (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-probe-boundary.mjs
+```
+
+Pins T-063 (the adversarial review 2026-10-23's R18 disposition, first
+branch): `ScreenshotProbe`'s docblock claimed the class held the
+capture-path contract for directly constructed scenarios, but
+`captureRefusal` checked only non-empty string — the workspace-relative /
+no-`..` refusals lived solely in `parseJobsSpec`, so a hand-built scenario
+(not arriving through a parsed spec) could point its capture path at any
+PNG-magic file reachable from the worktree and have it copied into the
+run's evidence. The two-part change:
+
+- **`captureRefusal` now holds the spec's own refusals** — same rules
+  (`win32.isAbsolute` regardless of host OS, so drive-letter,
+  forward-slash-rooted, and UNC forms are refused deterministically;
+  segment-lexical `..` check over `/[\\/]/`), same vocabulary, same
+  message shapes including the `(got …)` suffix carrying the RAW value
+  (a missing capture renders `(got undefined)` on both sides — the raw
+  value, not a normalized `''`, reaches the class-side refusal for exactly
+  this parity). The refusal fires BEFORE the capture command runs. The
+  parse-side (`parseJobsSpec`, src/scheduler.ts) is byte-unchanged; this
+  gate pins the non-divergence mechanically — for every refusal input both
+  sides refuse and the parse message is exactly its where-prefix
+  (`--jobs spec refused: job 'j1' probes[0] `) plus the class-side rule.
+- **Evidence-path ids are validated against the engine's id charset** —
+  the VALIDATE branch of the ticket's two-part disposition, chosen because
+  the read showed neither id provably engine-generated at the module
+  boundary: `EnvironmentSpec.candidateId` is the --jobs JOB id in-pipeline
+  (operator-supplied, charset-checked one layer up by parseJobsSpec for
+  spec-driven runs only; engine-generated `c01..cNN` in default mode,
+  where no probes run), and the probeId is the `ScenarioSpec` id
+  (operator-supplied, same one-layer-up check) — a directly constructed
+  environment or scenario, the same hand-built path the capture contract
+  covers, can carry either id as any string. `SPEC_ID_PATTERN`
+  (`[a-z0-9][a-z0-9-]*`, src/scheduler.ts) is IMPORTED into src/probe.ts
+  (never re-declared, so the checks cannot drift; no runtime cycle —
+  scheduler.ts's probe import is type-only) and enforced by
+  `requireEvidenceSafeId` before any id reaches `join()`: `join`
+  normalizes `..` segments away, so an unchecked id could point the "run
+  folder" (`<artifactsDir>/probes/<candidateId>`, `probeEvidenceDir`) or
+  an evidence FILE name (`<probeId>.json/.log/.png/.results.json/
+  .response.json`, `evidenceBundlePath` + `probeArtifactName` — every
+  artifact writer in the module routes through these two helpers) outside
+  the run's artifacts dir. A refusal is a thrown Error: inside a probe's
+  `run()` the runner's failedBundle path records it (src/runner.ts
+  runProbes), and at `writeEvidenceBundle` the runner's evidence-write
+  path logs it and skips the summary — never a crash of the run, never a
+  byte written outside the artifacts dir. In-pipeline ids are unaffected
+  by construction (parse-side violators never reach a probe; the pipeline
+  shapes `c01`, `job-a`, `shot-1`, `c01-r2` all pass the charset — pinned).
+
+The check is token-free (the Gate 1.15 direct-execution pattern: real
+list-form spawns, hand-built scenarios through `createProbe`, never
+through `parseJobsSpec`), 67 assertions across three legs: **1** the
+class-boundary capture refusals (empty/missing/non-string; four absolute
+forms; four `..` forms — each refused with the parser's rule, the `(got …)`
+shape, and BEFORE the capture command runs, read as a marker file's
+absence in the workspace; the two recorded red-bar faces asserted by
+name); **2** the parse-side parity — every refusal input refused by
+`parseJobsSpec` with the message agreeing exactly (where-prefix + class
+rule; non-divergence), plus the positive control (a valid capture parses
+and is preserved verbatim); **3** the evidence-path id faces —
+`probeEvidenceDir`/`evidenceBundlePath` refusing `..`/absolute
+candidateIds and probeIds with the `evidence path <kind> … does not match
+[a-z0-9][a-z0-9-]*` vocabulary, `writeEvidenceBundle` refusing a
+charset-violating probeId with NOTHING written (a fresh artifacts dir
+never comes to exist), a directly constructed environment with a `..`
+candidateId refused inside `run()` with nothing written, the
+pipeline-shape acceptance leg, and the happy-path control (a valid
+relative subdirectory capture still runs to success:true with the durable
+copy at `<artifactsDir>/probes/<candidateId>/<probeId>.png` — the guard
+does not over-refuse; Gate 1.15's full screenshot suite runs green
+unchanged beside this gate, pinning in-pipeline parity).
+
+Red bar (AGENTS.md #8), recorded BEFORE the change, token-free, on the
+pristine lane worktree (= main a67d139): a throwaway script (deleted from
+the change-set; its output quoted here) directly constructed the two
+scenarios against unchanged sources. Face 1 — the ticket's named red — an
+absolute capture path at the checked-in tiny PNG outside the workspace:
+`class refused the absolute capture path: false` (only the empty-string
+refusal existed), the class honestly reporting the out-of-workspace path
+as "inside the workspace" in its missing-file error. Face 2 — the live
+exfiltration vector — a five-level `..` chain from a nested workspace at
+the same PNG: `class refused: false`, `bundle success: true`, and
+`out-of-workspace PNG copied into run evidence: true` (the file five
+levels above the workspace passed every PNG check and was copied into the
+run's evidence as a success:screenshot artifact — `join()` normalizes the
+`..` chain away, which is exactly why the segment-lexical refusal is
+required BEFORE the join). The green replacement — both faces refused
+with the parser's vocabulary before the command runs — is leg 1's two
+by-name assertions.
+
+**Gate 2 not owed** (the trigger analysis, recorded at landing): probe
+internals only — no report shape change (no `CandidateReport`/
+`ProbeRunSummary`/`EvidenceBundle` field touched; a refusal is a thrown
+Error on paths that previously produced a missing-file failure bundle or,
+for in-pipeline ids that were always valid, no change at all), no
+runner/adapter/gate/workspace touch (`src/runner.ts`, `src/worker/`,
+`src/gate/`, `src/workspace/` byte-unchanged — the diff is
+`src/probe.ts`, this check, this file, and the ticket docs), and the
+in-pipeline spec path is byte-identical (parse-side untouched, Gate 1.15
+green unchanged). Gate 3 n/a (no adapter touched).
+
+Required whenever `ScreenshotProbe.captureRefusal`, the evidence-path
+helpers (`probeEvidenceDir`, `evidenceBundlePath`, `probeArtifactName`,
+`requireEvidenceSafeId`), or the parse-side capture/id refusals in
+`parseJobsSpec` change — the two sides are pinned non-divergent, so a
+change on either side must re-run this gate.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash

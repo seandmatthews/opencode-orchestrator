@@ -1152,6 +1152,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.49: probe class-boundary contracts (T-063) ----------
+section('Gate 1.49 — probe capture-path + evidence-id validation at the class boundary (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-probe-boundary.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'probe-boundary self-check exit 0')
+} catch (e) {
+  fail(`probe-boundary self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
