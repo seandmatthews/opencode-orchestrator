@@ -29,7 +29,9 @@ import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { runSkeleton, builderPrompt } from '../src/runner.ts'
+import { runSkeleton, workerDispatchPrompt } from '../src/runner.ts'
+import { composePlannerDigest } from '../src/planner-digest.ts'
+import { composeWorkerOrientation } from '../src/worker-orientation.ts'
 import { WorktreeProvider } from '../src/workspace/worktree.ts'
 
 const failures = []
@@ -41,6 +43,12 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const norm = (p) => p.replaceAll('\\', '/').toLowerCase()
 const read = (p) => readFileSync(p, 'utf8')
 const sha256Hex = (s) => createHash('sha256').update(s).digest('hex')
+// T-060: the orientation block the engine prepends to every worker dispatch
+// (src/worker-orientation.ts over the run's one digest) — recomposed here the
+// same way so the expected prompt bytes stay exact (the builderPrompt
+// precedent; deterministic recomposition, Gate 1.45 D1 / 1.46 O1).
+const orientationFor = (repo, baseSha, leasePath) =>
+  composeWorkerOrientation({ leasePath, baseSha, digest: composePlannerDigest({ repo, baseSha }) }).text
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')
@@ -187,7 +195,7 @@ const main = async () => {
       { ok: true, write: { file: 'marker.txt', content: 'fixed v2\n' }, responseTail: 'I fixed marker.txt to fixed v2' },
     ])
     const gates = [markerGate('build', 'fixed', executions), markerGate('lint', 'fixed', executions), staticGate('always-pass', true, 'always-pass: ok', executions)]
-    const { report, artifactsDir } = await drive('core-retry', { worker, gates, gateRetry: true })
+    const { report, repo, artifactsDir, baseSha } = await drive('core-retry', { worker, gates, gateRetry: true })
     const c = report.candidates[0]
     const a1 = c.attempts[0]
     const a2 = c.attempts[1]
@@ -230,16 +238,20 @@ const main = async () => {
       briefText.includes('broken v1') && briefText.includes('I changed marker.txt to broken v1'))
     t('G1: the composed brief does NOT carry passing-gate output (only failing gates feed back)',
       !briefText.includes('always-pass: ok'))
-    t('G1: attempt 2\'s promptVersion is the sha256 of the exact prompt built from the composed brief (one composition, two consumers)',
-      a2?.promptVersion === sha256Hex(builderPrompt(briefText, join(artifactsDir, 'wt', 'c01-a2'))))
+    const a2Lease = join(artifactsDir, 'wt', 'c01-a2')
+    t('G1: attempt 2\'s promptVersion is the sha256 of the exact prompt built from the composed brief (one composition, two consumers; since T-060 behind the orientation block, workerDispatchPrompt)',
+      a2?.promptVersion === sha256Hex(workerDispatchPrompt(briefText, a2Lease, orientationFor(repo, baseSha, a2Lease))))
     t('G1: attempt 2\'s inputContextHash differs from attempt 1\'s (the brief differs — the hash is doing its job), both 64-hex',
       a1?.inputContextHash !== a2?.inputContextHash
       && /^[0-9a-f]{64}$/.test(a1?.inputContextHash ?? '') && /^[0-9a-f]{64}$/.test(a2?.inputContextHash ?? ''))
     t('G1: attempt-scoped evidence: attempt 1\'s diff.patch captured the pre-retry leg\'s work',
       read(join(artifactsDir, 'c01', 'diff.patch')).includes('broken v1'))
+    // T-060: dispatched-prompt.txt (the full orientation + brief text) is
+    // per-attempt evidence beside worker.log; the composed retry brief rides
+    // after it on the retry attempt.
     t('G1: each attempt\'s outputArtifacts names its own paths, including the composed brief, and the files exist',
-      eq(a1?.outputArtifacts, [join(artifactsDir, 'c01', 'worker.log'), join(artifactsDir, 'c01', 'diff.patch')])
-      && eq(a2?.outputArtifacts, [join(artifactsDir, 'c01', 'attempt-2', 'worker.log'), briefPath, join(artifactsDir, 'c01', 'attempt-2', 'diff.patch')])
+      eq(a1?.outputArtifacts, [join(artifactsDir, 'c01', 'worker.log'), join(artifactsDir, 'c01', 'dispatched-prompt.txt'), join(artifactsDir, 'c01', 'diff.patch')])
+      && eq(a2?.outputArtifacts, [join(artifactsDir, 'c01', 'attempt-2', 'worker.log'), join(artifactsDir, 'c01', 'attempt-2', 'dispatched-prompt.txt'), briefPath, join(artifactsDir, 'c01', 'attempt-2', 'diff.patch')])
       && a1.outputArtifacts.every((p) => existsSync(p)) && a2.outputArtifacts.every((p) => existsSync(p)))
     const ev = parseDispatch(artifactsDir)
     const dispatches = ev.filter((l) => l.type === 'dispatch')

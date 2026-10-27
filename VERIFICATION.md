@@ -612,7 +612,11 @@ model tokens. It asserts:
   at today's paths (`<id>/worker.log` is not overwritten — its content is
   still attempt 1's), attempts ≥ 2 write under `<id>/attempt-<n>/`, and each
   attempt's `outputArtifacts` names its own paths with the files existing on
-  disk (a thrown attempt names just its `worker.log`).
+  disk. (Since T-060 every attempt also carries its `dispatched-prompt.txt`
+  — the full orientation + brief text — beside `worker.log`, before
+  `diff.patch`; a thrown attempt names its `worker.log` and that file. The
+  array pins were updated to the new exact shapes in the T-060 change-set —
+  still exact array equality, no member dropped.)
 - **the bound eliminates**: an always-failing worker yields exactly
   `maxAttempts` attempts and the candidate's final verdict is the same
   elimination the ladder produces today (worker failed, no gates pass).
@@ -3029,9 +3033,12 @@ tokens. It asserts:
   content pin: the brief provably contains every failing gate's name,
   command, and outputTail — asserted on the file text — plus the original
   brief, the captured diff, and the worker summary; it contains NO
-  passing-gate output); attempt 2's `promptVersion` equals
-  `sha256(builderPrompt(briefText, lease2))` recomputed in the check
-  (never the engine's composition path alone); attempt 2's
+  passing-gate output); attempt 2's `promptVersion` equals the sha256 of
+  the exact dispatched prompt — since T-060 the composed brief behind the
+  engine's orientation block (`workerDispatchPrompt(briefText, lease2,
+  orientationFor(...))`, recomputed in the check the same way; before
+  T-060 the bare `builderPrompt(briefText, lease2)`), never the engine's
+  composition path alone; attempt 2's
   `inputContextHash` DIFFERS from attempt 1's (the brief differs — the
   hash is doing its job), both 64-hex; each attempt's `outputArtifacts`
   names its own paths including the brief file, all existing on disk;
@@ -4454,9 +4461,11 @@ independent recomputation through the same changedPaths seam,
 the unannotated text's, `brief` keeps the planner's text; P2 the distinct
 absent-at-base note for a path in no survivor evidence (never the
 survivor reason, never another brief's note); P3 inertness — all-tokens-
-at-base briefs dispatch byte-identical prompts (recomputed
-`builderPrompt` equality), no evidence file, today's exact candidate key
-set, no note bytes; P4 `--jobs` carve (byte-identical dispatch on an
+at-base briefs dispatch byte-identical prompts (recomputed equality
+against the exact dispatched composition: `workerDispatchPrompt` since
+T-060, the bare `builderPrompt` before it — the comparison stayed
+byte-exact, only the expected prefix grew), no evidence file, today's
+exact candidate key set, no note bytes; P4 `--jobs` carve (byte-identical dispatch on an
 absent-naming brief); P5 the bound (8 absent tokens → at most
 MAX_PREMISE_NOTES notes, first-mention order); P6 verdict inertness both
 directions (annotated + real change → passes exactly by gates; annotated
@@ -5384,6 +5393,121 @@ prompt-embedding half is pinned token-free by E1).
 Required whenever the digest producer (`src/planner-digest.ts`), its caps,
 the runner's contextBlock wiring for the planner (`runPlannerPhase`/
 `plannerPrompt`), or the CLI flag changes.
+
+## Gate 1.46 — worker orientation block: engine-composed lease path + base tree facts in the worker dispatch (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-worker-orientation.mjs
+```
+
+Pins T-060 (Known issue #6's four path/repo-confusion derailment classes;
+the adversarial review 2026-10-23's A2 disposition): until now the engine
+told the worker nothing about where it was beyond cwd + pinned env, and
+every recorded derailment class — probing the canonical fixture instead of
+the lease, the premise-lie read, mis-transcribing the lease's own path
+(hyphen read as separator), explore-then-give-up — hinged on exactly the
+two facts the block states. The change: an engine-composed ORIENTATION
+BLOCK prepended to EVERY worker dispatch (`src/worker-orientation.ts`,
+composed from the attempt's lease + the run's baseSha + T-059's digest
+producer) — the candidate's absolute lease path VERBATIM on its own line
+under a one-line scope statement (everything outside it is out of scope,
+the canonical checkout included, copy-never-retype), the baseSha the lease
+is pinned to, and the capped tracked-file tree. The T-050 annotation
+seam's discipline: engine mechanics, never model judgment — the
+planner-authored brief bytes in report.json are BYTE-UNCHANGED (only the
+engine-composed wrapper grows; `CandidateReport.brief` untouched), the
+premise guard is untouched and still inert for briefs whose paths all
+exist at base, no verdict expression reads the block, and every candidate
+in a run gets the same block shape (the only per-candidate bytes are the
+lease path; no differential treatment the report cannot explain).
+Prompt-side only — retrying no-ops stays banned, a zero-byte diff still
+eliminates.
+
+THE SAME BYTES, NO SECOND COMPOSITION PATH: the tree section is composed
+by T-059's own `composeTreeSection`, exported since T-060 and refactored
+out of `composePlannerDigest`'s inline form — the digest's composed bytes
+are byte-identical to the pre-T-060 form (Gate 1.45's pinned literals
+unchanged, re-run green in this change-set), the digest object now also
+carries its post-cap `treePaths` (additive), and the orientation module
+spawns nothing. The block's total size is capped by the documented
+exported constant `MAX_ORIENTATION_CHARS` (8,000, below the digest's own
+12,000 on purpose — the worker prompt stays token-cheap); when the tree
+overflows it, paths drop from the END (git order preserved) until the
+block fits and the in-section `TRUNCATED` line names the binding cap and
+the honest not-shown count (the digest's own cap stays the named cut when
+the orientation cap does not cut below it). Determinism: composition is
+pure over its inputs — byte-identical across invocations for a fixed
+lease + digest. The full dispatched prompt (orientation + brief) is
+recorded per attempt as `dispatched-prompt.txt` in the attempt's evidence
+dir, riding `outputArtifacts`; its exact text's sha256 IS the attempt's
+`promptVersion` (the T-029 producer records the composition change — it
+moves vs main's bare `builderPrompt` hash for the same inputs, pinned).
+Evidence-only: no report field is added, so flag-less report shapes are
+unchanged. The run's digest is composed ONCE per run for BOTH consumers
+(planner contextBlock + every worker block); the planner-side evidence
+(`planner-digest.txt`, `RunReport.plannerDigest`) stays tied to
+`--no-planner-context` exactly as T-059 pinned it (Gate 1.45 E2 re-run
+green), and a composition failure logs loudly once and degrades the whole
+run to today's exact prompt bytes on both sides (the premise-guard
+posture — the report never claims context any role did not receive).
+`inputContextHash` deliberately keeps hashing the builder template: it
+answers cross-attempt comparability, and the orientation block's
+per-attempt variation is the lease path exactly like the excluded
+workspace line; exact dispatched text is promptVersion's job.
+
+Pinned-byte updates in the same change-set, strength preserved (each
+still exact equality, no member or assertion dropped): Gates 1.8/1.24's
+exact `outputArtifacts` arrays gained the per-attempt
+`dispatched-prompt.txt`; Gate 1.24/1.27's attempt-2 `promptVersion`
+recomputations moved to the `workerDispatchPrompt` composition; Gate
+1.35's dispatched-prompt equalities likewise; Gate 1.45's check's worker
+fake matches `includes('You are implementing')` instead of `startsWith`
+(the worker prompt now begins with the orientation block; planner prompts
+never carry the line — discriminator strength unchanged).
+
+The check is token-free (fake adapters + the real runner, the Gate 1.45
+pattern), 31 assertions across legs **M** (module loads; cap exported;
+`workerDispatchPrompt` exported), **O1** (byte-determinism),
+**O2** (framing literals hard-coded in the check — the lease path rides
+byte-for-byte on its own indented line exactly once, the scope line names
+the canonical-checkout carve verbatim, baseSha verbatim, fixed
+start/end markers), **O3** (under the caps the block embeds the digest
+producer's own tree-section bytes; the module spawns nothing — source
+pin), **O4** (cap honesty: re-cut below the digest's own cut until the
+block fits; `TRUNCATED` names the orientation constant with the honest
+not-shown count; recomposition identical), **E1** (the drive face,
+plannerContext FALSE — workers orient regardless of the planner flag:
+the dispatched prompt is byte-exactly orientation + `'\n\n'` + the
+UNCHANGED builder template; `promptVersion` equals the dispatched text's
+sha256 and DIFFERS from main's bare-builder hash; the planner-authored
+brief bytes in report.json ride verbatim; the planner prompt stays
+byte-identical to main's no-context template and no digest file/report
+field appears; `dispatched-prompt.txt` carries the exact dispatched
+bytes; the premise guard stays inert; the two candidates' blocks differ
+only by the lease path), and **E2** (plannerContext TRUE keeps every
+T-059 face while the worker tree rides the same digest's bytes; a
+`--jobs` drive's worker prompt carries the block too — every worker
+dispatch, both modes).
+
+Red bar (AGENTS.md #8), recorded BEFORE the change by running this check
+on the pre-change lane (= main): 13 named failures, exit 1, verbatim at
+`C:\swarm\verify-red\T-060-red.log` — the module import fails (M), the
+module-direct legs fail by name (O1–O4), and the E1 drive records the
+ticket's acceptance red: the dispatched worker prompt for a stubbed run
+carries NO orientation block, no `dispatched-prompt.txt` exists, and
+`promptVersion` equals main's bare-builder hash. All 31 assertions green
+on the lane build; the full fast tier ALL GREEN in the same change-set.
+
+**Gate 2 owed** (the standing trigger fires — the worker dispatch prompt
+changed): every existing Gate 2 assertion must stay green on the driving
+run, and the run's no-op/derailment picture is recorded in T-060's
+Landed section as one honest data point (the T-050 precedent: measured
+opportunistically, no same-run promotion, AGENTS.md #11). Gate 3 n/a (no
+adapter change).
+
+Required whenever the orientation producer (`src/worker-orientation.ts`),
+its cap, the runner's worker-dispatch composition (`runJob`/
+`workerDispatchPrompt`), or the shared tree-section composer changes.
 
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 

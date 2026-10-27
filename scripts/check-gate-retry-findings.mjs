@@ -27,7 +27,9 @@ import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as runner from '../src/runner.ts'
-import { builderPrompt } from '../src/runner.ts'
+import { workerDispatchPrompt } from '../src/runner.ts'
+import { composePlannerDigest } from '../src/planner-digest.ts'
+import { composeWorkerOrientation } from '../src/worker-orientation.ts'
 import { WorktreeProvider } from '../src/workspace/worktree.ts'
 
 const failures = []
@@ -39,6 +41,11 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const norm = (p) => p.replaceAll('\\', '/').toLowerCase()
 const read = (p) => readFileSync(p, 'utf8')
 const sha256Hex = (s) => createHash('sha256').update(s).digest('hex')
+// T-060: the orientation block the engine prepends to every worker dispatch —
+// recomposed here so the expected prompt bytes stay exact (the builderPrompt
+// precedent; deterministic recomposition, Gate 1.46 O1).
+const orientationFor = (repo, baseSha, leasePath) =>
+  composeWorkerOrientation({ leasePath, baseSha, digest: composePlannerDigest({ repo, baseSha }) }).text
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const sandbox = 'C:/swarm/verify-gate-retry-findings'
@@ -235,7 +242,7 @@ const main = async () => {
     ], order)
     const verifier = fakeVerifier([T1, T2], order)
     const gates = [markerGate('build', 'fixed', order), markerGate('lint', 'fixed', order), staticGate('always-pass', true, 'always-pass: ok', order)]
-    const { report, artifactsDir } = await drive('findings-ride', { worker, gates, gateRetry: true, verifierModel: 'fake/verifier-model', verifierWorker: verifier })
+    const { report, repo, artifactsDir, baseSha } = await drive('findings-ride', { worker, gates, gateRetry: true, verifierModel: 'fake/verifier-model', verifierWorker: verifier })
     const c = report.candidates[0]
     const a1 = c.attempts[0]
     const a2 = c.attempts[1]
@@ -284,7 +291,7 @@ const main = async () => {
     t('F1: the fingerprint covers the FULL composed text including the findings section (sha256 of the brief file bytes)',
       sha256Hex(briefText) === c.gateRetry?.fingerprint)
     t('F1: the findings reached attempt 2\'s actual prompt (its promptVersion hashes the brief text containing them — one composition, two consumers)',
-      a2?.promptVersion === sha256Hex(builderPrompt(briefText, join(artifactsDir, 'wt', 'c01-a2')))
+      a2?.promptVersion === sha256Hex(workerDispatchPrompt(briefText, join(artifactsDir, 'wt', 'c01-a2'), orientationFor(repo, baseSha, join(artifactsDir, 'wt', 'c01-a2'))))
       && worker.prompts[1]?.includes(FINDING_B) && worker.prompts[1]?.includes(EVIDENCE_C))
     t('F1: the two legs\' verifier evidence files are DISTINCT and intact — the pre-retry leg at verifier-pre-retry{.log,-raw.txt} in the failing attempt\'s evidence dir, the final leg at verifier{.log,-raw.txt}',
       read(join(artifactsDir, 'c01', 'verifier-pre-retry-raw.txt')) === T1

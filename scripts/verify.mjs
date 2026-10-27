@@ -1122,6 +1122,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.46: worker orientation block (T-060) ----------
+section('Gate 1.46 — worker orientation block: engine-composed lease path + base tree facts in the worker dispatch (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-worker-orientation.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'worker-orientation self-check exit 0')
+} catch (e) {
+  fail(`worker-orientation self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

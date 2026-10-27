@@ -69,7 +69,9 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { builderPrompt, runSkeleton } from '../src/runner.ts'
+import { runSkeleton, workerDispatchPrompt } from '../src/runner.ts'
+import { composePlannerDigest } from '../src/planner-digest.ts'
+import { composeWorkerOrientation } from '../src/worker-orientation.ts'
 import { composeRoundPacket } from '../src/rounds.ts'
 import { WorktreeProvider } from '../src/workspace/worktree.ts'
 
@@ -91,6 +93,16 @@ const t = (name, cond) => {
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const read = (p) => readFileSync(p, 'utf8')
 const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
+// T-060: the orientation block the engine prepends to every worker dispatch
+// (src/worker-orientation.ts over the run's one digest) — recomposed here the
+// same way so every expected-prompt comparison stays BYTE-exact (the
+// builderPrompt precedent; deterministic recomposition, Gate 1.45 D1 / 1.46
+// O1). The premise assertions are unchanged in strength: they still compare
+// exact bytes, now against the full dispatched composition.
+const orientationFor = (repo, baseSha, leasePath) =>
+  composeWorkerOrientation({ leasePath, baseSha, digest: composePlannerDigest({ repo, baseSha }) }).text
+const dispatchedFor = (brief, repo, baseSha, leasePath) =>
+  workerDispatchPrompt(brief, leasePath, orientationFor(repo, baseSha, leasePath))
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const sandbox = 'C:/swarm/verify-brief-premise'
@@ -152,7 +164,11 @@ function workerScripted(actions) {
     reqs: [],
     async execute(req) {
       this.reqs.push({ ...req })
-      if (req.prompt.startsWith('You are implementing')) {
+      // includes, not startsWith: since T-060 the worker prompt begins with
+      // the engine's orientation block and the builder template rides inside
+      // it (Gate 1.46); matching strength is unchanged — the GOAL line still
+      // keys the script and premise notes still append after the brief.
+      if (req.prompt.includes('You are implementing')) {
         for (const [brief, writes] of actions) {
           if (req.prompt.includes(`GOAL: ${brief}\n`)) {
             for (const [file, content] of writes) writeFileSync(join(req.cwd, file), content)
@@ -168,7 +184,7 @@ function workerScripted(actions) {
 // execute call; the worker prompts are the builder-prompt ones, keyed by the
 // lease path's final segment — `wt/<id>` → `<id>`).
 const dispatchedPrompt = (fake, id) =>
-  fake.reqs.find((r) => r.prompt.startsWith('You are implementing') && r.cwd.replaceAll('\\', '/').endsWith(`/${id}`))?.prompt ?? null
+  fake.reqs.find((r) => r.prompt.includes('You are implementing') && r.cwd.replaceAll('\\', '/').endsWith(`/${id}`))?.prompt ?? null
 
 // One throwaway scenario repo (the check-rounds drive pattern): calc.js and
 // notes.md at base — NO vec3.js, NO ghost.js (the premise lies are lies).
@@ -271,17 +287,18 @@ const main = async () => {
       ev.includes('BRIEF AS AUTHORED') && ev.includes(R2_A) && ev.includes('BRIEF AS DISPATCHED')
       && ev.indexOf('BRIEF AS AUTHORED') < ev.indexOf(R2_A) && ev.indexOf('BRIEF AS DISPATCHED') > ev.indexOf(R2_A))
     const c01r2 = byId['c01-r2']
-    const unannotatedHash = sha256(builderPrompt(R2_A, join(artifactsDir, 'wt', 'c01-r2')))
+    const r2Lease = join(artifactsDir, 'wt', 'c01-r2')
+    const unannotatedHash = sha256(dispatchedFor(R2_A, repo, baseSha, r2Lease))
     t('P1: promptVersion split (one composition, two consumers) — the dispatched attempt\'s promptVersion EQUALS the sha256 of the dispatched prompt and DIFFERS from the unannotated text\'s hash',
       c01r2?.attempts[0]?.promptVersion === sha256(p1Prompt ?? '')
       && c01r2?.attempts[0]?.promptVersion !== unannotatedHash
-      && p1Prompt !== builderPrompt(R2_A, join(artifactsDir, 'wt', 'c01-r2')))
+      && p1Prompt !== dispatchedFor(R2_A, repo, baseSha, r2Lease))
     t('P1: `brief` on the candidate report keeps the PLANNER\'S text (composed text is attempt-scoped evidence, never a replacement — the retry-brief precedent)',
       c01r2?.brief === R2_A && !c01r2?.brief.includes('ENGINE PREMISE NOTE'))
     if (premise !== null) {
       const recomputed = premise.annotateBriefPremise({ brief: R2_A, repo, baseSha, survivorChangedPaths: survivorPaths })
       t('P1: the guard is deterministic — re-annotating the same brief from the same seam-re-derived inputs reproduces the dispatched prompt byte-for-byte',
-        recomputed !== null && p1Prompt === builderPrompt(recomputed.annotated, join(artifactsDir, 'wt', 'c01-r2')))
+        recomputed !== null && p1Prompt === dispatchedFor(recomputed.annotated, repo, baseSha, join(artifactsDir, 'wt', 'c01-r2')))
       t('P1: the recomputed note kind is survivor-created (vec3.js is in survivor changed paths)',
         recomputed !== null && eq(recomputed.notes, [{ path: 'vec3.js', kind: 'survivor-created' }]))
       t('P1: the recomputed evidence text is byte-identical to the on-disk brief-premise.txt',
@@ -301,8 +318,8 @@ const main = async () => {
 
     // P3 (in-drive face) — the inert brief: calc.js exists at base.
     const p3Prompt = dispatchedPrompt(worker, 'c02')
-    t('P3: a brief whose path tokens all exist at base dispatches a BYTE-IDENTICAL prompt (no annotation, no appended bytes)',
-      p3Prompt === builderPrompt(R1_B, join(artifactsDir, 'wt', 'c02')))
+    t('P3: a brief whose path tokens all exist at base dispatches a BYTE-IDENTICAL prompt (no annotation, no appended note bytes — the orientation block is the same engine-composed wrapper every dispatch carries)',
+      p3Prompt === dispatchedFor(R1_B, repo, baseSha, join(artifactsDir, 'wt', 'c02')))
     t('P3: the inert candidate has NO brief-premise.txt and today\'s exact candidate key set (no report field)',
       !existsSync(join(artifactsDir, 'c02', 'brief-premise.txt'))
       && eq(Object.keys(byId.c02 ?? {}).sort(), TODAY_KEYS))
@@ -339,8 +356,8 @@ const main = async () => {
       const ci = di.report.candidates[0]
       const pi = dispatchedPrompt(workerI, 'c01')
       t('P3 (dedicated): an all-tokens-at-base brief dispatches byte-identical prompts for every candidate (no note section anywhere)',
-        di.report.candidates.every((c) => dispatchedPrompt(workerI, c.id) === builderPrompt(c.brief, join(di.artifactsDir, 'wt', c.id)))
-        && pi === builderPrompt(INERT, join(di.artifactsDir, 'wt', 'c01')))
+        di.report.candidates.every((c) => dispatchedPrompt(workerI, c.id) === dispatchedFor(c.brief, di.repo, di.baseSha, join(di.artifactsDir, 'wt', c.id)))
+        && pi === dispatchedFor(INERT, di.repo, di.baseSha, join(di.artifactsDir, 'wt', 'c01')))
       t('P3 (dedicated): no brief-premise.txt for any candidate, no note bytes in any candidate block, today\'s key sets',
         !di.report.candidates.some((c) => existsSync(join(di.artifactsDir, c.id, 'brief-premise.txt')))
         && di.report.candidates.every((c) => eq(Object.keys(c).sort(), TODAY_KEYS))
@@ -367,8 +384,8 @@ const main = async () => {
       })
       const cj = dj.report.candidates.find((c) => c.id === 'j1')
       const pj = dispatchedPrompt(workerJ, 'j1')
-      t('P4: a --jobs brief naming an absent-at-base file dispatches BYTE-IDENTICAL to today (operator-owned briefs are never annotated)',
-        pj === builderPrompt(JOBS_BRIEF, join(dj.artifactsDir, 'wt', 'j1')) && !pj.includes('ENGINE PREMISE NOTE'))
+      t('P4: a --jobs brief naming an absent-at-base file dispatches BYTE-IDENTICAL to the unannotated composition (operator-owned briefs are never annotated)',
+        pj === dispatchedFor(JOBS_BRIEF, dj.repo, dj.baseSha, join(dj.artifactsDir, 'wt', 'j1')) && !pj.includes('ENGINE PREMISE NOTE'))
       t('P4: no brief-premise.txt for the jobs candidate and no note bytes in its report block',
         !existsSync(join(dj.artifactsDir, 'j1', 'brief-premise.txt'))
         && !JSON.stringify(cj ?? {}).includes('ENGINE PREMISE'))
@@ -387,13 +404,13 @@ const main = async () => {
       })
       t('P7 (fallback): when the planner fails to parse, the raw-goal briefs (operator text) dispatch unannotated even though nowhere-file.js is absent at base',
         df.report.planner?.ok === false && df.report.planner?.fallbackUsed === true
-        && dispatchedPrompt(workerF, 'c01') === builderPrompt(GOAL, join(df.artifactsDir, 'wt', 'c01'))
+        && dispatchedPrompt(workerF, 'c01') === dispatchedFor(GOAL, df.repo, df.baseSha, join(df.artifactsDir, 'wt', 'c01'))
         && !dispatchedPrompt(workerF, 'c01').includes('ENGINE PREMISE NOTE'))
       const workerN = workerScripted([[GOAL, [['made.txt', 'no-planner change\n']]]])
       const dn = await drive('no-planner', { goal: GOAL, plannerModel: null, worker: workerN })
       t('P7 (--no-planner): raw-goal briefs under --no-planner dispatch unannotated (operator-owned, same carve)',
         dn.report.planner === undefined
-        && dispatchedPrompt(workerN, 'c01') === builderPrompt(GOAL, join(dn.artifactsDir, 'wt', 'c01'))
+        && dispatchedPrompt(workerN, 'c01') === dispatchedFor(GOAL, dn.repo, dn.baseSha, join(dn.artifactsDir, 'wt', 'c01'))
         && !dispatchedPrompt(workerN, 'c01').includes('ENGINE PREMISE NOTE'))
     }
 

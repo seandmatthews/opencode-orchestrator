@@ -8,6 +8,8 @@ import { computeGateCommandOverlap } from './gate/overlap.js'
 import { annotateBriefPremise } from './premise.js'
 import type { BriefPremiseAnnotation } from './premise.js'
 import { composePlannerDigest } from './planner-digest.js'
+import type { PlannerDigest } from './planner-digest.js'
+import { composeWorkerOrientation } from './worker-orientation.js'
 import { composeRoundPacket } from './rounds.js'
 import { deriveRunYield } from './yield.js'
 import { buildEarlyStops, buildSchedule, earlyStopMet, readyJobs } from './scheduler.js'
@@ -213,6 +215,23 @@ export function builderPrompt(goal: string, workspacePath: string): string {
 }
 
 /**
+ * T-060: the full dispatched worker prompt — the engine-composed orientation
+ * block (src/worker-orientation.ts) PREPENDED to the UNCHANGED builder
+ * template, joined by one blank line. `orientationBlock` null = today's
+ * exact bytes (the run's digest failed to compose — the loud degradation
+ * logged once at run start; the premise-guard posture). The builder
+ * template's own bytes never change: the planner-authored brief rides
+ * verbatim inside it, `CandidateReport.brief` keeps the brief, and only
+ * this engine-composed wrapper grows. Exported so the pinning gates
+ * (1.24/1.27/1.35/1.46) compose the exact expected bytes through the same
+ * seam — the builderPrompt precedent.
+ */
+export function workerDispatchPrompt(brief: string, workspacePath: string, orientationBlock: string | null): string {
+  const builder = builderPrompt(brief, workspacePath)
+  return orientationBlock === null ? builder : `${orientationBlock}\n\n${builder}`
+}
+
+/**
  * T-050: run the brief-premise guard over PLANNER-AUTHORED briefs before
  * they become jobs (rounds 1 AND 2 — the caller passes the round-1
  * survivors' changed paths for the round-2 call, empty for round 1).
@@ -275,30 +294,38 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
   let planner: PlannerReport | undefined
   let premiseAnnotations: (BriefPremiseAnnotation | undefined)[] = []
 
-  // T-059 planner repo digest: composed ONCE per run (repo + baseSha are
-  // fixed across rounds, so both planner rounds ride the same bytes) before
-  // the first planner phase, through the same list-form git discipline the
-  // premise guard uses. Bytes, never access: the digest rides
-  // plannerPrompt's contextBlock seam and names no repo path — the planner's
-  // scratch cwd and 'artifact-only' posture are untouched below. Evidence is
-  // written immediately (one composition, two consumers: the prompt's
-  // contextBlock and the report's recorded sha256 cannot drift). The
-  // never-break-a-run posture (the premise-guard pattern): a composition
-  // failure — most plausibly an unreadable repo — logs loudly and the run
-  // plans with today's exact digest-less prompts; no file, no report field.
+  // T-059 planner repo digest + T-060 worker orientation share ONE digest
+  // per run: composed ONCE here (repo + baseSha are fixed across rounds and
+  // identical for every candidate) through the same list-form git discipline
+  // the premise guard uses, before any planner or worker phase. Bytes, never
+  // access: the digest rides plannerPrompt's contextBlock seam (T-059) and
+  // the worker orientation block's tree section (T-060) — the planner's
+  // scratch cwd, capability postures, and parse path are untouched below.
+  // The digest's PLANNER-side evidence (planner-digest.txt +
+  // RunReport.plannerDigest, one composition / two consumers) stays tied to
+  // the planner-context flag exactly as T-059 pinned it (Gate 1.45 E2: flag
+  // off ⇒ no file, no report field); since T-060 the digest is composed for
+  // EVERY run regardless, because every worker dispatch carries the
+  // orientation block. The never-break-a-run posture (the premise-guard
+  // pattern): a composition failure — most plausibly an unreadable repo —
+  // logs loudly ONCE here and the whole run degrades to today's exact prompt
+  // bytes on both sides (no orientation block, no context block, no file, no
+  // report field — the report never claims context any role did not
+  // receive).
+  let runDigest: PlannerDigest | null = null
   let plannerDigestBlock: string | null = null
   let plannerDigest: PlannerDigestRecord | undefined
-  if (!opts.scheduled && opts.plannerModel && opts.plannerContext === true) {
-    try {
-      const digest = composePlannerDigest({ repo: opts.repo, baseSha: opts.baseSha })
-      const digestPath = join(opts.artifactsDir, 'planner-digest.txt')
-      writeFileSync(digestPath, digest.text)
-      plannerDigestBlock = digest.text
-      plannerDigest = { path: digestPath, sha256: digest.sha256 }
-      console.log(`planner context: repo digest @ ${opts.baseSha.slice(0, 12)} — ${digest.listedPaths}/${digest.totalPaths} tracked paths, ${digest.text.length} chars${digest.truncated ? ` (TRUNCATED by the ${digest.cap} cap)` : ''}`)
-    } catch (e) {
-      console.log(`planner digest failed (${errorMessage(e)}); planning without repo context — today's exact prompts`)
-    }
+  try {
+    runDigest = composePlannerDigest({ repo: opts.repo, baseSha: opts.baseSha })
+  } catch (e) {
+    console.log(`planner digest failed (${errorMessage(e)}); planning without repo context and dispatching workers without the orientation tree — today's exact prompts`)
+  }
+  if (runDigest !== null && !opts.scheduled && opts.plannerModel && opts.plannerContext === true) {
+    const digestPath = join(opts.artifactsDir, 'planner-digest.txt')
+    writeFileSync(digestPath, runDigest.text)
+    plannerDigestBlock = runDigest.text
+    plannerDigest = { path: digestPath, sha256: runDigest.sha256 }
+    console.log(`planner context: repo digest @ ${opts.baseSha.slice(0, 12)} — ${runDigest.listedPaths}/${runDigest.totalPaths} tracked paths, ${runDigest.text.length} chars${runDigest.truncated ? ` (TRUNCATED by the ${runDigest.cap} cap)` : ''}`)
   }
 
   if (!opts.scheduled && opts.plannerModel) {
@@ -335,7 +362,7 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
     gates: opts.gates,
   }))
 
-  const round1 = await driveJobs(jobs, opts)
+  const round1 = await driveJobs(jobs, opts, runDigest)
   let candidates = jobs.map((j) => round1.reports.get(j.id)).filter((r): r is CandidateReport => r !== undefined)
   const schedule = opts.scheduled
     ? buildSchedule(opts.scheduled.phases, round1.nodes, round1.terminal, round1.dispatchIndexOf)
@@ -416,7 +443,7 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
         timeoutMs: opts.timeoutMs,
         gates: opts.gates,
       }))
-      const round2 = await driveJobs(jobs2, opts)
+      const round2 = await driveJobs(jobs2, opts, runDigest)
       const candidates2 = jobs2.map((j) => round2.reports.get(j.id)).filter((r): r is CandidateReport => r !== undefined)
       rounds.push({
         round: 2,
@@ -527,7 +554,7 @@ function eligibleForDispatch(
  *  jobs never dispatch, `inFlight` drains, the `inFlight.size === 0` break
  *  fires exactly as before. A dispatched job's verdict ladder below dispatch
  *  is untouched by the stop. */
-async function driveJobs(jobs: ResolvedJob[], opts: SkeletonOptions): Promise<{
+async function driveJobs(jobs: ResolvedJob[], opts: SkeletonOptions, runDigest: PlannerDigest | null): Promise<{
   reports: Map<string, CandidateReport>
   terminal: Map<string, 'succeeded' | 'failed'>
   dispatchIndexOf: Map<string, number>
@@ -569,7 +596,7 @@ async function driveJobs(jobs: ResolvedJob[], opts: SkeletonOptions): Promise<{
       const job = byId.get(id)!
       dispatchIndexOf.set(id, dispatched++)
       running.add(id)
-      const p = runJob(job, opts, changedPathsById).then((rep) => {
+      const p = runJob(job, opts, runDigest, changedPathsById).then((rep) => {
         reports.set(id, rep)
         terminal.set(id, rep.passedAllGates ? 'succeeded' : 'failed')
       }).finally(() => {
@@ -939,11 +966,15 @@ async function runVerifier(
 /** §7.7 context fingerprint, narrowed to what has a producer: sha256 over
  *  brief + model + the composed prompt with the workspace-path line excluded,
  *  so the same brief+model hashes identically across attempts (an
- *  input-context hash compares inputs, not worktree paths). The full
- *  fingerprint adds prompt version, role version, selected artifact
- *  IDs/hashes, reasoning configuration, and project-manifest version
- *  (§7.7:615-620) — none has a producer until the Milestone-2 context
- *  system. */
+ *  input-context hash compares inputs, not worktree paths). T-060 scope note:
+ *  "the composed prompt" here stays the BUILDER TEMPLATE — the orientation
+ *  block (engine mechanics, identical across a run's candidates but for the
+ *  per-attempt lease path, exactly like the excluded workspace line) is
+ *  deliberately not hashed; recording the exact dispatched text is
+ *  promptVersion's job, and it moves (Gate 1.46). The full fingerprint adds
+ *  prompt version, role version, selected artifact IDs/hashes, reasoning
+ *  configuration, and project-manifest version (§7.7:615-620) — none has a
+ *  producer until the Milestone-2 context system. */
 function inputContextHash(brief: string, model: string, workspacePath: string): string {
   const promptWithoutWorkspace = builderPrompt(brief, workspacePath)
     .split('\n')
@@ -1052,7 +1083,7 @@ function composeGateRetryBrief(
  *  and its eligible findings ride the composed brief under documented caps —
  *  still no model call composes the brief, still zero verdict inputs. Blind
  *  re-rolls stay banned (decisions.md 2026-10-21). */
-async function runJob(job: ResolvedJob, opts: SkeletonOptions, changedPathsById?: Map<string, string[]>): Promise<CandidateReport> {
+async function runJob(job: ResolvedJob, opts: SkeletonOptions, runDigest: PlannerDigest | null, changedPathsById?: Map<string, string[]>): Promise<CandidateReport> {
   const id = job.id
   const dir = join(opts.artifactsDir, id)
   mkdirSync(dir, { recursive: true })
@@ -1127,7 +1158,21 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions, changedPathsById?
     // T-038: on a gate-retry leg the brief IS the composed feedback text —
     // attempt 2's inputContextHash correctly differs from attempt 1's,
     // because its brief differs; the hash is doing its job.
-    const prompt = builderPrompt(attemptBrief, lease.path)
+    // T-060: the engine-composed orientation block (src/worker-orientation.ts)
+    // is PREPENDED to every worker dispatch — the two facts every derailed
+    // worker got wrong (where exactly am I, what files exist), pure engine
+    // mechanics over the run's one digest + this attempt's lease path, never
+    // model judgment (the T-050 annotation seam's discipline). The block
+    // moves promptVersion by construction (the exact text grew — the T-029
+    // producer records the composition change; pinned by Gate 1.46), the
+    // builder template rides byte-unchanged after it, `base.brief` keeps the
+    // planner's text, and the full dispatched prompt is recorded below as
+    // dispatched-prompt.txt. runDigest null = the run-start composition
+    // failure (logged once there): today's exact prompt bytes, no block.
+    const orientationBlock = runDigest !== null
+      ? composeWorkerOrientation({ leasePath: lease.path, baseSha: opts.baseSha, digest: runDigest }).text
+      : null
+    const prompt = workerDispatchPrompt(attemptBrief, lease.path, orientationBlock)
     const promptVersion = createHash('sha256').update(prompt).digest('hex')
 
     const attempt: Attempt = {
@@ -1141,6 +1186,16 @@ async function runJob(job: ResolvedJob, opts: SkeletonOptions, changedPathsById?
       outputArtifacts: [logPath],
     }
     base.attempts.push(attempt)
+    // T-060: the full dispatched prompt (orientation + brief) is run evidence
+    // — the exact bytes this attempt's promptVersion hashes, on disk the
+    // moment the attempt exists (one composition, two consumers; the
+    // brief-premise.txt/retry-brief.txt precedent). Rides the attempt's
+    // outputArtifacts.
+    {
+      const dispatchedPromptPath = join(evidenceDir, 'dispatched-prompt.txt')
+      writeFileSync(dispatchedPromptPath, prompt)
+      attempt.outputArtifacts.push(dispatchedPromptPath)
+    }
     // T-050: the premise annotation's before/after evidence — written ONCE,
     // on the first attempt (its evidence dir IS the candidate dir), riding
     // the dispatched attempt's outputArtifacts like diff.patch and
