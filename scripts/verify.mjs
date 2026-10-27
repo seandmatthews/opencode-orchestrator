@@ -1142,6 +1142,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.48: adversarial expected outcomes (T-062) ----------
+section('Gate 1.48 — adversarial expected outcomes: correct input validation stops recording as a crash (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-adversarial-outcomes.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'adversarial-outcomes self-check exit 0')
+} catch (e) {
+  fail(`adversarial-outcomes self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

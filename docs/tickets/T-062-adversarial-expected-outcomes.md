@@ -1,6 +1,6 @@
 # T-062 — Adversarial-probe expected outcomes: correct input validation stops recording as a crash (register R16)
 
-**Status:** proposed
+**Status:** done (2026-10-27)
 **Category:** engine
 **Value (1-5):** 3 · **Risk (1-5):** 2
 **Depends on:** —
@@ -89,6 +89,64 @@ results to round 2 inherits the inversion.
       assertion green. **Gate 3 n/a.**
 
 ## Landed
+
+2026-10-27, lane `ticket/T-062-adversarial-expected-outcomes`.
+
+- **The expectation seam** (`src/probe.ts`): the corpus became
+  `{input, expectation}` records; `generateAdversarialCases` output stays
+  byte-identical (strings, order, count unchanged). New exported pure
+  `adversarialCaseExpectations(cases)` derives the per-case
+  `'exit-0' | 'reject'` list — the implementation-fixed reject split is
+  corpus indices 0 (empty string), 1 (control characters), 9-11 (the three
+  malformed-JSON-looking strings); every other corpus entry and every
+  generated case (soup AND permutations) expects exit-0. Expectations are
+  seed-independent (different seeds derive the identical list) and total
+  (non-corpus lists derive uniformly exit-0).
+- **The outcome classes** (`AdversarialProbe.run`): outcome union extended
+  to `survived | rejected-as-expected | unexpected-exit-0 | crashed-exit |
+  crashed-timeout | spawn-refused`. A clean non-zero exit on a
+  reject-expected case records `rejected-as-expected` (PASSED row, counts
+  toward survival); an exit 0 on a reject-expected case records
+  `unexpected-exit-0` (the no-op handler — unmet expectation, failed row,
+  first-error vocabulary `case N/M exited 0 where rejection was expected
+  (input invalid by construction)`); timeouts and spawn refusals keep
+  exactly their T-032 meanings on either expectation (a reject-expected
+  timeout records crashed-timeout, never rejection). Probe success = every
+  case spawned AND every case met its expectation, exactly the ticket's
+  `passed: outcome === 'survived' || outcome === 'rejected-as-expected'`
+  at the case-gate mapping.
+- **The recorded tables**: `results.json` rows gain `expectation` beside
+  `outcome`; the table and the bundle measurements gain `casesRejected` /
+  `casesUnexpectedExit0` / `cases-rejected` / `cases-unexpected-exit-0`
+  beside the unchanged-meaning casesRun / casesCrashed (no silent merge —
+  the ticket's naming note resolved against the landed vocabulary: the
+  pre-change counters were `casesRun`/`casesCrashed`; both keep their
+  meanings with the new class counted beside them).
+- **The composer seam**: `ProbeRunSummary` gains optional `casesRejected`
+  (present only when the bundle carried non-zero rejections — the
+  optional-field pattern), the runner fills it from the bundle's own
+  `cases-rejected` measurement, and `src/rounds.ts` renders `N input
+  case(s) rejected as expected — validated input handling, not a failure`
+  in the probe line — never "failed" for rejections, and the annotation
+  never launders a genuinely failed probe.
+- **Gates**: new **Gate 1.48**
+  (`scripts/check-adversarial-outcomes.mjs`, wired into
+  `scripts/verify.mjs` fast tier, 15 assertions: determinism with
+  expectations, the exact authored split, the validating-fixture green
+  pair, soup-case strictness, the no-op inversion face, reject-expected
+  timeout + spawn refusal never-survival, composer honesty + back-compat).
+  Gate 1.15's adversarial faces rewired onto the expectation-aware
+  derivation — the two intentional flips recorded in VERIFICATION.md (the
+  no-crash face became the no-op face: success true → false with five
+  unexpected-exit-0 rows; the crash-face/P5 first-error and counts are now
+  expectation-derived) — 124 assertions green. Red bar recorded first,
+  token-free, on the pristine lane (= main): the validating fixture's five
+  malformed cases recorded `crashed-exit` / `success: false` (`error:
+  case 1/20 exited with code 1`), verbatim at
+  `C:\swarm\verify-red\T-062-red.log`. Fast tier ALL GREEN; **Gate 2 owed**
+  (report-shape trigger: the optional `casesRejected` summary field) — NOT
+  run in this lane; the full-tier re-run rides the landing pipeline and its
+  result is recorded there.
 
 ## Verification
 

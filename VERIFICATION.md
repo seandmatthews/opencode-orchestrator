@@ -1543,35 +1543,69 @@ corpus order, then PRNG-driven ASCII-soup strings and corpus permutations
 the count. Each case runs SEQUENTIALLY through the unchanged
 `executeProbeCommand` core, appended to the scenario command's args (the
 core has no stdin — argv-feeding changes nothing shared; stdin is carved),
-each with the FULL `timeoutMs` budget. Crash/survival vocabulary: a case
-SURVIVES when the target spawned cleanly, exited 0, and did not time out; it
-CRASHES when it ran and exited non-zero or timed out; a SPAWN-REFUSED case
-produced no run — neither survived nor crashed (a target cannot crash on an
-input it never received). Success = the case list non-empty AND every case
-spawned cleanly AND every case survived; zero completed cases is
+each with the FULL `timeoutMs` budget. EXPECTED-OUTCOME vocabulary (T-062,
+register R16 — the inversion fix this gate's adversarial legs were rewired
+onto; full semantics pinned by Gate 1.48): every case carries an
+ENGINE-AUTHORED expectation, `'exit-0'` or `'reject'`, a pure function of the
+engine-authored corpus (the exported `adversarialCaseExpectations` — never of
+the target's behavior, never reclassified after watching the target run, and
+never of the seed's random tail: the corpus prefix carries the authored
+expectations, every generated case — soup and permutations alike — expects
+exit-0). The corpus entries whose INPUT IS INVALID BY CONSTRUCTION — the
+exact split, fixed at implementation and pinned by Gate 1.48: the empty-input
+edge (index 0), the control-character case (index 1), and the three
+malformed-JSON-looking strings (indices 9-11) — expect REJECTION; everything
+else expects exit-0. Outcome classes: a case SURVIVES when it spawned
+cleanly, exited 0, did not time out, and exit-0 was the expectation; it is
+REJECTED-AS-EXPECTED when it spawned cleanly, exited non-zero within the
+budget, and reject was the expectation (correct input validation — counts
+toward survival, a PASSED case row); it is UNEXPECTED-EXIT-0 when it spawned
+cleanly, exited 0, and reject was the expectation (the no-op handler that
+never reads argv — an unmet expectation, exactly the previously
+undetectable no-op R16 names); it CRASHES (crashed-exit / crashed-timeout)
+when it ran, exit-0 was the expectation, and it exited non-zero or timed
+out; a SPAWN-REFUSED case produced no run — none of the above (a target
+cannot crash on an input it never received). A timeout or spawn refusal is
+NEVER survival on either expectation — a reject-expected case that times
+out records crashed-timeout, not rejection (the T-032 refusal vocabulary
+unchanged, strengthened-or-equal). Honest boundary, stated in the ticket and
+the module docblock: a clean non-zero exit is indistinguishable at the
+process boundary from an unhandled throw on the same input — both record
+rejected-as-expected; non-zero exit is non-zero exit. Success = the case
+list non-empty AND every case spawned cleanly AND every case met its
+expectation (`passed: outcome === 'survived' || outcome ===
+'rejected-as-expected'` at the case-gate mapping); zero completed cases is
 success:false, never a pass (AGENTS.md #7); `error` names the FIRST breaking
 case with counts ("case 3/20 exited with code 1" / "case 5/20 timed out
-after Nms" / "case 1/20 could not be spawned: ENOENT"). Measurements
+after Nms" / "case 1/20 could not be spawned: ENOENT" / "case 1/20 exited 0
+where rejection was expected (input invalid by construction)"). Measurements
 recorded regardless of success — evidence about crashes is the point: one
-`case-<i> duration` (ms) per case that actually ran, plus `cases-run` and
-`cases-crashed` counts (unit `'cases'`). Artifacts: the combined `.log` with
-`=== case <i> ===` separators plus `<probeId>.results.json`, kind
-`'report'` (the kind's THIRD producer): `{probeId, scenarioId, seed, cases:
-[{index, input, outcome, durationMs?}], casesRun, casesCrashed}` with
-outcome ∈ survived | crashed-exit | crashed-timeout | spawn-refused and
-every input truncated to `ADVERSARIAL_PROBE_MAX_CASE_CHARS` = 8192 — cases
+`case-<i> duration` (ms) per case that actually ran, plus `cases-run`,
+`cases-crashed`, `cases-rejected`, and `cases-unexpected-exit-0` counts
+(unit `'cases'`) — cases-crashed keeps its T-032 meaning (crashed-exit +
+crashed-timeout only; rejected-as-expected is counted honestly beside it,
+never silently merged into survived or crashed). Artifacts: the combined
+`.log` with `=== case <i> ===` separators plus `<probeId>.results.json`,
+kind `'report'` (the kind's THIRD producer): `{probeId, scenarioId, seed,
+cases: [{index, input, expectation, outcome, durationMs?}], casesRun,
+casesCrashed, casesRejected, casesUnexpectedExit0}` with expectation ∈
+exit-0 | reject and outcome ∈ survived | rejected-as-expected |
+unexpected-exit-0 | crashed-exit | crashed-timeout | spawn-refused and every
+input truncated to `ADVERSARIAL_PROBE_MAX_CASE_CHARS` = 8192 — cases
 ride argv and Windows bounds a spawned command line (CreateProcess's ~32k
 limit), so the constant bounds the probe's contribution with margin (the
 operator's base `command` is expected to stay small — documented
 limitation). gateResults: one entry per case, in case order, named
-`'<probeId>#case-<i>'` (the `'<id>#run-<i>'` precedent) — the crash list is
-machine-readable from the failed rows. NO verdict input of any kind: the
+`'<probeId>#case-<i>'` (the `'<id>#run-<i>'` precedent) — the unmet-
+expectation list is machine-readable from the failed rows. NO verdict input
+of any kind: the
 pipeline is type-agnostic (`runProbes` iterates `job.probes` with no type
 switch; `probe_runs` ingest has no type knowledge; `ProbeRunSummary` is
 type-agnostic), and a success:false adversarial bundle changes nothing
 downstream — adversarial findings advise the human and the round-2 planner
-(the T-030 composer already renders probe summaries into round-2 evidence
-with zero composer edits).
+(the T-030 composer renders probe summaries into round-2 evidence; since
+T-062 it renders rejected-as-expected counts as validated input handling,
+pinned by Gate 1.48's composer leg).
 
 T-018's flip, recorded: Gate 1.15's P2 leg previously ACTIVELY PINNED
 `type: 'benchmark'` as refused (`type must be "command" or "test"`). The
@@ -1629,6 +1663,36 @@ per-job probes[] length/order pins were EXTENDED (job-a 5→6 probes, with the
 adversarial probe the FAILING one — a passing-gates/failing-adversarial job
 still passes) to carry the new adversarial probe — coverage added, nothing
 weakened (the T-024 extension precedent).
+
+T-062's flips, recorded — this change-set's intentional invalidations of
+existing assertions, both in the adversarial faces the ticket exists to
+invert (register R16), both flipped explicitly and replaced with STRICTER
+assertions: (a) the P3 "no-crash face — a robust target" pinned
+`success: true` with every case row passed for a target that exits 0 on
+every input without reading argv. That WAS the inversion — the no-op
+handler was probe-success while a validating CLI recorded crashed-exit. The
+face is now the NO-OP face: the same fixture asserts `success: false` with
+exactly the five reject-expected cases recorded `unexpected-exit-0` (failed
+rows, exit 0, error naming case 1 with the T-062 vocabulary) while every
+exit-0-expected case still survives and passes. (b) The P3 crash face and
+the P5 adversarial faces pinned first-error text and counts derived from the
+raw weak-spot subset (`case N/20 exited with code 1`, cases-crashed = the
+whole crash subset). The derivation is now expectation-aware — the fuzzee's
+malformed-input exits are rejected-as-expected (passed rows), its
+empty-string acceptance is unexpected-exit-0 (the new FIRST breaking case),
+cases-crashed counts only the exit-0-expected crashes, and the faces
+additionally pin per-case expectation fields, cases-rejected, and
+cases-unexpected-exit-0. (c) Gate 1.44's P1 fixture (the chatty adversarial
+target) ignored argv and exited 0 everywhere — the same no-op shape; its
+`success: true` assertion is the T-058 claim (memory hygiene never flips a
+verdict) and stays, so the fixture was made VALIDATING (exits 1 on the
+invalid-by-construction inputs, derived from the recomputed expectations):
+the claim is now proven through the rejection path too, with the
+cases-rejected count pinned beside it. Net strictness increases in every
+flipped face (the
+derivation subsumes the old one and adds fields); the honest full green pair
+(validating target → probe success) lives in Gate 1.48; no other existing
+check was weakened.
 
 No existing gate can pin any probe criterion — Gate 2 is a `--goal`-mode run
 that exercises no probe code (probe emission rides `--jobs` runs), so this
@@ -2579,6 +2643,11 @@ discharged):
   deterministic rendering of the brief, `diffBytes`, the per-gate results
   including the recorded `GateResult.command` (evidence only, never a
   verdict), the advisory review observations, and the probe summaries —
+  since T-062 a probe summary carrying `casesRejected` renders its
+  rejected-as-expected cases as validated input handling in the line
+  (`N input case(s) rejected as expected — validated input handling, not a
+  failure`), never as "failed", and the annotation never launders a
+  genuinely failed probe (pinned by Gate 1.48's composer leg) —
   fed through the existing `buildContextPacket` under a plan whose
   `distillation` block declares EVERY record the builder sees (the T-014
   contract armed). The records carry NO `sourceRefs` — primary evidence,
@@ -5263,7 +5332,12 @@ adversarial probe driven in-process (the Gate 1.15 way) against a fixture
 target emitting 17 MiB on EVERY case (more than the 16 MiB per-case cap,
 delivered as a script file — the corpus feeds flag-like argv such as `-0`,
 which a script path safely demotes to the script's own argv): it completes
-with `success: true` (memory hygiene never flips a verdict), the bundle is
+with `success: true` (memory hygiene never flips a verdict — since T-062
+through the rejection path: the target VALIDATES the corpus's
+invalid-by-construction inputs, so its non-zero exits record
+rejected-as-expected and the assertion also pins the cases-rejected count;
+the pre-T-062 fixture ignored argv and exited 0 everywhere, which T-062's
+authored expectations correctly stopped rewarding), the bundle is
 schema-valid, the aggregate log artifact is ≤ `MAX_PROBE_LOG_BYTES`, the
 truncation line rides the FINAL case entry only (kept within the cap, total
 above it), and the per-case results artifact still rides the bundle. **P2** —
@@ -5594,6 +5668,107 @@ must not disturb them. Gate 3 n/a (no adapter change).
 Required whenever the fence discipline (`src/evidence-fence.ts`), either
 fenced seam's composition (`composeGateRetryBrief`,
 `survivorEvidenceText`), or the observation caps change.
+
+## Gate 1.48 — adversarial expected outcomes: correct input validation stops recording as a crash (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-adversarial-outcomes.mjs
+```
+
+Pins T-062 (the adversarial review 2026-10-23's R16 disposition): the
+adversarial probe's survival rule was exit 0 alone, so a well-behaved CLI
+that validates argv and exits 1 on the malformed corpus inputs recorded
+`crashed-exit` / `success: false` while a no-op handler that never reads
+argv survived all 20 — evidence semantics inverted against exactly the
+candidates a robustness goal wants, then rendered as "failed" into the
+round-2 planner prompt by the composer (register R16's bad-mouthing). The
+fix, per-case ENGINE-AUTHORED expectations attached to the corpus:
+
+- **the expectation seam**: `adversarialCaseExpectations(cases)`
+  (`src/probe.ts`, exported, pure) derives per-case `'exit-0' | 'reject'`
+  expectations. The implementation-fixed reject split — corpus entries
+  whose input is invalid by construction: the empty-input edge (index 0),
+  the control-character case (index 1), the three malformed-JSON-looking
+  strings (indices 9-11; 1-based cases 1, 2, 10, 11, 12) — pinned by index
+  by this gate. Expectations are a function of the ENGINE-AUTHORED corpus
+  alone: never inferred from the target's behavior, never reclassified
+  after watching the target run, never a function of the seed's random
+  tail (every generated case — soup AND permutations — expects exit-0;
+  different seeds derive the IDENTICAL expectation list; the function is
+  total, uniformly exit-0 on non-corpus lists). Seed determinism untouched:
+  same seed → byte-identical case list AND byte-identical expectation list
+  across two runs (the Gate 1.15 seam, extended).
+- **the outcome classes** (`src/probe.ts` AdversarialProbe): a clean
+  non-zero exit within the budget on a reject-expected case records
+  `rejected-as-expected` and counts toward survival (a PASSED case row);
+  an exit 0 on a reject-expected case records `unexpected-exit-0` (the
+  no-op handler — an unmet expectation, never survival); exit-0-expected
+  cases keep survived / crashed-exit / crashed-timeout exactly as T-032
+  defined them. Probe success = every case spawned AND every case met its
+  expectation (`passed: outcome === 'survived' || outcome ===
+  'rejected-as-expected'`). A timeout or spawn refusal stays NEVER survival
+  on either expectation — a reject-expected case that times out records
+  `crashed-timeout`, not rejection (the T-032 refusal vocabulary
+  unchanged, strengthened-or-equal: this gate adds the pinned faces, Gate
+  1.15's refusal faces stay green). The honest boundary, stated in the
+  ticket, the module docblock, and here: a clean non-zero exit is
+  indistinguishable at the process boundary from an unhandled throw on the
+  same input — both record rejected-as-expected; non-zero exit is non-zero
+  exit. NO loosening where exit 0 is the expectation: a seeded-soup case
+  exiting non-zero STILL records crashed-exit and sinks probe success.
+- **the recorded tables**: `<probeId>.results.json` case rows gain
+  `expectation` beside `outcome`, and the table gains `casesRejected` /
+  `casesUnexpectedExit0` beside the unchanged-meaning `casesRun` /
+  `casesCrashed` (rejected cases are NOT merged into crashed or survived —
+  counted honestly); the bundle's measurements gain `cases-rejected` and
+  `cases-unexpected-exit-0` (unit `'cases'`).
+- **the report + composer seam**: `ProbeRunSummary` gains an optional
+  `casesRejected` (present only when the bundle carried a non-zero
+  `cases-rejected` measurement — adversarial probes; the
+  `CandidateReport.probes` optional-field pattern, so flag-less and
+  non-adversarial reports are byte-identical), filled by the runner from
+  the bundle's own measurements. `src/rounds.ts` renders it in the probe
+  line — `N input case(s) rejected as expected — validated input handling,
+  not a failure` — so round-2 evidence no longer marks validating
+  candidates as failed. The annotation never launders a genuinely failed
+  probe (a probe that also failed other cases still renders `failed`, with
+  the rejection scope named); summaries without `casesRejected` render the
+  exact pre-T-062 line shape.
+
+The check is token-free (the Gate 1.15 direct-execution pattern: real
+list-form spawns against generated fixture targets; hand-built composer
+fixtures, the Gate 1.22 leg-A pattern), 15 assertions across legs **D**
+(determinism + the exact authored split + seed-independence + totality),
+**V** (the validating-fixture GREEN pair), **S** (soup-case strictness +
+the no-op inversion face), **T** (reject-expected timeout →
+crashed-timeout with the spawned tree verified dead; spawn refusal stays
+never-survival), and **C** (composer honesty: annotation present and
+`success` for the validating summary, never `failed`; a failed probe stays
+`failed`; back-compat line shape).
+
+Red bar (AGENTS.md #8), recorded BEFORE the change, token-free, on the
+pristine lane worktree (= main): a throwaway script ran the AdversarialProbe
+directly against the validating fixture (the same fixture the V leg
+regenerates) and asserted main's recorded behavior — the 5 malformed-corpus
+cases (indices 1, 2, 10, 11, 12) all `crashed-exit`, `success: false`,
+`error: "case 1/20 exited with code 1"`, exactly those rows failed — exit 0,
+output verbatim at `C:\swarm\verify-red\T-062-red.log`. The green
+replacement (the same fixture recording `rejected-as-expected`, counting
+toward survival, probe success true) is the V leg. Gate 1.15's adversarial
+faces were rewired onto the same expectation-aware derivation in the same
+change-set (the T-062 flips recorded above); all 124 Gate 1.15 assertions
+green.
+
+**Gate 2 owed** (probe record shape changes → report shape changes — the
+optional `casesRejected` summary field; the standing trigger fires): every
+existing Gate 2 assertion green. Gate 2 is a `--goal`-mode run that
+exercises no probe code, so the field's absence keeps its report
+byte-identical; the full-tier re-run recorded at landing. Gate 3 n/a.
+
+Required whenever the adversarial expectation seam
+(`adversarialCaseExpectations`, `ADVERSARIAL_EDGE_CORPUS`), the
+AdversarialProbe outcome classes, `ProbeRunSummary.casesRejected`, or the
+composer's probe-line rendering change.
 
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 

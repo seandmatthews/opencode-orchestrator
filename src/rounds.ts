@@ -198,7 +198,17 @@ function survivorEvidenceText(c: CandidateReport, finishedRound: number): string
   if (c.probes !== undefined && c.probes.length > 0) {
     lines.push('probes (evidence bundles):')
     for (const p of c.probes) {
-      lines.push(`- ${p.probeId}/${p.scenarioId}: ${p.success ? 'success' : 'failed'} (bundle: ${p.bundlePath})`)
+      // T-062 (register R16): a probe whose cases were rejected as expected
+      // is validated input handling, never "failed" — the count rides the
+      // summary (ProbeRunSummary.casesRejected) and is named in the line so
+      // the round-2 planner cannot read correct argv validation as a crash.
+      // The annotation is honest about scope: it describes the rejected
+      // cases only; a probe that ALSO failed other cases still renders
+      // 'failed' (the annotation never launders a failed probe).
+      const rejectedNote = p.casesRejected !== undefined && p.casesRejected > 0
+        ? ` (${p.casesRejected} input case(s) rejected as expected — validated input handling, not a failure)`
+        : ''
+      lines.push(`- ${p.probeId}/${p.scenarioId}: ${p.success ? 'success' : 'failed'}${rejectedNote} (bundle: ${p.bundlePath})`)
     }
   }
   return lines.join('\n')

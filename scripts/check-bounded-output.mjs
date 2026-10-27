@@ -35,10 +35,13 @@
 //   P1  probe aggregate cap (adversarial probe, driven in-process the
 //       Gate 1.15 way): a fixture target emitting more than the 16 MiB
 //       per-case cap on EVERY case completes; success stays true (memory
-//       hygiene never flips a verdict); the log artifact is at most
-//       MAX_PROBE_LOG_BYTES; the bundle records the truncation as one loud
-//       PROBE LOG TRUNCATED cleanupFailures line on the FINAL case entry
-//       only; the bundle stays schema-valid.
+//       hygiene never flips a verdict — since T-062 through the rejection
+//       path: the target validates the corpus's invalid-by-construction
+//       inputs, so its non-zero exits are rejected-as-expected, and the
+//       assertion also pins the cases-rejected count); the log artifact is
+//       at most MAX_PROBE_LOG_BYTES; the bundle records the truncation as
+//       one loud PROBE LOG TRUNCATED cleanupFailures line on the FINAL case
+//       entry only; the bundle stays schema-valid.
 //   P2  probe healthy-path byte-identity (command probe): a small run's log
 //       artifact is byte-identical to the executed output, no truncation
 //       line, schema-valid.
@@ -48,7 +51,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { MAX_TAIL_BUFFER_CHARS as TAIL_OPENCODE } from '../src/worker/opencode.ts'
 import { MAX_TAIL_BUFFER_CHARS as TAIL_MACHINE } from '../src/worker/machine.ts'
-import { MAX_PROBE_LOG_BYTES, CommandProbe, AdversarialProbe, validateEvidenceBundle } from '../src/probe.ts'
+import { MAX_PROBE_LOG_BYTES, CommandProbe, AdversarialProbe, adversarialCaseExpectations, generateAdversarialCases, validateEvidenceBundle } from '../src/probe.ts'
 import { OpenCodeWorker } from '../src/worker/opencode.ts'
 
 const failures = []
@@ -309,19 +312,28 @@ async function main() {
   // ---------- P1: probe aggregate cap (adversarial probe, in-process) --------
   {
     // 17 MiB per case — MORE than the per-case cap on every case; the stub
-    // target ignores its argv case input, emits ASCII, exits 0 (survives).
-    // It is a FILE, not `-e`: the adversarial corpus feeds flag-like argv
-    // (case 7 is `-0`), which a script path safely demotes to the script's
-    // own argv.
+    // target emits ASCII on every case and exits 0. It is a FILE, not `-e`:
+    // the adversarial corpus feeds flag-like argv (case 7 is `-0`), which a
+    // script path safely demotes to the script's own argv. Since T-062 the
+    // target VALIDATES (exits 1 on the invalid-by-construction corpus
+    // inputs, derived here from the recomputed expectations) so the drive's
+    // success:true still means "every case met its expectation" — the
+    // T-058 claim (memory hygiene never flips a verdict) now proven through
+    // the rejection path too, with max emission on every case including the
+    // rejected ones.
+    const p1Cases = generateAdversarialCases(7)
+    const p1RejectInputs = p1Cases.filter((_, i) => adversarialCaseExpectations(p1Cases)[i] === 'reject')
     const targetPath = join(sandbox, 'adv-target.cjs')
     writeFileSync(targetPath, [
-      "const fs = require('node:fs')",
+      'const fs = require(\'node:fs\')',
+      `const invalid = ${JSON.stringify(p1RejectInputs)}`,
       'const b = Buffer.alloc(1024 * 1024, 0x61)',
       'for (let i = 0; i < 17; i++) {',
       '  let off = 0',
       '  while (off < b.length) off += fs.writeSync(1, b, off, b.length - off)',
       '}',
       "fs.writeSync(1, Buffer.from('\\n'))",
+      "if (invalid.includes(process.argv[2] ?? '')) process.exit(1)",
       'process.exit(0)',
       '',
     ].join('\n'))
@@ -338,8 +350,9 @@ async function main() {
       scenario: probe.scenario,
       environment: { artifactsDir: join(sandbox, 'probes'), candidateId: 'direct' },
     })
-    t('P1: a fixture target emitting more than the per-case cap on EVERY case completes with success true (memory hygiene never flips a verdict)',
-      bundle.success === true)
+    t('P1: a fixture target emitting more than the per-case cap on EVERY case completes with success true (memory hygiene never flips a verdict — since T-062 through the rejection path: the validating exits on the malformed corpus inputs are rejected-as-expected, not crashes)',
+      bundle.success === true
+      && bundle.measurements.some((m) => m.name === 'cases-rejected' && m.value === p1RejectInputs.length))
     if (bundle.success !== true) console.error(`--- P1 debug: error=${JSON.stringify(bundle.error)} first-fail=${JSON.stringify(bundle.gateResults.find((g) => !g.passed)?.outputTail?.slice(0, 300))}`)
     let p1SchemaValid = false
     try {

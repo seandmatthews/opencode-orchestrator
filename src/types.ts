@@ -479,6 +479,15 @@ export interface ProbeRunSummary {
   success: boolean
   durationMs: number
   bundlePath: string
+  /** T-062 (register R16): the count of cases the bundle recorded as
+   *  `rejected-as-expected` — correct input validation on the engine-authored
+   *  corpus, which the round composer renders as validated input handling,
+   *  never as failure. Present ONLY when the bundle carried a non-zero
+   *  `cases-rejected` measurement (adversarial probes; the
+   *  `CandidateReport.probes` optional-field pattern — absent otherwise, so
+   *  flag-less and non-adversarial reports are unchanged). Evidence, never a
+   *  verdict input. */
+  casesRejected?: number
 }
 
 /**
