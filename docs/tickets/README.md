@@ -95,7 +95,7 @@ Rules:
 | T-056 | Brief-count honesty: no silent cyclic padding — an under/over-count planner reply is a parse failure into the existing fallback (register R9) | medium | done 2026-10-26 |
 | T-057 | Duplicate gate names refused at parse time: the store's last-write-wins can no longer drop gate evidence (register R7a) | low | done 2026-10-26 |
 | T-058 | Bounded output accumulation: capped tail buffers in both adapters + capped probe log aggregate — a chatty child can no longer OOM the orchestrator (register R11) | medium | done 2026-10-26 |
-| T-059 | Planner repo digest: a deterministic file-tree/manifest digest in the planner prompt via the existing `contextBlock` seam (register R14 — the minimal context producer) | high | proposed |
+| T-059 | Planner repo digest: a deterministic file-tree/manifest digest in the planner prompt via the existing `contextBlock` seam (register R14 — the minimal context producer) | high | done 2026-10-27 |
 | T-060 | Worker orientation block: engine-composed lease path + base tree facts in the worker dispatch — the KI#6 path-confusion classes attacked prompt-side (register A2 successor) | high | proposed |
 | T-061 | Embedded-evidence fencing: fenced, capped, role-labeled blocks at the retry-brief and round-composer seams (register R5) | medium | proposed |
 | T-062 | Adversarial-probe expected outcomes: correct input validation stops recording as a crash — per-case expectations on the engine-authored corpus (register R16) | medium | proposed |

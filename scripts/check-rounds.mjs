@@ -538,9 +538,16 @@ const oneRound = runCli('1-round run', repoOne, ['--rounds', '1'])
 t('C: the real-CLI --rounds 1 run exits 0', oneRound.code === 0)
 const oneRunId = runIdOf(oneRound.out)
 const oneReport = JSON.parse(read(join(runs, oneRunId ?? 'missing', 'report.json')))
-t('C (n=1): --rounds 1 is today\'s single pass — NO rounds block, today\'s exact top-level key set, one candidate wave',
+// T-059: the key set gains `plannerDigest` — this leg drives the REAL CLI,
+// where the planner repo digest is default ON (its evidence block rides every
+// planner-mode run; `--no-planner-context` opts out). The single-pass pin's
+// substance is unchanged: still NO rounds block, no other key, one wave. The
+// direct-drive faces above stay key-identical by the seam's absent≡off
+// default (pinned by Gate 1.45 E2); the digest's own behavior is Gate 1.45.
+t('C (n=1): --rounds 1 is today\'s single pass — NO rounds block, today\'s key set plus the additive T-059 plannerDigest block, one candidate wave',
   !('rounds' in oneReport)
-  && eq(sortedKeys(oneReport), ['baseSha', 'candidates', 'finishedAt', 'goal', 'model', 'planner', 'repo', 'runId', 'startedAt'])
+  && eq(sortedKeys(oneReport), ['baseSha', 'candidates', 'finishedAt', 'goal', 'model', 'planner', 'plannerDigest', 'repo', 'runId', 'startedAt'])
+  && typeof oneReport.plannerDigest?.sha256 === 'string'
   && eq(oneReport.candidates.map((c) => c.id), ['c01', 'c02']))
 
 t('C: no residual lock files after the runs and the clean',

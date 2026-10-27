@@ -7,12 +7,13 @@ import type { Probe } from './probe.js'
 import { computeGateCommandOverlap } from './gate/overlap.js'
 import { annotateBriefPremise } from './premise.js'
 import type { BriefPremiseAnnotation } from './premise.js'
+import { composePlannerDigest } from './planner-digest.js'
 import { composeRoundPacket } from './rounds.js'
 import { deriveRunYield } from './yield.js'
 import { buildEarlyStops, buildSchedule, earlyStopMet, readyJobs } from './scheduler.js'
 import type { EarlyStopPolicy, PhaseSpec } from './scheduler.js'
 import { DERIVED_PHASE_ID } from './store/index.js'
-import type { Attempt, CandidateReport, FailureRecord, Gate, GateResult, PlannerReport, ProbeRunSummary, ReviewObservation, ReviewReport, RoundRecord, RunReport, VerifierReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
+import type { Attempt, CandidateReport, FailureRecord, Gate, GateResult, PlannerDigestRecord, PlannerReport, ProbeRunSummary, ReviewObservation, ReviewReport, RoundRecord, RunReport, VerifierReport, WorkerAdapter, WorkspaceLease, WorkspaceProvider } from './types.js'
 
 /**
  * Best-effort append to <runDir>/dispatch.jsonl (T-010) — the in-run evidence
@@ -161,6 +162,25 @@ export interface SkeletonOptions {
    * never fabricated).
    */
   rounds?: number
+  /**
+   * T-059 planner repo digest (R14's minimal context producer): compose a
+   * deterministic file-tree/manifest digest of the TARGET repo at baseSha
+   * (src/planner-digest.ts) and ride it through plannerPrompt's contextBlock
+   * seam in BOTH planner rounds (round 2: joined before the composed
+   * survivor-evidence block). The digest is prompt bytes, never access —
+   * the planner's scratch cwd, capability posture ('--agent plan', T-023),
+   * and parse path are untouched. Evidence: planner-digest.txt under the
+   * artifacts dir + `RunReport.plannerDigest` (its sha256).
+   *
+   * SEAM DEFAULT — absent/false = today's exact prompt bytes, byte-identical
+   * (the rounds/gateRetry seam pattern: a direct caller and every pinned
+   * prompt face stay unchanged); the CLI resolves the run-level default TRUE
+   * (`--no-planner-context` opts out, the --no-planner/--no-review idiom), so
+   * every real CLI run carries the digest. A composition failure degrades
+   * loudly to digest-less prompts (the premise-guard posture) and records
+   * nothing — the report never claims context the planner did not receive.
+   */
+  plannerContext?: boolean
   workspaces: WorkspaceProvider
   artifactsDir: string
   /** Dispose workspaces after evidence capture instead of leaving them for inspection. */
@@ -254,8 +274,41 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
   let briefs: string[] = opts.candidateIds.map(() => opts.goal)
   let planner: PlannerReport | undefined
   let premiseAnnotations: (BriefPremiseAnnotation | undefined)[] = []
+
+  // T-059 planner repo digest: composed ONCE per run (repo + baseSha are
+  // fixed across rounds, so both planner rounds ride the same bytes) before
+  // the first planner phase, through the same list-form git discipline the
+  // premise guard uses. Bytes, never access: the digest rides
+  // plannerPrompt's contextBlock seam and names no repo path — the planner's
+  // scratch cwd and 'artifact-only' posture are untouched below. Evidence is
+  // written immediately (one composition, two consumers: the prompt's
+  // contextBlock and the report's recorded sha256 cannot drift). The
+  // never-break-a-run posture (the premise-guard pattern): a composition
+  // failure — most plausibly an unreadable repo — logs loudly and the run
+  // plans with today's exact digest-less prompts; no file, no report field.
+  let plannerDigestBlock: string | null = null
+  let plannerDigest: PlannerDigestRecord | undefined
+  if (!opts.scheduled && opts.plannerModel && opts.plannerContext === true) {
+    try {
+      const digest = composePlannerDigest({ repo: opts.repo, baseSha: opts.baseSha })
+      const digestPath = join(opts.artifactsDir, 'planner-digest.txt')
+      writeFileSync(digestPath, digest.text)
+      plannerDigestBlock = digest.text
+      plannerDigest = { path: digestPath, sha256: digest.sha256 }
+      console.log(`planner context: repo digest @ ${opts.baseSha.slice(0, 12)} — ${digest.listedPaths}/${digest.totalPaths} tracked paths, ${digest.text.length} chars${digest.truncated ? ` (TRUNCATED by the ${digest.cap} cap)` : ''}`)
+    } catch (e) {
+      console.log(`planner digest failed (${errorMessage(e)}); planning without repo context — today's exact prompts`)
+    }
+  }
+
   if (!opts.scheduled && opts.plannerModel) {
-    planner = await runPlannerPhase(opts)
+    // Round 1 rides the digest alone as its context block (the round-2
+    // composed block's parameter — the seam T-030 established). Digest-less
+    // (opt-out, --jobs, --no-planner, or composition failure) ⇒ no round
+    // object, today's exact call.
+    planner = await runPlannerPhase(opts, plannerDigestBlock !== null
+      ? { count: opts.candidateIds.length, contextBlock: plannerDigestBlock }
+      : undefined)
     if (planner.ok) {
       briefs = planner.briefs
       premiseAnnotations = annotatePlannerBriefs(opts, briefs, [])
@@ -324,9 +377,15 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
       writeFileSync(renderedBlockPath, composition.renderedBlock)
       const round2Ids = round1Survivors.map((s) => `${s.id}-r2`)
       let briefs2: string[] = round2Ids.map(() => opts.goal)
+      // T-059: round 2's planner is the same repo-blind specifier round 1's
+      // is — the digest rides its prompt too, joined BEFORE the composed
+      // survivor-evidence block (repo shape first, then the round's
+      // evidence). Digest-less ⇒ the context block is the composed block
+      // alone, byte-identical to pre-T-059.
+      const round2ContextParts = [plannerDigestBlock, composition.renderedBlock].filter((p): p is string => p !== null)
       const planner2 = await runPlannerPhase(opts, {
         count: round2Ids.length,
-        contextBlock: composition.renderedBlock,
+        ...(round2ContextParts.length > 0 ? { contextBlock: round2ContextParts.join('\n\n') } : {}),
         evidenceTag: '-r2',
       })
       // T-050: the round-2 briefs pass the SAME premise guard, now with the
@@ -395,6 +454,12 @@ export async function runSkeleton(opts: SkeletonOptions): Promise<RunReport> {
   }
   if (schedule) {
     report.schedule = schedule
+  }
+  // T-059: the digest's run-level evidence — present only when the digest
+  // actually rode the planner prompts (the producer-only pattern; a
+  // composition failure records nothing).
+  if (plannerDigest !== undefined) {
+    report.plannerDigest = plannerDigest
   }
   if (earlyStops !== undefined && earlyStops.length > 0) {
     report.earlyStops = earlyStops
@@ -529,6 +594,10 @@ function plannerPrompt(goal: string, count: number, contextBlock?: string): stri
   // capability: the planner keeps its artifact-only scratch-dir posture and
   // parseBriefs parses the reply exactly as round 1's. Absent (every n=1
   // run) ⇒ the prompt is byte-identical to the pre-T-030 text.
+  // T-059: the planner repo digest rides the SAME parameter — round 1's
+  // context block is the digest alone, round 2's is digest + composed
+  // survivor block. Same posture: bytes, never access; absent ⇒ byte-
+  // identical to today.
   if (contextBlock !== undefined) {
     lines.push('', contextBlock)
   }

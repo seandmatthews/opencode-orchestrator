@@ -1,6 +1,6 @@
 # T-059 — Planner repo digest: a deterministic file-tree/manifest digest in the planner prompt (register R14)
 
-**Status:** proposed
+**Status:** done 2026-10-27
 **Category:** engine
 **Value (1-5):** 5 · **Risk (1-5):** 2
 **Depends on:** —
@@ -63,31 +63,107 @@ and cannot assert survivor-created files as base state (the recorded
 
 ## Acceptance criteria
 
-- [ ] Red bar recorded first (AGENTS #8), token-free: on main, the
+- [x] Red bar recorded first (AGENTS #8), token-free: on main, the
       planner prompt for the demo fixture carries no tree/manifest
       bytes and no `planner-digest.txt` exists — asserted as the red.
-- [ ] Byte-deterministic: for a fixed repo + baseSha the digest composes
+      (Recorded: `C:\swarm\verify-red\T-059-red.log` — the demo-fixture
+      probe's three T-059 assertions all fail on main, its RED-RECORD
+      legs state the red's content positively; the same probe green on
+      the lane at `C:\swarm\verify-red\T-059-green-probe.log`.)
+- [x] Byte-deterministic: for a fixed repo + baseSha the digest composes
       byte-identically across two compositions in one check — pinned by
       a new fast-tier check this change-set adds (next free gate number
-      at landing).
-- [ ] Caps enforced and honest: a fixture repo exceeding the path cap
+      at landing). (Gate 1.45 D1: two compositions byte-identical, and
+      unchanged across working-tree mutations AND later commits — the
+      digest reads the COMMIT, never the tree.)
+- [x] Caps enforced and honest: a fixture repo exceeding the path cap
       produces a digest whose truncation line names the cut, total chars
-      within the named constant — same check.
-- [ ] Inertness pin (the T-056 pattern): with `--no-planner-context`,
+      within the named constant — same check. (Gate 1.45 D3/D4: the
+      path-cap face AND the char-cap face — a char-overflowing listing
+      is re-cut below the path cap until the text fits, and the TRUNCATED
+      line names the binding constant in both faces.)
+- [x] Inertness pin (the T-056 pattern): with `--no-planner-context`,
       the composed planner prompt is byte-identical to main's for the
-      same inputs — same check.
-- [ ] Evidence: `planner-digest.txt` written under the run artifacts dir
+      same inputs — same check. (Gate 1.45 E2: byte-identical to a
+      hard-coded main-form template, digest OFF and option ABSENT, no
+      digest file, no report key, today's exact top-level key set.)
+- [x] Evidence: `planner-digest.txt` written under the run artifacts dir
       and its sha256 in report.json; the digest bytes appear verbatim in
-      the planner prompt — same check.
-- [ ] VERIFICATION.md extended in the same change-set (AGENTS #6) —
-      pinned by the full fast tier ALL GREEN.
+      the planner prompt — same check. (Gate 1.45 E1: file on disk,
+      `report.plannerDigest.path`/`sha256` matching the bytes and the
+      module recomposition, the FILE's bytes verbatim in the round-1
+      prompt between GOAL and the output contract.)
+- [x] VERIFICATION.md extended in the same change-set (AGENTS #6) —
+      pinned by the full fast tier ALL GREEN. (Gate 1.45 section added;
+      lane fast tier — Gate 0 through Gate 1.45, `node scripts/verify.mjs
+      fast` — exit 0 ALL GREEN, 2026-10-27.)
 - [ ] **Gate 2 owed** (src/runner.ts's planner phase changed; the
       standing trigger fires): a real run with the digest ON produces
       parsed briefs, non-zero diffs, and every existing Gate 2 assertion
       green — the prompt change must not degrade the loop. **Gate 3
-      n/a** (no adapter change).
+      n/a** (no adapter change). (Gate 2 additionally gained two
+      strengthen-only digest assertions — `plannerDigest` present with
+      the on-disk file and the recorded sha256 matching its bytes — so
+      the real CLI-default run proves the digest ON path; run by the
+      driving workflow, not in the lane.)
 
 ## Landed
+
+2026-10-27. `src/planner-digest.ts` (new): `composePlannerDigest({repo,
+baseSha})` — list-form git only (`git ls-tree -r --name-only <baseSha>` for
+the tracked tree, forward-slash by git's own emission; `git show
+<baseSha>:package.json` for the one recognized root manifest's
+name/version identity line, read from the COMMIT's bytes), capped by two
+documented exported constants (`MAX_DIGEST_PATHS` = 500, `MAX_DIGEST_CHARS`
+= 12,000 — values chosen at implementation, no CLI knob) whose truncations
+are loud: the tree-section header states listed-of-total and one TRUNCATED
+line names the binding cap's constant and the not-shown count; the char cap
+re-cuts below the path cap's cut until the composed text fits. The digest
+names NO repo path (bytes, never access — Gate 1.20 S1's planner-prompt
+posture holds, pinned again by D2) and throws on an unresolvable repo/base
+(never a silent empty tree).
+
+`src/runner.ts`: the digest is composed ONCE per run (repo + baseSha fixed
+across rounds) before the planner phase, under the never-break-a-run
+posture (a failure logs `planner digest failed (...)` and plans with
+today's exact digest-less prompts — no file, no report field); round 1's
+plannerPrompt call gets the digest as its `contextBlock` (the seam the
+round-2 composed block already rides), round 2's gets digest + composed
+survivor block joined by `\n\n` (digest first). The planner's scratch cwd,
+'artifact-only' posture, and parse path are untouched. Evidence:
+`planner-digest.txt` under the run artifacts dir + `RunReport.plannerDigest`
+(`src/types.ts`, producer-only: `{path, sha256}` — one composition, two
+consumers). **Seam decision, deliberate (the rounds/gateRetry pattern):**
+`SkeletonOptions.plannerContext?: boolean` treats absent/false as today's
+exact prompt bytes, so every existing direct-drive prompt/key-set face
+(Gates 1.20/1.21/1.22/1.25's pinned bytes) is unchanged by construction —
+zero edits to any existing check; the CLI resolves the run-level default
+TRUE and always passes it (`--no-planner-context` opts out, the
+--no-planner/--no-review idiom), so every real CLI run carries the digest
+(the usage text documents the flag and its default).
+
+`scripts/check-planner-digest.mjs` (new, Gate 1.45 in `scripts/verify.mjs`'s
+fast tier): ten token-free legs — M (module contract), D1 (byte-determinism,
+commit-pinned), D2 (content/provenance, exact manifest literal, no repo
+path), D3/D4 (path-cap and char-cap honesty, exact TRUNCATED literals),
+D5 (loud throw + the runner's catch posture), E1 (evidence + verbatim
+prompt embedding through the real runner), E2 (opt-out and absent-seam
+inertness against a hard-coded main-form template), E3 (both rounds, the
+byte-precise `\n\n` join, digest-less rounds byte-identical to main's
+forms), C1 (CLI --help/parse/source pins). Gate 2 gained two strengthen-only
+assertions (the digest evidence on the real run). VERIFICATION.md carries
+the Gate 1.45 section with the recorded red bar.
+
+Red bar (AGENTS #8), recorded on main BEFORE the change: the probe at
+`C:\swarm\verify-red\T-059-red.log` drives the real `runSkeleton` with a
+fake planner against `C:\swarm\demo-target` — all three T-059 assertions
+fail on main (no digest bytes in the round-1 prompt, no planner-digest.txt,
+no report sha256); the same probe against the lane build passes all three
+(`C:\swarm\verify-red\T-059-green-probe.log`). Lane fast tier measured ALL
+GREEN (Gate 0 typecheck + the full Gate 1.x chain through Gate 1.45) on
+Node v22.23.1, 2026-10-27. Gate 2 owed to the driving run (src/runner.ts's
+planner phase changed — the standing trigger); Gate 3 n/a (no adapter
+change).
 
 ## Verification
 

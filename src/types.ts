@@ -733,6 +733,23 @@ export interface RunYield extends RunYieldCounts {
   perRound?: RunYieldRound[]
 }
 
+/**
+ * The planner repo digest's run-level evidence record (T-059): where the
+ * digest bytes live under the run artifacts dir and their sha256. One digest
+ * per run — composed once from the TARGET repo at baseSha (repo + baseSha are
+ * fixed across rounds, so both planner rounds ride the same bytes); the hash
+ * is over the exact text embedded in the planner prompts, so prompt bytes and
+ * recorded evidence cannot drift (one composition, two consumers — the
+ * T-029/T-038 precedent). Evidence only, never a verdict input; the store and
+ * dashboard never read it (the rounds store-invisible precedent).
+ */
+export interface PlannerDigestRecord {
+  /** Path of planner-digest.txt under the run artifacts dir. */
+  path: string
+  /** sha256 (hex) over the digest bytes (utf-8). */
+  sha256: string
+}
+
 export interface RunReport {
   runId: string
   repo: string
@@ -743,6 +760,12 @@ export interface RunReport {
   startedAt: string
   finishedAt: string
   candidates: CandidateReport[]
+  /** Present only when the planner repo digest rode this run's planner
+   *  prompts (T-059; the CLI's default — `--no-planner-context` opts out,
+   *  and --jobs/--no-planner runs have no planner to feed). Absent when the
+   *  digest composition failed (the never-break-a-run degradation) — the
+   *  report never claims context the planner did not receive. */
+  plannerDigest?: PlannerDigestRecord
   /** Present only in --jobs mode (T-009): the recorded schedule. */
   schedule?: RunSchedule
   /** Present only when `--rounds 2` (T-030): the bounded R&D loop's
