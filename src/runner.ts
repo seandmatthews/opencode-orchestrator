@@ -11,6 +11,7 @@ import { composePlannerDigest } from './planner-digest.js'
 import type { PlannerDigest } from './planner-digest.js'
 import { composeWorkerOrientation } from './worker-orientation.js'
 import { composeRoundPacket } from './rounds.js'
+import { fenceRecordedEvidence, RECORDED_GATE_OUTPUT_LABEL } from './evidence-fence.js'
 import { deriveRunYield } from './yield.js'
 import { buildEarlyStops, buildSchedule, earlyStopMet, readyJobs } from './scheduler.js'
 import type { EarlyStopPolicy, PhaseSpec } from './scheduler.js'
@@ -1007,7 +1008,21 @@ function inputContextHash(brief: string, model: string, workspacePath: string): 
  *  attempt's `retry-brief.txt` AND wrapped into its prompt (the T-030
  *  packetFingerprint pattern; one composition, two consumers).
  *  `includedFindings` is the number actually embedded (≤ findings.length),
- *  the `gateRetry.findings.included` provenance. */
+ *  the `gateRetry.findings.included` provenance.
+ *
+ *  T-061: EMBEDDED-EVIDENCE FENCING at this seam — every failing gate's
+ *  recorded `outputTail` rides inside a role-labeled plain-text fence
+ *  (src/evidence-fence.ts) carrying the fixed not-instructions line, the
+ *  bytes VERBATIM (never sanitized — the T-029 fixture-faithfulness rule).
+ *  Gate output is target-repo-influenced (test names and assertion messages
+ *  are attacker-writable content in the target repo); the fence makes the
+ *  provenance legible to the worker that reads the brief and decides
+ *  nothing. The tail's own 4,000-byte capture cap (T-027,
+ *  src/gate/command.ts) stays the evidence's bound — no second cap here.
+ *  The findings section below keeps its T-040 caps UNCHANGED
+ *  (MAX_RETRY_FINDINGS / MAX_RETRY_FINDING_CHARS). The next seam that
+ *  embeds recorded evidence into a model-bound prompt copies this
+ *  discipline (the fence module's docblock states it in full). */
 function composeGateRetryBrief(
   brief: string,
   diff: string,
@@ -1038,7 +1053,10 @@ function composeGateRetryBrief(
       `GATE: ${g.name}`,
       `COMMAND: ${g.command ?? '(not recorded)'}`,
       'OUTPUT (tail):',
-      g.outputTail,
+      // T-061: the recorded tail rides inside the role-labeled fence —
+      // bytes verbatim between the markers, provenance legible to the
+      // worker, nothing sanitized (src/evidence-fence.ts's discipline).
+      fenceRecordedEvidence(RECORDED_GATE_OUTPUT_LABEL, g.outputTail),
     )
   }
   const included = findings.slice(0, MAX_RETRY_FINDINGS)
