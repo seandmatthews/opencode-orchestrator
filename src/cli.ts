@@ -690,8 +690,22 @@ async function checkBaselineGates(
 }
 
 async function runPipeline(opts: Options, jobsSpec: JobsSpec | null): Promise<void> {
-  if (opts.gates.length === 0) {
-    console.warn('warning: no --gate given; every candidate passes vacuously')
+  // T-064: the no-gates warning tells the truth (register R8). The pre-T-064
+  // line read "every candidate passes vacuously" while the ladder does the
+  // OPPOSITE — `passedAllGates` requires `gates.length > 0` (src/runner.ts) —
+  // so a run with no gates ELIMINATES every candidate on the zero-gate leg,
+  // and an operator who read the old warning and proceeded lost every
+  // candidate to a rule they were told did not exist. The trigger is the
+  // run's EFFECTIVE gate set — the same deduplicated union the baseline
+  // check uses (distinctGatesFor below): a --jobs run whose jobs carry their
+  // own gates HAS a survival bar, and warning "eliminates every candidate"
+  // there would be the same lie in the other direction (pre-T-064 the old
+  // line fired in that face too). A no-gates run still proceeds (probe-only
+  // / evidence-gathering runs are legitimate); nothing but this console line
+  // changes — report shape, exit-code semantics, and the ladder are
+  // untouched (pinned token-free by Gate 1.50).
+  if (distinctGatesFor(opts, jobsSpec).length === 0) {
+    console.warn('warning: no --gate given (and no --jobs job carries gates) — the ladder eliminates every candidate on the zero-gate leg (passing requires at least one gate); pass --gate "name=command" to give candidates a survival bar, or drive --jobs probes for an evidence-only run')
   }
 
   const runId = new Date().toISOString().replace(/\D/g, '').slice(0, 14)
