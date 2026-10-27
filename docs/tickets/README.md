@@ -97,7 +97,7 @@ Rules:
 | T-058 | Bounded output accumulation: capped tail buffers in both adapters + capped probe log aggregate — a chatty child can no longer OOM the orchestrator (register R11) | medium | done 2026-10-26 |
 | T-059 | Planner repo digest: a deterministic file-tree/manifest digest in the planner prompt via the existing `contextBlock` seam (register R14 — the minimal context producer) | high | done 2026-10-27 |
 | T-060 | Worker orientation block: engine-composed lease path + base tree facts in the worker dispatch — the KI#6 path-confusion classes attacked prompt-side (register A2 successor) | high | done 2026-10-27 |
-| T-061 | Embedded-evidence fencing: fenced, capped, role-labeled blocks at the retry-brief and round-composer seams (register R5) | medium | proposed |
+| T-061 | Embedded-evidence fencing: fenced, capped, role-labeled blocks at the retry-brief and round-composer seams (register R5) | medium | done 2026-10-27 |
 | T-062 | Adversarial-probe expected outcomes: correct input validation stops recording as a crash — per-case expectations on the engine-authored corpus (register R16) | medium | proposed |
 | T-063 | Probe construction-path validation: the capture-path contract enforced at the class boundary, not only in parseJobsSpec (register R18) | low | proposed |
 | T-064 | The no-gates warning tells the truth: elimination, not vacuous passing (register R8 — the T-043 fold never landed) | low | proposed |

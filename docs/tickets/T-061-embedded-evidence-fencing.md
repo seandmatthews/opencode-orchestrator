@@ -1,6 +1,6 @@
 # T-061 — Embedded-evidence fencing: fenced, capped, role-labeled blocks for model-bound evidence (register R5)
 
-**Status:** proposed
+**Status:** done 2026-10-27
 **Category:** engine
 **Value (1-5):** 3 · **Risk (1-5):** 2
 **Depends on:** —
@@ -59,21 +59,21 @@ token cost beyond the markers.
 
 ## Acceptance criteria
 
-- [ ] Red bar recorded first (AGENTS #8), token-free: on main, a
+- [x] Red bar recorded first (AGENTS #8), token-free: on main, a
       fixture gate tail and a fixture observation containing
       instruction-shaped text ("ignore previous instructions…") ride
       both seams with no fence, no role label, no cap marker — asserted
       as the red.
-- [ ] Fencing: the same fixtures post-change arrive fully inside
+- [x] Fencing: the same fixtures post-change arrive fully inside
       labeled fences carrying the not-instructions line — pinned by a
       new fast-tier check (next free gate number at landing).
-- [ ] Byte-fidelity inside the fence: the evidence bytes between the
+- [x] Byte-fidelity inside the fence: the evidence bytes between the
       markers are byte-identical to the recorded evidence (no
       sanitization) — same check.
-- [ ] Caps: over-length composer observations truncate with the marker;
+- [x] Caps: over-length composer observations truncate with the marker;
       the retry brief's existing findings caps unchanged and green —
       same check.
-- [ ] VERIFICATION.md extended in the same change-set (AGENTS #6) —
+- [x] VERIFICATION.md extended in the same change-set (AGENTS #6) —
       pinned by the full fast tier ALL GREEN.
 - [ ] **Gate 2 owed** (src/runner.ts retry composition + src/rounds.ts
       composer changed; the standing trigger fires on runner touch):
@@ -81,6 +81,55 @@ token cost beyond the markers.
       retry/round-2 paths and must not disturb them. **Gate 3 n/a.**
 
 ## Landed
+
+2026-10-27. What changed, exactly:
+
+- **`src/evidence-fence.ts` (new)** — the one delimiting discipline as a
+  module: the fixed not-instructions line (`EVIDENCE_NOT_INSTRUCTIONS_LINE`,
+  one literal at every seam), the two role labels
+  (`RECORDED_GATE_OUTPUT_LABEL`, `RECORDED_REVIEWER_OBSERVATIONS_LABEL`),
+  and `fenceRecordedEvidence(label, body)` composing open marker +
+  not-instructions line + body + close marker. Pure string assembly,
+  bytes never inspected or rewritten. The docblock states the
+  four-part discipline in full so the next seam copies it.
+- **`src/runner.ts`** — `composeGateRetryBrief`'s gates section: each
+  failing gate's recorded `outputTail` now rides inside the
+  `RECORDED GATE OUTPUT` fence (one fence per failing gate), bytes
+  verbatim; the `GATE:`/`COMMAND:`/`OUTPUT (tail):` framing lines stay
+  outside it, and the docblock states the discipline. The findings
+  section's T-040 caps are untouched.
+- **`src/rounds.ts`** — `survivorEvidenceText`'s review-observations
+  section: the observation lines (pre-T-061 `- [severity] finding
+  (evidence: …)` shape unchanged) ride inside the `RECORDED REVIEWER
+  OBSERVATIONS` fence, under two new named exported caps —
+  `MAX_OBSERVATION_CHARS` (2,000, per-finding, the
+  `MAX_RETRY_FINDING_CHARS` mirror) and `MAX_OBSERVATION_BLOCK_CHARS`
+  (12,000, one survivor's joined observation lines) — each cutting with
+  an explicit exported truncation marker
+  (`OBSERVATION_FINDING_TRUNCATION_MARKER` /
+  `OBSERVATION_BLOCK_TRUNCATION_MARKER`, prefix cuts). The docblock
+  states the discipline; engine-rendered gate-verdict lines stay
+  outside the fence.
+- **`scripts/check-evidence-fence.mjs` (new, Gate 1.47)** — 35
+  assertions, legs M/R1/R2/C1/C2/F, wired into `scripts/verify.mjs`'s
+  fast tier after Gate 1.46.
+
+Gates measured in this lane: **Gate 0 green** (`npm run typecheck`,
+exit 0); **red bar recorded first** — the Gate 1.47 check run on the
+pre-change lane (= main, every src change stashed including the
+untracked fence module) with the exact check bytes that now ride the
+fast tier: 23 named failures, exit 1, verbatim at
+`C:\swarm\verify-red\T-061-red.log` (the fence module import fails
+behaviorally, the composer caps are undefined, and both seams ride their
+instruction-shaped fixtures with no fence, no role label, no cap marker;
+the F leg — the retry findings caps — was already green on main, the
+stability half of its criterion); **Gate 1.47 green**
+(`node node_modules/tsx/dist/cli.mjs scripts/check-evidence-fence.mjs`
+— 35 assertions, exit 0); **full fast tier ALL GREEN**
+(`node scripts/verify.mjs fast`, exit 0, two consecutive runs — every
+gate section including the new 1.47 and the seam-adjacent 1.22/1.24/
+1.27/1.35 unchanged and green). **Gate 2 owed** — not run in this lane
+(real model tokens); the driving pipeline re-runs it on the merged tree.
 
 ## Verification
 

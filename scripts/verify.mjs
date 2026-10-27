@@ -1132,6 +1132,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.47: embedded-evidence fencing (T-061) ----------
+section('Gate 1.47 — embedded-evidence fencing: fenced, capped, role-labeled blocks for model-bound evidence (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-evidence-fence.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'evidence-fence self-check exit 0')
+} catch (e) {
+  fail(`evidence-fence self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------

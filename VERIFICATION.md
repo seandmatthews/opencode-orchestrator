@@ -5509,6 +5509,92 @@ Required whenever the orientation producer (`src/worker-orientation.ts`),
 its cap, the runner's worker-dispatch composition (`runJob`/
 `workerDispatchPrompt`), or the shared tree-section composer changes.
 
+## Gate 1.47 — embedded-evidence fencing: fenced, capped, role-labeled blocks for model-bound evidence (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-evidence-fence.mjs
+```
+
+Pins T-061 (the adversarial review 2026-10-23's R5 disposition): the two
+seams where RECORDED evidence enters a model-bound prompt — the
+--gate-retry brief's failing-gate output tails (`src/runner.ts`
+`composeGateRetryBrief`; gate output is target-repo-influenced: test names
+and assertion messages are attacker-writable content in the target repo)
+and the round composer's reviewer observations (`src/rounds.ts`
+`survivorEvidenceText`; reviewer findings routinely quote worker-authored
+diffs and logs, so a worker can launder instructions through the
+reviewer's trusted advisory voice) — now wrap that evidence in ONE shared
+delimiting discipline, `src/evidence-fence.ts`: (1) FENCED, explicit
+plain-text open/close markers (`=== BEGIN/END RECORDED GATE OUTPUT ===`,
+`=== BEGIN/END RECORDED REVIEWER OBSERVATIONS ===` — no markdown
+dependence); (2) ROLE-LABELED, the markers name what the block is; (3) a
+fixed not-instructions line, one literal byte-identical at both seams;
+(4) CAPPED at the existing scale with explicit truncation markers where a
+composition-side cap newly applies. The evidence bytes ride VERBATIM
+between the markers — never sanitized (the T-029 fixture-faithfulness
+rule) and never filtered (what the reviewer may quote is its posture's
+business, T-023 — the composer filters nothing). Never verdict-affecting
+(prompt bytes only); the gate tail's own 4,000-byte capture cap (T-027,
+`src/gate/command.ts`) stays the evidence's bound, and the retry brief's
+T-040 findings caps (`MAX_RETRY_FINDINGS` 5 / `MAX_RETRY_FINDING_CHARS`
+2,000) are UNCHANGED and re-pinned green by this gate's F leg. Both
+composition functions carry docblocks stating the discipline so the next
+seam copies it; the fence module's docblock states it in full.
+
+The composer's observation rendering gains the named exported caps
+`MAX_OBSERVATION_CHARS` (2,000 — the `MAX_RETRY_FINDING_CHARS` mirror,
+per-finding on the rendered `- [severity] finding (evidence: …)` line,
+whose pre-T-061 shape is unchanged) and `MAX_OBSERVATION_BLOCK_CHARS`
+(12,000 — one survivor's joined observation lines, fencing excluded; the
+reviewer contract's documented maximum of six observations at the full
+per-finding cap, the same total the retry brief's findings section
+bounds), both cutting with explicit exported markers (a prefix cut, never
+a rewrite; under-cap bytes ride verbatim).
+
+The check is token-free (fake adapters + the real runner and composer,
+the Gate 1.24/1.27 pattern; hand-built composer fixtures, the Gate 1.22
+leg-A pattern), 35 assertions across legs **M** (module contract: the
+fence module loads and exports the discipline — the fixed
+not-instructions line, both role labels, the fence composer; the composer
+caps and both truncation markers exported; the retry findings caps
+unchanged), **R1** (the retry-brief seam: a failing gate whose recorded
+tail carries instruction-shaped text rides fully inside the labeled fence
+with the not-instructions line, the bytes between the markers
+byte-identical to the recorded tail — exact equality, newlines included;
+gates-section framing unchanged; passing-gate output still rides nothing),
+**R2** (one fence PER failing gate, each byte-faithful to its own tail,
+framing lines outside), **C1** (the composer seam: instruction-shaped
+observations ride inside their own fence in the packet's record content
+AND the rendered block, byte-identical between the markers,
+engine-rendered gate-verdict lines outside the fence, advisory/block
+framing unchanged, determinism), **C2** (both caps: the exact expected
+truncated line and truncated body, verbatim prefixes, an under-cap
+sibling untouched, a per-block flood, determinism), and **F** (the retry
+brief's findings caps unchanged and green under an over-length
+blocker-advisory finding, provenance honest, retry firing).
+
+Red bar (AGENTS.md #8), recorded BEFORE the change by running this check
+on the pre-change lane (= main, every src change stashed including the
+untracked fence module) with the exact check bytes that now ride the fast
+tier: 23 named failures, exit 1, verbatim at
+`C:\swarm\verify-red\T-061-red.log` — the fence module import fails (M,
+dynamic so the red is behavioral, the check-worker-orientation pattern),
+the composer caps are undefined, and both seams ride their
+instruction-shaped fixtures with NO fence, NO role label, NO cap marker
+(R1/R2/C1/C2); the F leg was already green on main (the T-040 caps it
+pins are unchanged by this ticket — the stability half of its criterion).
+All 35 assertions green on the lane build; the full fast tier ALL GREEN
+(two consecutive runs) in the same change-set.
+
+**Gate 2 owed** (`src/runner.ts` retry composition + `src/rounds.ts`
+composer changed; the standing trigger fires on runner touch): every
+existing Gate 2 assertion green — the fences ride retry/round-2 paths and
+must not disturb them. Gate 3 n/a (no adapter change).
+
+Required whenever the fence discipline (`src/evidence-fence.ts`), either
+fenced seam's composition (`composeGateRetryBrief`,
+`survivorEvidenceText`), or the observation caps change.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash

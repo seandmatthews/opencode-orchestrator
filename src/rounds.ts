@@ -56,7 +56,8 @@
 import { createHash } from 'node:crypto'
 import { buildContextPacket, estimateTokens } from './context.js'
 import type { ArtifactRecord, ContextPacket, ContextPlan } from './context.js'
-import type { CandidateReport } from './types.js'
+import type { CandidateReport, ReviewObservation } from './types.js'
+import { fenceRecordedEvidence, RECORDED_REVIEWER_OBSERVATIONS_LABEL } from './evidence-fence.js'
 
 /** Fixed framing header/footer of the rendered block — the only prose the
  *  composer adds around packet content. Deterministic; carries the packet
@@ -94,6 +95,39 @@ export const ROUND_PREMISE_LINES: readonly string[] = [
  *  of the record contents (the `ceil(chars/4)` estimator, src/context.ts). */
 const CAP_MARGIN_TOKENS = 1024
 
+/**
+ * T-061: the composer's per-finding observation cap — each rendered
+ * observation line (severity + finding + evidence, the pre-T-061 line shape
+ * unchanged) is capped at this many chars, mirroring the retry brief's
+ * verifier-findings cap `MAX_RETRY_FINDING_CHARS` (src/runner.ts, T-040 —
+ * the precedent this cap mirrors; values exported for the pinning gate,
+ * Gate 1.47). An over-length line truncates with the explicit
+ * OBSERVATION_FINDING_TRUNCATION_MARKER — a prefix cut, never a rewrite;
+ * under-cap bytes ride verbatim by the discipline's byte-fidelity contract.
+ */
+export const MAX_OBSERVATION_CHARS = 2_000
+
+/**
+ * T-061: the composer's per-block observation cap — one survivor's JOINED
+ * observation lines (the fenced body; the fence markers, the
+ * not-instructions line, and the section header are framing, not evidence,
+ * and do not count) are capped at this many chars. 12,000 is the existing
+ * scale: the reviewer contract's documented maximum of six observations
+ * (reviewerPrompt's "Give 2 to 6") at the full per-finding cap — the same
+ * total the retry brief's findings section bounds (MAX_RETRY_FINDINGS 5 ×
+ * MAX_RETRY_FINDING_CHARS 2,000, src/runner.ts). An over-length body
+ * truncates with the explicit OBSERVATION_BLOCK_TRUNCATION_MARKER — again a
+ * prefix cut. A flood of observations cannot crowd out the rest of the
+ * survivor's evidence.
+ */
+export const MAX_OBSERVATION_BLOCK_CHARS = 12_000
+
+/** T-061: the explicit truncation markers the observation caps append when
+ *  they cut (named for their cap values; exported verbatim for the pinning
+ *  gate, the ROUND_PREMISE_LINES precedent). */
+export const OBSERVATION_FINDING_TRUNCATION_MARKER = `[... truncated: over the ${MAX_OBSERVATION_CHARS}-char per-finding cap]`
+export const OBSERVATION_BLOCK_TRUNCATION_MARKER = `[... truncated: over the ${MAX_OBSERVATION_BLOCK_CHARS}-char per-block cap]`
+
 /** The evidence type every composer record carries — the plan's mandatory
  *  query selects exactly this type. */
 export const SURVIVOR_EVIDENCE_TYPE = 'survivor-evidence'
@@ -127,7 +161,23 @@ export interface RoundComposition {
 /** The deterministic per-survivor evidence text. Field order and line shapes
  *  are fixed; lists iterate in report order; optional sections (review
  *  observations, probe summaries, recorded gate commands) appear only when
- *  the report carries them. Never a verdict input — planning evidence only. */
+ *  the report carries them. Never a verdict input — planning evidence only.
+ *
+ *  T-061: EMBEDDED-EVIDENCE FENCING at this seam — the review-observations
+ *  section's lines (reviewer findings routinely quote worker-authored diffs
+ *  and logs, so a worker can launder instructions through the reviewer's
+ *  trusted advisory voice) ride inside a role-labeled plain-text fence
+ *  (src/evidence-fence.ts) carrying the fixed not-instructions line, under
+ *  the composer's own per-finding + per-block caps with explicit truncation
+ *  markers (MAX_OBSERVATION_CHARS / MAX_OBSERVATION_BLOCK_CHARS above).
+ *  The observation bytes ride VERBATIM inside the fence — never sanitized
+ *  (the T-029 fixture-faithfulness rule) and never filtered (what the
+ *  reviewer may quote is its posture's business, T-023, not the
+ *  composer's). The engine-rendered gate-verdict lines stay outside the
+ *  fence: they are the composer's own summary of recorded verdict booleans,
+ *  not quoted bytes. The next seam that embeds recorded evidence into a
+ *  model-bound prompt copies this discipline (the fence module's docblock
+ *  states it in full). */
 function survivorEvidenceText(c: CandidateReport, finishedRound: number): string {
   const lines: string[] = [
     `candidate ${c.id} (round ${finishedRound} survivor)`,
@@ -141,9 +191,9 @@ function survivorEvidenceText(c: CandidateReport, finishedRound: number): string
   }
   if (c.review !== undefined) {
     lines.push('review observations (advisory — findings, never verdicts):')
-    for (const o of c.review.observations) {
-      lines.push(`- [${o.severity}] ${o.finding}${o.evidence !== undefined ? ` (evidence: ${o.evidence})` : ''}`)
-    }
+    // T-061: the recorded observations ride inside the role-labeled fence,
+    // per-finding- and per-block-capped (see the docblock above).
+    lines.push(fenceRecordedEvidence(RECORDED_REVIEWER_OBSERVATIONS_LABEL, renderObservationsBody(c.review.observations)))
   }
   if (c.probes !== undefined && c.probes.length > 0) {
     lines.push('probes (evidence bundles):')
@@ -152,6 +202,27 @@ function survivorEvidenceText(c: CandidateReport, finishedRound: number): string
     }
   }
   return lines.join('\n')
+}
+
+/** T-061: one survivor's rendered observation lines under the composer's
+ *  caps — each observation keeps the pre-T-061 line shape
+ *  (`- [severity] finding (evidence: …)`) and is per-finding-capped with an
+ *  explicit truncation marker when over MAX_OBSERVATION_CHARS; the joined
+ *  body is per-block-capped with its own marker when over
+ *  MAX_OBSERVATION_BLOCK_CHARS. Both cuts are prefix cuts: under-cap bytes
+ *  ride verbatim, capped bytes keep their verbatim prefix plus the marker —
+ *  nothing is ever rewritten or dropped silently. Pure and deterministic. */
+function renderObservationsBody(observations: readonly ReviewObservation[]): string {
+  const findingLines = observations.map((o) => {
+    const line = `- [${o.severity}] ${o.finding}${o.evidence !== undefined ? ` (evidence: ${o.evidence})` : ''}`
+    return line.length > MAX_OBSERVATION_CHARS
+      ? `${line.slice(0, MAX_OBSERVATION_CHARS)} ${OBSERVATION_FINDING_TRUNCATION_MARKER}`
+      : line
+  })
+  const body = findingLines.join('\n')
+  return body.length > MAX_OBSERVATION_BLOCK_CHARS
+    ? `${body.slice(0, MAX_OBSERVATION_BLOCK_CHARS)}\n${OBSERVATION_BLOCK_TRUNCATION_MARKER}`
+    : body
 }
 
 /** Builds one survivor's ArtifactRecord. Ids are `ev-<candidateId>` — the
