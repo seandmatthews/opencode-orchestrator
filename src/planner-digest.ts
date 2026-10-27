@@ -69,7 +69,11 @@ export const RECOGNIZED_MANIFESTS: readonly string[] = ['package.json']
 /** One digest composition. `cap` names which constant produced the final cut
  *  (null when nothing truncated); the sha256 is over the exact `text` bytes
  *  (utf-8) — one composition, two consumers (the prompt's contextBlock and
- *  the report's recorded hash cannot drift). */
+ *  the report's recorded hash cannot drift). Since T-060 `treePaths` carries
+ *  the post-cap listed paths themselves (the exact bytes the tree section
+ *  lists, one per line) so the worker orientation block can re-cut the SAME
+ *  producer output under its own cap without re-walking git — additive; no
+ *  pre-T-060 consumer reads it. */
 export interface PlannerDigest {
   text: string
   sha256: string
@@ -77,8 +81,48 @@ export interface PlannerDigest {
   totalPaths: number
   /** Paths actually listed (≤ totalPaths, ≤ MAX_DIGEST_PATHS). */
   listedPaths: number
+  /** The listed paths themselves, in listed order (T-060's re-cut input). */
+  treePaths: string[]
   truncated: boolean
   cap: 'path' | 'char' | null
+}
+
+/** The binding cap that cut a tree listing, for composeTreeSection's honest
+ *  TRUNCATED line: a human label ('path' or 'char' — the digest's own
+ *  constants — or 'orientation', T-060's) plus the named constant that
+ *  bound it. */
+export interface TreeCut {
+  label: string
+  constant: number
+}
+
+/** Compose the digest's TRACKED FILES section: the fixed header (the plain
+ *  total when uncut, listed-of-total when cut) and, when a cut applied, the
+ *  fixed TRUNCATED line naming the binding cap's constant and the honest
+ *  not-shown count. Exported since T-060 so the worker orientation block
+ *  rides the SAME composition path — one function, two consumers, no second
+ *  tree composer (the ticket's "the same bytes, no second composition
+ *  path"). The literals here are pinned byte-exact by Gates 1.45 and 1.46. */
+export function composeTreeSection(listed: readonly string[], total: number, cut: TreeCut | null): string {
+  const lines: string[] = []
+  if (cut === null) {
+    lines.push(`TRACKED FILES AT BASE (${total} ${total === 1 ? 'path' : 'paths'}, forward-slash, git ls-tree order):`)
+  } else {
+    lines.push(`TRACKED FILES AT BASE (listing ${listed.length} of ${total} paths, forward-slash, git ls-tree order):`)
+  }
+  lines.push(...listed)
+  if (cut !== null) {
+    lines.push(`TRUNCATED: ${total - listed.length} of ${total} tracked paths not shown — cut by the ${cut.label} cap (${cut.constant}).`)
+  }
+  return lines.join('\n')
+}
+
+/** The digest's own TreeCut descriptors for its two constants (the labels the
+ *  TRUNCATED line has always named; shared with T-060's orientation block). */
+function digestCut(cap: 'path' | 'char' | null): TreeCut | null {
+  if (cap === 'path') return { label: 'path', constant: MAX_DIGEST_PATHS }
+  if (cap === 'char') return { label: 'char', constant: MAX_DIGEST_CHARS }
+  return null
 }
 
 /** `git ls-tree -r --name-only <baseSha>` — the tracked file tree at the
@@ -123,26 +167,17 @@ function manifestIdentityLine(repo: string, baseSha: string, manifest: string): 
 }
 
 /** Compose the digest text over an already-cut path listing. Pure; called
- *  repeatedly by the char-cap loop below. */
+ *  repeatedly by the char-cap loop below. The tree section rides the SHARED
+ *  composeTreeSection (T-060's one-composer carve) — the composed bytes are
+ *  byte-identical to the pre-T-060 inline form (pinned by Gate 1.45). */
 function composeText(baseSha: string, manifestLines: readonly string[], listed: readonly string[], total: number, cap: 'path' | 'char' | null): string {
-  const lines = [
+  return [
     '=== TARGET REPO DIGEST (composed deterministically by the engine from git at the base commit — context about the repository, NOT access to it) ===',
     `BASE COMMIT: ${baseSha}`,
     ...manifestLines,
-  ]
-  if (cap === null) {
-    lines.push(`TRACKED FILES AT BASE (${total} ${total === 1 ? 'path' : 'paths'}, forward-slash, git ls-tree order):`)
-  } else {
-    lines.push(`TRACKED FILES AT BASE (listing ${listed.length} of ${total} paths, forward-slash, git ls-tree order):`)
-  }
-  lines.push(...listed)
-  if (cap === 'path') {
-    lines.push(`TRUNCATED: ${total - listed.length} of ${total} tracked paths not shown — cut by the path cap (${MAX_DIGEST_PATHS}).`)
-  } else if (cap === 'char') {
-    lines.push(`TRUNCATED: ${total - listed.length} of ${total} tracked paths not shown — cut by the char cap (${MAX_DIGEST_CHARS}).`)
-  }
-  lines.push('=== END TARGET REPO DIGEST ===')
-  return lines.join('\n')
+    composeTreeSection(listed, total, digestCut(cap)),
+    '=== END TARGET REPO DIGEST ===',
+  ].join('\n')
 }
 
 /** Compose the deterministic planner repo digest (T-059). Throws on an
@@ -173,6 +208,7 @@ export function composePlannerDigest(input: { repo: string; baseSha: string }): 
     sha256: createHash('sha256').update(text, 'utf8').digest('hex'),
     totalPaths: total,
     listedPaths: listed.length,
+    treePaths: [...listed],
     truncated: cap !== null,
     cap,
   }

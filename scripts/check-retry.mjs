@@ -166,9 +166,11 @@ const main = async () => {
     t("S1: attempt 2's evidence lives under <id>/attempt-2/",
       read(join(runDir, 'c01', 'attempt-2', 'worker.log')).includes('fake worker call 2')
       && existsSync(join(runDir, 'c01', 'attempt-2', 'diff.patch')))
+    // T-060: dispatched-prompt.txt (the full orientation + brief text) is
+    // per-attempt evidence beside worker.log, before diff.patch.
     t("S1: each attempt's outputArtifacts names its own paths and the files exist",
-      eq(a1?.outputArtifacts, [join(runDir, 'c01', 'worker.log'), join(runDir, 'c01', 'diff.patch')])
-      && eq(a2?.outputArtifacts, [join(runDir, 'c01', 'attempt-2', 'worker.log'), join(runDir, 'c01', 'attempt-2', 'diff.patch')])
+      eq(a1?.outputArtifacts, [join(runDir, 'c01', 'worker.log'), join(runDir, 'c01', 'dispatched-prompt.txt'), join(runDir, 'c01', 'diff.patch')])
+      && eq(a2?.outputArtifacts, [join(runDir, 'c01', 'attempt-2', 'worker.log'), join(runDir, 'c01', 'attempt-2', 'dispatched-prompt.txt'), join(runDir, 'c01', 'attempt-2', 'diff.patch')])
       && a1.outputArtifacts.every((p) => existsSync(p)) && a2.outputArtifacts.every((p) => existsSync(p)))
     t('S1: same brief+model hashes identically across attempts (64-hex inputContextHash)',
       a1?.inputContextHash === a2?.inputContextHash && /^[0-9a-f]{64}$/.test(a1?.inputContextHash ?? ''))
@@ -222,7 +224,7 @@ const main = async () => {
     t("S3: today's evidence paths (<id>/worker.log, <id>/diff.patch), no attempt-scoped dir",
       existsSync(join(artifactsDir, 'c01', 'worker.log')) && existsSync(join(artifactsDir, 'c01', 'diff.patch'))
       && !existsSync(join(artifactsDir, 'c01', 'attempt-2'))
-      && eq(c.attempts[0]?.outputArtifacts, [join(artifactsDir, 'c01', 'worker.log'), join(artifactsDir, 'c01', 'diff.patch')]))
+      && eq(c.attempts[0]?.outputArtifacts, [join(artifactsDir, 'c01', 'worker.log'), join(artifactsDir, 'c01', 'dispatched-prompt.txt'), join(artifactsDir, 'c01', 'diff.patch')]))
     const branches = git('branch', '--list', 'swarm/*').split('\n').map((l) => l.replace(/^[*+]\s*/, '').trim()).filter(Boolean)
     t("S3: today's lease id and branch (wt/c01, swarm/wt-c01) and nothing else",
       eq(branches, ['swarm/wt-c01']) && existsSync(join(artifactsDir, 'wt', 'c01')))
@@ -281,7 +283,7 @@ const main = async () => {
       a1?.failure?.reason === 'error' && a1?.failure?.message === 'transient harness crash'
       && a1?.failure?.exitCode === null && a1?.failure?.timedOut === false)
     t("S7: attempt 1's worker.log exists (the adapter logged before throwing) and is named by outputArtifacts",
-      eq(a1?.outputArtifacts, [join(artifactsDir, 'c01', 'worker.log')])
+      eq(a1?.outputArtifacts, [join(artifactsDir, 'c01', 'worker.log'), join(artifactsDir, 'c01', 'dispatched-prompt.txt')])
       && existsSync(join(artifactsDir, 'c01', 'worker.log'))
       && read(join(artifactsDir, 'c01', 'worker.log')).includes('fake worker call 1'))
     t('S7: the retried candidate passes', c.workerOk === true && c.passedAllGates === true && c.error === undefined)

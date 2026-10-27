@@ -127,7 +127,11 @@ function workerScripted(actions) {
     reqs: [],
     async execute(req) {
       this.reqs.push({ ...req })
-      if (req.prompt.startsWith('You are implementing')) {
+      // includes, not startsWith: since T-060 the worker prompt begins with
+      // the engine's orientation block and the builder template rides inside
+      // it (Gate 1.46); the discriminator strength is unchanged — planner
+      // prompts never carry this line.
+      if (req.prompt.includes('You are implementing')) {
         for (const [brief, file, content] of actions) {
           if (req.prompt.includes(`GOAL: ${brief}\n`)) writeFileSync(join(req.cwd, file), content)
         }

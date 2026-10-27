@@ -1,6 +1,6 @@
 # T-060 — Worker orientation block: engine-composed lease path + base tree facts in the worker dispatch (KI#6 prompt-side; register A2)
 
-**Status:** proposed
+**Status:** done (2026-10-27)
 **Category:** engine
 **Value (1-5):** 4 · **Risk (1-5):** 3
 **Depends on:** T-059 (shares the digest producer)
@@ -85,6 +85,76 @@ per run, no same-run promotion).
       promotion, AGENTS #11). **Gate 3 n/a** (no adapter change).
 
 ## Landed
+
+2026-10-27. What changed, exactly:
+
+- **`src/worker-orientation.ts` (new)** — the block producer: pure string
+  assembly over `{leasePath, baseSha, digest}`; the lease path rides
+  VERBATIM on its own two-space-indented line under the one-line scope
+  statement (canonical checkout included, copy-never-retype), the baseSha
+  line, and the tree section. Documented exported cap
+  `MAX_ORIENTATION_CHARS = 8_000` (below the digest's own 12,000 — the
+  worker prompt stays token-cheap); overflow re-cuts paths from the END
+  with the in-section `TRUNCATED` line naming the binding cap and the
+  honest not-shown count. The module spawns nothing.
+- **`src/planner-digest.ts`** — the tree-section composer is refactored
+  out of `composeText`'s inline form into the exported
+  `composeTreeSection` (T-059's composed digest bytes are byte-identical —
+  Gate 1.45 re-run green, its pinned literals untouched), and
+  `PlannerDigest` additively carries `treePaths` (the post-cap listed
+  paths) so the orientation block re-cuts the SAME producer output — the
+  ticket's "the same bytes, no second composition path".
+- **`src/runner.ts`** — the run's digest is composed ONCE per run for BOTH
+  consumers (planner contextBlock + every worker block); the
+  planner-side evidence (`planner-digest.txt`, `RunReport.plannerDigest`)
+  stays tied to `--no-planner-context` exactly as T-059 pinned it, and a
+  composition failure logs loudly once and degrades the whole run to
+  today's exact prompt bytes on both sides. New exported
+  `workerDispatchPrompt(brief, workspacePath, orientationBlock)` — the
+  block prepended to the UNCHANGED builder template with one blank line —
+  is the single composition path the dispatch and the pinning gates share.
+  Every attempt records its full dispatched prompt as
+  `dispatched-prompt.txt` in its evidence dir (riding `outputArtifacts`);
+  `Attempt.promptVersion` hashes that exact text (it moves vs main's bare
+  `builderPrompt` hash for the same inputs — pinned). `base.brief`,
+  `inputContextHash` (deliberately still the template hash — the block's
+  per-attempt variation is the lease path, exactly like the excluded
+  workspace line), the premise guard, the ladder, and every verdict
+  expression are untouched. No report field added.
+- **Checks updated in the same change-set, strength preserved (each still
+  exact equality; no assertion deleted or loosened)**: Gate 1.8 and 1.24's
+  exact `outputArtifacts` arrays gained the per-attempt
+  `dispatched-prompt.txt`; Gate 1.24/1.27's attempt-2 `promptVersion`
+  recomputations and Gate 1.35's dispatched-prompt equalities moved to the
+  `workerDispatchPrompt` composition; Gate 1.45's worker fake matches
+  `includes('You are implementing')` (the worker prompt now begins with
+  the block; planner prompts never carry the line).
+
+Gates measured in this lane: **Gate 0 green** (`npm run typecheck`, exit
+0); **red bar recorded first** — the new Gate 1.46 check run on the
+pre-change lane (= main) failed with 13 named failures, exit 1, verbatim
+at `C:\swarm\verify-red\T-060-red.log` (module import fails; the E1 drive
+records the AC red: the dispatched worker prompt carries no orientation
+block, no `dispatched-prompt.txt`, promptVersion equals main's
+bare-builder hash); **Gate 1.46 green** (`node node_modules/tsx/dist/cli.mjs
+scripts/check-worker-orientation.mjs` — 31 assertions, legs M/O1–O4/E1/E2:
+determinism, lease-path fidelity pinned against the run's own
+dispatch.jsonl worktreePath, promptVersion movement, brief byte-integrity
+against the planner-authored bytes, cap honesty, premise-guard inertness,
+same-block-shape-per-run, digest-ON and --jobs faces); **full fast tier
+ALL GREEN** (`node scripts/verify.mjs fast`, exit 0 — every gate section
+including the updated 1.8/1.24/1.27/1.35/1.45 and the new 1.46).
+
+**Gate 2 owed, not run in this lane** (the driving script re-runs it after
+landing — real model tokens, and this lane was instructed not to spend
+them): the standing trigger fires because the worker dispatch prompt
+changed. The driving run must keep every existing Gate 2 assertion green,
+and its no-op/derailment picture is to be recorded HERE as one honest
+data point (the T-050 precedent: measured opportunistically on the
+driving run, no same-run promotion, AGENTS #11). At landing time this
+section records only the fast-tier evidence above — the yield question
+the ticket's Why names ("whether the no-op rate actually moves") stays
+open until that run lands. Gate 3 n/a (no adapter change).
 
 ## Verification
 
