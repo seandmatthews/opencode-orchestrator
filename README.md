@@ -12,10 +12,31 @@ run against every candidate. A gate passes when its command exits 0. Only
 candidates whose gates pass are kept, and no model opinion is involved in
 that decision.
 
-The engine implements the V2 architecture spec piece by piece
-([docs/spec/inference-refinery-v2.md](docs/spec/inference-refinery-v2.md)).
-Stages 0–2 are done, stage 3 is partial, stage 4 has started;
-[docs/ROADMAP.md](docs/ROADMAP.md) tracks what is done and what is next.
+## Why this exists
+
+An AI coding agent alone in a session grades its own homework: it reports
+that it is done, and finding out whether that is true means reading the code
+yourself. Inference Refinery moves that judgment out of the model. Every
+candidate is measured by the same mechanical checks — shell commands whose
+exit codes decide — so a confident claim carries no more weight than a
+failing check allows it to.
+
+It is also an economy. Decomposing a goal into well-specified briefs takes a
+strong model; carrying out a well-specified brief is mostly careful work,
+which a cheap model can do. So the strong model is paid for once, at
+planning time, and several cheap workers attempt the briefs in parallel.
+Some attempts fail — that is expected and harmless, because a failed attempt
+costs little and is simply deleted, while the attempt that survives has
+already proven itself against the gates.
+
+The engine is not a sketch: it implements the V2 architecture spec piece by
+piece ([docs/spec/inference-refinery-v2.md](docs/spec/inference-refinery-v2.md)).
+Stages 0–2 are done; stages 3, 4, 6, and 8 are each partly done — crash
+recovery, the probe layer, a bounded two-round research loop, adversarial
+probes, and early stop all work; a second worker harness (stage 5) and a UI
+(stage 7) have not been started.
+[docs/ROADMAP.md](docs/ROADMAP.md) tracks exactly what is done and what is
+next.
 
 ## Principles
 
@@ -61,6 +82,25 @@ there, like `--planner-model`). The planner's raw output is saved to
 `report.json`.
 
 ## Usage
+
+### Prerequisites
+
+- **Node.js and npm** — developed on Node 22. The run database uses the
+  built-in `node:sqlite` module, so there is nothing extra to install.
+- **Git**, on `PATH` — candidates work in git worktrees, so the target
+  repository must be a git repository.
+- **The OpenCode harness comes with `npm install`** — it is the
+  `opencode-ai` package, and the engine runs it straight from `node_modules`
+  (`--opencode-bin` overrides the path). There is no separate install step.
+- **Sign in once, with your own account.** The engine never handles
+  credentials: the OpenCode binary reads its own authenticated session, so
+  sign in once before the first run (`npx opencode auth login`). The default
+  model IDs (`zai-coding-plan/glm-5.3` for the planner and reviewer,
+  `zai-coding-plan/glm-5.3-flash` for workers) are Z.ai coding-plan IDs — on
+  a different provider, pass your own IDs with `--planner-model` /
+  `--model` / `--reviewer-model`.
+- **Windows first** — built and tested on Windows; defaults like the
+  `C:\swarm` run root assume it. Other platforms are untested.
 
 ```bash
 npm install
