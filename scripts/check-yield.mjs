@@ -20,6 +20,7 @@
 // (pre-T-049) src/yield.ts does not exist and no report carries the block —
 // exactly the red bar this check was recorded against at the lane. All git
 // calls list-form (AGENTS.md #4); sandbox removed at the end (AGENTS.md #10).
+import { swarmRoot } from './swarm-root.mjs'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -36,7 +37,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const read = (p) => readFileSync(p, 'utf8')
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-yield'
+const sandbox = swarmRoot + '/verify-yield'
 const IDENTITY = ['-c', 'user.name=check-yield', '-c', 'user.email=yield@local']
 
 rmSync(sandbox, { recursive: true, force: true })

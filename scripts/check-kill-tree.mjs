@@ -26,6 +26,7 @@
 //       tree contains mid and leaf, and the verified kill returns
 //       {rootWasLive: true, verified: true, survivors: []} with all three
 //       pids dead.
+import { swarmRoot } from './swarm-root.mjs'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -43,7 +44,7 @@ const t = (name, cond) => {
 }
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-killtree'
+const sandbox = swarmRoot + '/verify-killtree'
 rmSync(sandbox, { recursive: true, force: true })
 mkdirSync(sandbox, { recursive: true })
 
@@ -56,6 +57,14 @@ const isAlive = (pid) => {
     return false
   }
 }
+
+// T-065: the tree-kill contract is per-platform. Windows: verified tree kill
+// (taskkill /T /F), everything below dies, verified: true, no CLEANUP FAIL.
+// POSIX: a root-only SIGKILL reported verified: false (KI#9) — the direct
+// root dies, its spawned descendants survive as the documented leak, the
+// evidence is the could-not-be-verified line, and the teardown sweep reaps
+// the leftovers. The pinning below asserts each platform's OWN contract.
+const windowsKill = process.platform === 'win32'
 
 // Every pid this script ever learns about — swept best-effort at the end, so
 // nothing we planted outlives the check (AGENTS.md #10, mechanized).
@@ -118,10 +127,24 @@ async function waitUntilDead(pids, deadlineMs = 5000) {
   t('S1: timeout exitCode is null', r.exitCode === null)
   t(`S1: durationMs (${r.durationMs}ms) >= timeoutMs (1500ms)`, r.durationMs >= 1500)
   t('S1: outputTail collected', typeof r.outputTail === 'string')
-  t('S1: no cleanup failures on a verified kill', r.cleanupFailures === undefined)
-  await waitUntilDead([pids[1], pids[2]])
-  t('S1: tracked gate-child pid dead', !isAlive(pids[2]))
-  t('S1: tracked grandchild pid dead', !isAlive(pids[1]))
+  t(windowsKill
+    ? 'S1: no cleanup failures on a verified kill'
+    : 'S1: the unverified POSIX root kill logs its documented CLEANUP FAIL line (KI#9)',
+    windowsKill
+      ? r.cleanupFailures === undefined
+      : Array.isArray(r.cleanupFailures) && r.cleanupFailures.length > 0
+        && r.cleanupFailures.every((l) => l.includes('could not be verified')))
+  if (windowsKill) {
+    await waitUntilDead([pids[1], pids[2]])
+    t('S1: tracked gate-child pid dead', !isAlive(pids[2]))
+    t('S1: tracked grandchild pid dead', !isAlive(pids[1]))
+  } else {
+    // POSIX: the gate must RESOLVE (the engine ends exec's stdio after the
+    // root-only kill — the T-065 wedge fix) with the timeout verdict above,
+    // while the shell's spawned tree survives as the documented leak.
+    t('S1 (POSIX): the spawned tree survives the root-only kill — the documented KI#9 leak',
+      isAlive(pids[2]) && isAlive(pids[1]))
+  }
 }
 
 // ---------- S2 — normally-completing gates are unchanged ----------
@@ -180,12 +203,28 @@ async function waitUntilDead(pids, deadlineMs = 5000) {
   const pids = await waitForPids(dir, [1, 2, 3])
   const r = await runChildWithTimeout(child, { timeoutMs: 800, logPath })
   t('S4: timedOut true', r.timedOut === true)
-  t('S4: no cleanup failures on a verified kill', Array.isArray(r.cleanupFailures) && r.cleanupFailures.length === 0)
-  await waitUntilDead([pids[1], pids[2], pids[3]])
-  t('S4: whole tree dead (root, mid, leaf)', !isAlive(pids[3]) && !isAlive(pids[2]) && !isAlive(pids[1]))
+  t(windowsKill
+    ? 'S4: no cleanup failures on a verified kill'
+    : 'S4: the unverified POSIX root kill logs its documented CLEANUP FAIL line (KI#9)',
+    windowsKill
+      ? Array.isArray(r.cleanupFailures) && r.cleanupFailures.length === 0
+      : Array.isArray(r.cleanupFailures) && r.cleanupFailures.length > 0
+        && r.cleanupFailures.every((l) => l.includes('could not be verified')))
+  if (windowsKill) {
+    await waitUntilDead([pids[1], pids[2], pids[3]])
+    t('S4: whole tree dead (root, mid, leaf)', !isAlive(pids[3]) && !isAlive(pids[2]) && !isAlive(pids[1]))
+  } else {
+    t('S4 (POSIX): the root is dead; its spawned descendants survive — the documented KI#9 leak',
+      !isAlive(pids[3]) && isAlive(pids[2]) && isAlive(pids[1]))
+  }
   const log = readFileSync(logPath, 'utf8')
-  t('S4: log carries the verified kill line', /tree killed, verified: \d+ processes reaped/.test(log))
-  t('S4: log carries no CLEANUP FAIL', !log.includes('CLEANUP FAIL'))
+  if (windowsKill) {
+    t('S4: log carries the verified kill line', /tree killed, verified: \d+ processes reaped/.test(log))
+    t('S4: log carries no CLEANUP FAIL', !log.includes('CLEANUP FAIL'))
+  } else {
+    t('S4 (POSIX): log carries no verified-kill claim', !/tree killed, verified: \d+ processes reaped/.test(log))
+    t('S4 (POSIX): log carries the could-not-be-verified line', log.includes('could not be verified'))
+  }
   t('S4: log drained the child stdout', log.includes('tree is up'))
   t('S4: log carries the timed-out exit line', /\$ exit code: (null|\d+) \(timed out\)/.test(log))
   t('S4: no opencode anywhere in this run', !log.includes('opencode'))
@@ -198,17 +237,31 @@ async function waitUntilDead(pids, deadlineMs = 5000) {
   const parent = spawn(process.execPath, [treeNode, '3', dir], { stdio: 'ignore' })
   planted.add(parent.pid)
   const pids = await waitForPids(dir, [1, 2, 3])
-  const snap = snapshotTree(pids[3])
-  t('S5: pre-kill snapshot contains the root', snap.includes(pids[3]))
-  t('S5: pre-kill snapshot contains the planted mid', snap.includes(pids[2]))
-  t('S5: pre-kill snapshot contains the planted grandchild', snap.includes(pids[1]))
+  if (windowsKill) {
+    const snap = snapshotTree(pids[3])
+    t('S5: pre-kill snapshot contains the root', snap.includes(pids[3]))
+    t('S5: pre-kill snapshot contains the planted mid', snap.includes(pids[2]))
+    t('S5: pre-kill snapshot contains the planted grandchild', snap.includes(pids[1]))
+  } else {
+    // The pre-kill CIM snapshot is Windows machinery (powershell.exe);
+    // off-Windows there is no snapshot and no descendant verification (KI#9).
+  }
   const r = killTreeVerified(pids[3])
   t(
-    'S5: live 3-level tree kill verifies clean',
-    r.rootWasLive === true && r.verified === true && Array.isArray(r.survivors) && r.survivors.length === 0,
+    windowsKill
+      ? 'S5: live 3-level tree kill verifies clean'
+      : 'S5: the POSIX root kill is reported unverified — rootWasLive true, verified false, no survivors',
+    r.rootWasLive === true && Array.isArray(r.survivors) && r.survivors.length === 0
+      && (windowsKill ? r.verified === true : r.verified === false),
   )
-  await waitUntilDead([pids[1], pids[2], pids[3]])
-  t('S5: all three pids dead', !isAlive(pids[3]) && !isAlive(pids[2]) && !isAlive(pids[1]))
+  if (windowsKill) {
+    await waitUntilDead([pids[1], pids[2], pids[3]])
+    t('S5: all three pids dead', !isAlive(pids[3]) && !isAlive(pids[2]) && !isAlive(pids[1]))
+  } else {
+    await waitUntilDead([pids[3]])
+    t('S5 (POSIX): the root is dead; the descendants survive as the documented leak',
+      !isAlive(pids[3]) && isAlive(pids[2]) && isAlive(pids[1]))
+  }
 }
 
 // ---------- sweep: nothing planted outlives this check ----------

@@ -26,6 +26,7 @@
 //
 // All subprocesses are list-form (AGENTS.md #4); the sandbox under C:\swarm
 // is created and removed by this check (AGENTS.md #10).
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -41,7 +42,7 @@ const t = (name, cond) => {
 }
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-brief-count'
+const sandbox = swarmRoot + '/verify-brief-count'
 
 // ---------- Leg A — parser contract (token-free) ----------
 {

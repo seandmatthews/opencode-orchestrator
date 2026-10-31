@@ -22,6 +22,7 @@
 // first — it never deletes a lock that names another pid (a --force-lock
 // taker's) or one it cannot identify; the CLI `release` verb is the explicit
 // human override and drops any holder.
+import { defaultRunRoot } from './run-root.js'
 import { createHash } from 'node:crypto'
 import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
@@ -208,7 +209,7 @@ function cliMain(argv: string[]): void {
   if (verb !== 'acquire' && verb !== 'release') throw new Error(`expected 'acquire' or 'release'\n\n${usage()}`)
   if (!repo) throw new Error(`a repo path is required\n\n${usage()}`)
 
-  let runRoot = 'C:\\swarm'
+  let runRoot = defaultRunRoot()
   let runId: string | undefined
   let force = false
   for (let i = 2; i < argv.length; i++) {

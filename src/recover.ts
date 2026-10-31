@@ -27,6 +27,7 @@
 // ever auto-reaps a lock. The lock file's own pid is never used for
 // anything: it belongs to the dead orchestrator and is useless for tree-kill
 // by construction — only per-attempt pids recorded in dispatch.jsonl are.
+import { defaultRunRoot, defaultStoreDb } from './run-root.js'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -47,8 +48,8 @@ Usage:
 Options:
   --run <runId>        The run directory under the run root to reconcile
   --db <path>          SQLite DB for the abandonment marks (default:
-                       C:\\swarm\\refinery.db)
-  --run-root <path>    Where runs live (default: C:\\swarm)
+                       ${defaultStoreDb()})
+  --run-root <path>    Where runs live (default: ${defaultRunRoot()})
   --force-lock         Take the checkout lock even if another (suspected-
                        stale) holder still owns it
   --help               Show this help
@@ -68,7 +69,7 @@ interface Options {
 }
 
 function parseArgs(argv: string[]): Options {
-  const opts: Options = { runRoot: 'C:\\swarm', run: '', db: 'C:\\swarm\\refinery.db', forceLock: false }
+  const opts: Options = { runRoot: defaultRunRoot(), run: '', db: defaultStoreDb(), forceLock: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
     const value = (): string => {
@@ -207,14 +208,44 @@ function readDispatchEvidence(runDir: string): RunEvidence | null {
 
 // ---------- verify-before-kill (spec §15.2:1071, §15.3:1073-1080) ----------
 
-/** Alive check without side effects: ESRCH = gone, EPERM = exists but denied. */
+/** Alive check without side effects: ESRCH = gone, EPERM = exists but denied.
+ *  On POSIX a SIGKILLed-but-not-yet-reaped child answers kill(pid, 0) — a
+ *  zombie, /proc state Z. The kill is done and the process is dead for every
+ *  purpose here (nothing left to kill, no identity to reuse); /proc/state is
+ *  the honest answer (T-065). Windows has no zombie state — the signal-0
+ *  answer is already exact. */
 function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0)
-    return true
   } catch (e) {
     return (e as NodeJS.ErrnoException).code === 'EPERM'
   }
+  if (process.platform !== 'win32') {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      const state = stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3)
+      return state !== 'Z' && state !== 'X'
+    } catch {
+      // /proc/<pid> vanished between the two probes — the process is gone.
+      return false
+    }
+  }
+  return true
+}
+
+/** A SIGKILL needs a moment to leave the process table (POSIX signal
+ *  delivery is asynchronous; Windows' taskkill returns after the kill).
+ *  A small bounded synchronous settle before declaring the kill failed —
+ *  the T-046 settle posture, without the wider machinery (T-065). The
+ *  zombie-aware isAlive above makes the wait exit the moment the kernel
+ *  processes the signal, reaping or no reaping. */
+function settledDead(pid: number, deadlineMs: number): boolean {
+  const deadline = Date.now() + deadlineMs
+  while (Date.now() < deadline) {
+    if (!isAlive(pid)) return true
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+  }
+  return !isAlive(pid)
 }
 
 /** The creation-time probe: pid → ISO creation stamp, null when unavailable
@@ -428,7 +459,7 @@ export function reconcileKills(
       continue
     }
     killTree(pidRecord.pid)
-    if (isAlive(pidRecord.pid)) {
+    if (!settledDead(pidRecord.pid, 2_000)) {
       cleanupFailures.push({ jobId: d.jobId, attempt: d.attempt, pid: pidRecord.pid, reason: 'kill-failed', message: `pid ${pidRecord.pid} survived the tree kill` })
       console.log(`cleanup failure (${label}): pid ${pidRecord.pid} survived the tree kill`)
     } else {

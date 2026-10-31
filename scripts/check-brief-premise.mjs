@@ -64,6 +64,7 @@
 //
 // All subprocesses list-form (AGENTS.md #4); the sandbox under C:\swarm is
 // created and removed by this check (AGENTS.md #10).
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -105,7 +106,7 @@ const dispatchedFor = (brief, repo, baseSha, leasePath) =>
   workerDispatchPrompt(brief, leasePath, orientationFor(repo, baseSha, leasePath))
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-brief-premise'
+const sandbox = swarmRoot + '/verify-brief-premise'
 const IDENTITY = ['-c', 'user.name=check-brief-premise', '-c', 'user.email=premise@local']
 
 rmSync(sandbox, { recursive: true, force: true })

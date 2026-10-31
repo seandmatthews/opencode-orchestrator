@@ -45,6 +45,7 @@
 //   P2  probe healthy-path byte-identity (command probe): a small run's log
 //       artifact is byte-identical to the executed output, no truncation
 //       line, schema-valid.
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -62,7 +63,7 @@ const t = (name, cond) => {
 const read = (p) => readFileSync(p, 'utf8')
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-bounded-output'
+const sandbox = swarmRoot + '/verify-bounded-output'
 const NODE = process.execPath
 const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')
 

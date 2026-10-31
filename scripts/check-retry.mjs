@@ -14,6 +14,7 @@
 // (independently recomputed from the adapter's recording — never
 // builderPrompt), distinct per retry attempt while inputContextHash stays
 // identical.
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -34,7 +35,7 @@ const read = (p) => readFileSync(p, 'utf8')
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')
 const cliTs = join(root, 'src', 'cli.ts')
-const sandbox = 'C:/swarm/verify-retry'
+const sandbox = swarmRoot + '/verify-retry'
 const IDENTITY = ['-c', 'user.name=check-retry', '-c', 'user.email=retry@local']
 
 rmSync(sandbox, { recursive: true, force: true })

@@ -24,6 +24,7 @@
 // verifier, so the block carries the honest zero record {0, 0, false}. The
 // findings-bearing composition is pinned by Gate 1.27
 // (scripts/check-gate-retry-findings.mjs).
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -54,7 +55,7 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')
 const cliTs = join(root, 'src', 'cli.ts')
 const recoverTs = join(root, 'src', 'recover.ts')
-const sandbox = 'C:/swarm/verify-gate-retry'
+const sandbox = swarmRoot + '/verify-gate-retry'
 const IDENTITY = ['-c', 'user.name=check-gate-retry', '-c', 'user.email=gate-retry@local']
 
 rmSync(sandbox, { recursive: true, force: true })

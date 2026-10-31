@@ -19,6 +19,7 @@
 // path (pass, refusal, override). Every face gets a FRESH throwaway repo so
 // branch namespaces cannot collide. All git calls are list-form (AGENTS #4);
 // the sandbox is removed at the end (AGENTS #10).
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -34,7 +35,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')
 const cliTs = join(root, 'src', 'cli.ts')
-const sandbox = 'C:/swarm/verify-baseline-gate'
+const sandbox = swarmRoot + '/verify-baseline-gate'
 const IDENTITY = ['-c', 'user.name=check-baseline-gate', '-c', 'user.email=baseline-gate@local']
 const NODE = process.execPath
 

@@ -64,6 +64,7 @@
 //
 // All subprocess calls are list-form (AGENTS.md #4); the sandbox under
 // C:\swarm is created and removed by this check (AGENTS.md #10).
+import { swarmRoot } from './swarm-root.mjs'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
@@ -78,7 +79,7 @@ const t = (name, cond) => {
 const read = (p) => readFileSync(p, 'utf8')
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-prompt-transport'
+const sandbox = swarmRoot + '/verify-prompt-transport'
 
 rmSync(sandbox, { recursive: true, force: true })
 mkdirSync(sandbox, { recursive: true })
@@ -92,8 +93,16 @@ const main = async () => {
     const r32 = spawnSync(process.execPath, ['-e', 'process.exit(0)', 'x'.repeat(32_000)])
     const r33 = spawnSync(process.execPath, ['-e', 'process.exit(0)', 'x'.repeat(33_000)])
     t('C0: a 32,000-char argv element spawns fine (exit 0)', r32.error === undefined && r32.status === 0)
-    t('C0: a 33,000-char argv element exceeds the 32,767 UTF-16 command-line ceiling (spawnSync error)',
-      r33.error?.code === 'ENAMETOOLONG' && r33.status === null)
+    if (process.platform === 'win32') {
+      t('C0: a 33,000-char argv element exceeds the 32,767 UTF-16 command-line ceiling (spawnSync error)',
+        r33.error?.code === 'ENAMETOOLONG' && r33.status === null)
+    } else {
+      // The 32,767 ceiling is the Windows CreateProcess limit; POSIX ARG_MAX
+      // admits a 33,000-char element, so the spawn SUCCEEDS there — the
+      // honest platform pin (T-065).
+      t('C0 (POSIX): a 33,000-char argv element spawns fine — the 32,767 ceiling is Windows-only',
+        r33.error === undefined && r33.status === 0)
+    }
   }
 
   // ---------- the stub harness ----------

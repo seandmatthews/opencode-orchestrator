@@ -37,6 +37,7 @@
 // recording, so a packet like that was not produced by this builder — it
 // is tamper. The CLI never writes: input files are byte-identical after an
 // inspect (pinned by Gate 1.13).
+import { defaultRunRoot } from './run-root.js'
 import { existsSync, readFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import {
@@ -63,7 +64,7 @@ Options:
   --plan <path>      Context plan JSON (required)
   --packet <path>    Context packet JSON (required)
   --json             Emit the same structure as JSON
-  --run-root <path>  Root relative paths resolve against (default: C:\\swarm)
+  --run-root <path>  Root relative paths resolve against (default: ${defaultRunRoot()})
   --help             Show this help
 
 Renders the §26.4 fields: token budget (cap + per-layer ledger), the
@@ -91,7 +92,7 @@ function parseArgs(argv: string[]): Options {
     plan: null,
     packet: null,
     json: false,
-    runRoot: 'C:\\swarm',
+    runRoot: defaultRunRoot(),
   }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!

@@ -68,6 +68,7 @@
 //
 // node:sqlite is experimental on Node 22 (VERIFICATION.md Known issue #7) —
 // the dashboard rides the same engine as the store.
+import { defaultStoreDb } from './run-root.js'
 import { existsSync, readFileSync } from 'node:fs'
 import {
   createServer,
@@ -80,7 +81,7 @@ import { resolve as resolvePath } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { decideApproval, listPendingApprovals, type ApprovalDecision, type ApprovalRow } from './store/index.js'
 
-const DEFAULT_DB = 'C:\\swarm\\refinery.db'
+const DEFAULT_DB = defaultStoreDb()
 
 const usage = `Run dashboard: a local, read-only HTTP view over the recorded store (T-034, T-035, T-037).
 
@@ -90,7 +91,7 @@ Usage:
 Options:
   --port <port>    TCP port to bind on 127.0.0.1 (default: an ephemeral free port)
   --db <path>      SQLite DB holding the durable run records (default:
-                   C:\\swarm\\refinery.db)
+                   ${defaultStoreDb()})
   --help           Show this help
 
 Routes:

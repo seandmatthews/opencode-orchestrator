@@ -71,6 +71,7 @@
 // convention). Carved (T-020): no §27 workspace_leases table, no §28
 // WORKTREE_* events, no retention policies, no recover changes, no pipeline
 // changes, no startup-automatic GC.
+import { defaultRunRoot } from './run-root.js'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, rmdirSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
@@ -84,7 +85,7 @@ Usage:
   npm run gc -- [options]
 
 Options:
-  --run-root <path>    Where runs live (default: C:\\swarm)
+  --run-root <path>    Where runs live (default: ${defaultRunRoot()})
   --force-lock         Take the checkout lock even if another (suspected-
                        stale) holder still owns it — the same explicit human
                        override clean and recover honor; nothing ever reaps
@@ -116,7 +117,7 @@ interface Options {
 }
 
 function parseArgs(argv: string[]): Options {
-  const opts: Options = { runRoot: 'C:\\swarm', forceLock: false }
+  const opts: Options = { runRoot: defaultRunRoot(), forceLock: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
     const value = (): string => {

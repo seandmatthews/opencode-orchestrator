@@ -54,6 +54,7 @@
 //
 // All subprocesses are list-form (AGENTS.md #4); the sandbox under C:\swarm
 // is created and removed by this check (AGENTS.md #10).
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -74,7 +75,7 @@ const sortedKeys = (o) => Object.keys(o).sort()
 const is64hex = (s) => typeof s === 'string' && /^[0-9a-f]{64}$/.test(s)
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-rounds'
+const sandbox = swarmRoot + '/verify-rounds'
 const NODE = process.execPath
 const PLANNER_MODEL = 'zai-coding-plan/glm-5.3'
 
@@ -422,7 +423,7 @@ const gitLoop = makeSandboxRepo(repoLoop)
 makeSandboxRepo(repoOne)
 const loopBaseSha = gitLoop('rev-parse', 'HEAD').trim()
 
-const runCli = (label, repo, extraArgs) => {
+const runCli = (label, repo, extraArgs, runRoot = runs) => {
   let code = 0
   let out = ''
   try {
@@ -436,7 +437,7 @@ const runCli = (label, repo, extraArgs) => {
       '--planner-worker', 'machine', '--planner-command', JSON.stringify([NODE, plannerScript]),
       '--reviewer-worker', 'machine', '--reviewer-command', JSON.stringify([NODE, reviewerScript]),
       '--opencode-bin', NODE,
-      '--run-root', runs,
+      '--run-root', runRoot,
       '--db', join(roundDir, 'refinery.db'),
       ...extraArgs,
     ], { encoding: 'utf8', windowsHide: true, timeout: 120_000 })
@@ -533,25 +534,37 @@ t('C (disposal): evidence kept — report.json, dispatch.jsonl, and every round\
   && existsSync(loopReport.rounds[1].renderedBlockPath))
 
 // n=1 real-CLI: today's single pass, NO rounds block (a separate sandbox
-// repo, so the two runs' swarm/* branch namespaces cannot collide).
-const oneRound = runCli('1-round run', repoOne, ['--rounds', '1'])
+// repo AND a separate run root: run ids are second-resolution wall
+// timestamps, so two runs sharing a run root can start in the same second
+// and share one artifacts dir — observed first-hand on a fast Linux box,
+// Known issue #15 / T-066; the check isolates what it can).
+const runsOne = join(roundDir, 'runs-one')
+const oneRound = runCli('1-round run', repoOne, ['--rounds', '1'], runsOne)
 t('C: the real-CLI --rounds 1 run exits 0', oneRound.code === 0)
 const oneRunId = runIdOf(oneRound.out)
-const oneReport = JSON.parse(read(join(runs, oneRunId ?? 'missing', 'report.json')))
+const oneReport = JSON.parse(read(join(runsOne, oneRunId ?? 'missing', 'report.json')))
 // T-059: the key set gains `plannerDigest` — this leg drives the REAL CLI,
 // where the planner repo digest is default ON (its evidence block rides every
 // planner-mode run; `--no-planner-context` opts out). The single-pass pin's
 // substance is unchanged: still NO rounds block, no other key, one wave. The
 // direct-drive faces above stay key-identical by the seam's absent≡off
 // default (pinned by Gate 1.45 E2); the digest's own behavior is Gate 1.45.
+const oneKeys = sortedKeys(oneReport)
+if (!eq(oneKeys, ['baseSha', 'candidates', 'finishedAt', 'goal', 'model', 'planner', 'plannerDigest', 'repo', 'runId', 'startedAt'])) {
+  console.error(`--- C (n=1) key-set mismatch (run ${oneRunId ?? '?'}; loop run ${loopRunId ?? '?'}): actual keys ${JSON.stringify(oneKeys)}, candidate ids ${JSON.stringify(oneReport.candidates.map((c) => c.id))} ---`)
+  for (const c of oneReport.candidates) {
+    console.error(`    ${c.id}: workerOk=${c.workerOk} diffBytes=${c.diffBytes} brief=${JSON.stringify(String(c.brief).slice(0, 80))}`)
+  }
+}
 t('C (n=1): --rounds 1 is today\'s single pass — NO rounds block, today\'s key set plus the additive T-059 plannerDigest block, one candidate wave',
   !('rounds' in oneReport)
-  && eq(sortedKeys(oneReport), ['baseSha', 'candidates', 'finishedAt', 'goal', 'model', 'planner', 'plannerDigest', 'repo', 'runId', 'startedAt'])
+  && eq(oneKeys, ['baseSha', 'candidates', 'finishedAt', 'goal', 'model', 'planner', 'plannerDigest', 'repo', 'runId', 'startedAt'])
   && typeof oneReport.plannerDigest?.sha256 === 'string'
   && eq(oneReport.candidates.map((c) => c.id), ['c01', 'c02']))
 
 t('C: no residual lock files after the runs and the clean',
-  !existsSync(join(runs, 'locks')) || readdirSync(join(runs, 'locks')).filter((f) => f.endsWith('.lock')).length === 0)
+  (!existsSync(join(runs, 'locks')) || readdirSync(join(runs, 'locks')).filter((f) => f.endsWith('.lock')).length === 0)
+  && (!existsSync(join(runsOne, 'locks')) || readdirSync(join(runsOne, 'locks')).filter((f) => f.endsWith('.lock')).length === 0))
 
 // ---------- Leg D — CLI refusals, exit 1, zero side effects ----------
 {

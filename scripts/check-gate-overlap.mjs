@@ -27,6 +27,7 @@
 // CommandGate + the real CLI's machine worker + the real integrate CLI).
 // All git calls list-form (AGENTS.md #4); sandbox removed at the end
 // (AGENTS.md #10).
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -47,7 +48,7 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')
 const cliTs = join(root, 'src', 'cli.ts')
 const integrateTs = join(root, 'src', 'integrate.ts')
-const sandbox = 'C:/swarm/verify-gate-overlap'
+const sandbox = swarmRoot + '/verify-gate-overlap'
 const IDENTITY = ['-c', 'user.name=check-gate-overlap', '-c', 'user.email=gate-overlap@local']
 
 rmSync(sandbox, { recursive: true, force: true })

@@ -30,6 +30,7 @@
 //      could point the run folder or an evidence file outside the artifacts
 //      dir); a full happy-path probe run with the pipeline's own id shapes
 //      (c01 / shot-1) is untouched.
+import { swarmRoot } from './swarm-root.mjs'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -49,7 +50,7 @@ const t = (name, cond) => {
 }
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-probe-boundary'
+const sandbox = swarmRoot + '/verify-probe-boundary'
 rmSync(sandbox, { recursive: true, force: true })
 // Deep-nested workspace — the recorded red bar's shape: a '..' chain from
 // here escapes the sandbox upward.

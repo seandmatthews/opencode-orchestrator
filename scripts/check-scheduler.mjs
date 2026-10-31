@@ -23,6 +23,7 @@
 // ladder for in-flight survivors), not-dispatched recording, dependent
 // phases starved while independents complete, `concluded-early` phase
 // status precedence, and the additive `earlyStops` report block.
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -42,7 +43,7 @@ const read = (p) => readFileSync(p, 'utf8')
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')
 const cliTs = join(root, 'src', 'cli.ts')
-const sandbox = 'C:/swarm/verify-scheduler'
+const sandbox = swarmRoot + '/verify-scheduler'
 const IDENTITY = ['-c', 'user.name=check-scheduler', '-c', 'user.email=scheduler@local']
 
 rmSync(sandbox, { recursive: true, force: true })

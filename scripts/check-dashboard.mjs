@@ -53,6 +53,7 @@ import { tmpdir, userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
+import { defaultStoreDb } from '../src/run-root.ts'
 import { ingest, listPendingApprovals, requestApproval } from '../src/store/index.ts'
 
 // The dashboard module is imported DYNAMICALLY, with console.log wrapped:
@@ -234,7 +235,7 @@ try {
   const help = runDashboardCli(['--help'])
   t(`dashboard --help exits 0 (got ${help.code})`, help.code === 0)
   t('usage documents --port', help.stdout.includes('--port <port>'))
-  t('usage documents --db with its default C:\\swarm\\refinery.db', help.stdout.includes('--db <path>') && help.stdout.includes('C:\\swarm\\refinery.db'))
+  t('usage documents --db with its resolved default (defaultStoreDb(), T-065: platform-aware)', help.stdout.includes('--db <path>') && help.stdout.includes(defaultStoreDb()))
   t('usage documents the T-035 drill-down route /run/<id>/job/<jobId>', help.stdout.includes('/run/<id>/job/<jobId>'))
   t('usage documents the T-037 context route /run/<id>/context', help.stdout.includes('/run/<id>/context'))
 

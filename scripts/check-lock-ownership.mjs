@@ -48,6 +48,8 @@
 // against pre-T-052 code (where importing recover.ts executes its CLI main
 // and exits) — that property is what made the AGENTS #8 red bar a single
 // `node ... check-lock-ownership.mjs` run against main's engine.
+import { killTree } from './kill-tree.mjs'
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -64,7 +66,7 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')
 const lockTs = join(root, 'src', 'lock.ts')
 const recoverTs = join(root, 'src', 'recover.ts')
-const sandbox = 'C:/swarm/verify-lock-ownership'
+const sandbox = swarmRoot + '/verify-lock-ownership'
 
 rmSync(sandbox, { recursive: true, force: true })
 mkdirSync(sandbox, { recursive: true })
@@ -85,7 +87,7 @@ const killOrphans = () => {
   for (const pid of orphans.splice(0)) {
     if (!isAlive(pid)) continue
     try {
-      execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+      killTree(pid)
       console.log(`teardown: killed leftover child pid ${pid}`)
     } catch {
       // already gone
@@ -179,7 +181,8 @@ t('L5: a force-taker\'s own release still releases, silently (the clean --force-
 function writeRecoverDriver() {
   const mod = (p) => pathToFileURL(join(root, p)).href
   const src = `
-import { execFileSync, spawn } from 'node:child_process'
+import { spawn } from 'node:child_process'
+import { killTree } from '${mod(join('scripts', 'kill-tree.mjs'))}'
 import { identityMatches, reconcileKills } from '${mod(join('src', 'recover.ts'))}'
 
 const failures = []
@@ -187,7 +190,10 @@ const t = (name, cond) => { console.log((cond ? 'ok' : 'FAIL') + ': ' + name); i
 const isAlive = (pid) => { try { process.kill(pid, 0); return true } catch (e) { return e.code !== 'ESRCH' } }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const spawnSleeper = () => spawn(process.execPath, ['-e', 'setTimeout(() => {}, 600000)'], { stdio: 'ignore', windowsHide: true })
-const killPid = (pid) => { try { execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }) } catch {} }
+// T-065: the platform-faithful sweep kill — raw taskkill is a Windows-only
+// binary, and a survivor left alive here pins the driver's event loop open
+// (its ChildProcess handle) past ALL GREEN, into the outer 120s timeout.
+const killPid = (pid) => { try { killTree(pid) } catch {} }
 const captureLog = (fn) => {
   const lines = []
   const orig = console.log
@@ -290,7 +296,12 @@ try {
 // "PowerShell missing" cause). Both preconditions are asserted so an
 // environment where this cannot be forced fails LOUDLY here, never silently
 // degrades into a vacuous leg.
-const strippedPath = process.env.PATH.split(';').filter((seg) => seg.trim() !== '' && !/WindowsPowerShell/i.test(seg)).join(';')
+// T-065: PATH separators are ';' on Windows, ':' on POSIX — the strip must
+// remove only the powershell-bearing segments either way. (The ';' split on
+// POSIX treated the whole colon-joined PATH as ONE segment and deleted it,
+// leaving the child recover without git.)
+const pathSep = process.platform === 'win32' ? ';' : ':'
+const strippedPath = process.env.PATH.split(pathSep).filter((seg) => seg.trim() !== '' && !/WindowsPowerShell/i.test(seg)).join(pathSep)
 const envStripped = { ...process.env }
 for (const k of Object.keys(envStripped)) {
   if (k.toLowerCase() === 'path') delete envStripped[k]
@@ -337,10 +348,14 @@ if (positive.status === 0 && (negative.error !== undefined || negative.status !=
   if (existsSync(recoveryPath)) {
     const recovery = JSON.parse(readFileSync(recoveryPath, 'utf8'))
     const f = recovery.cleanupFailures?.[0]
-    t('R6: recovery.json records reason identity-unavailable with the mandated message and zero kills',
-      recovery.kills.length === 0 && f?.reason === 'identity-unavailable' && f?.pid === orphan.pid
-      && typeof f?.message === 'string' && f.message.includes('NOT killing pid') && f.message.includes('kill it manually if it is a leftover'))
+    const r6ok = recovery.kills.length === 0 && f?.reason === 'identity-unavailable' && f?.pid === orphan.pid
+      && typeof f?.message === 'string' && f.message.includes('NOT killing pid') && f.message.includes('kill it manually if it is a leftover')
+    if (!r6ok) {
+      console.error(`--- R6 recovery.json mismatch: kills=${JSON.stringify(recovery.kills)} failures=${JSON.stringify(recovery.cleanupFailures)} ---`)
+    }
+    t('R6: recovery.json records reason identity-unavailable with the mandated message and zero kills', r6ok)
   } else {
+    console.error(`--- R6: recovery.json absent (recover exit ${r.status}); recover output tail ---\n${out.slice(-1200)}`)
     t('R6: recovery.json records reason identity-unavailable with the mandated message and zero kills', false)
   }
   t('R6: the checkout lock was still taken and released on the refusing path (no .lock residue)',

@@ -42,6 +42,7 @@
 //
 // Replay mutates the target repo's worktree state, so steps after the policy
 // refusals run under the T-004 checkout lock, released in finally.
+import { defaultRunRoot, defaultStoreDb } from './run-root.js'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -63,13 +64,13 @@ Options:
                        the gates the candidate passed in the run; when the run
                        recorded a gate's command, the re-supplied command must
                        equal it exactly (compare-when-recorded, T-027)
-  --db <path>          Artifact store DB (default: C:\\swarm\\refinery.db). When
+  --db <path>          Artifact store DB (default: ${defaultStoreDb()}). When
                        it holds a hash for the candidate's diff, the diff must
                        be unmutated since ingest or the replay refuses
                        (verify-when-recorded, T-028); the verdict is recorded
                        back into it. No DB / no recorded row falls back to the
                        path-convention behavior
-  --run-root <path>    Where runs live (default: C:\\swarm)
+  --run-root <path>    Where runs live (default: ${defaultRunRoot()})
   --force-lock         Take the checkout lock from a suspected-stale holder
   --help               Show this help
 
@@ -89,7 +90,7 @@ interface Options {
 }
 
 function parseArgs(argv: string[]): Options {
-  const opts: Options = { runRoot: 'C:\\swarm', run: '', candidate: '', db: 'C:\\swarm\\refinery.db', forceLock: false, gates: [] }
+  const opts: Options = { runRoot: defaultRunRoot(), run: '', candidate: '', db: defaultStoreDb(), forceLock: false, gates: [] }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
     const value = (): string => {

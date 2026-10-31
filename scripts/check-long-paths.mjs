@@ -29,6 +29,7 @@
 //       reads back byte-identical after disposal;
 //   R6  tsx src/clean.ts --run <runId> --run-root <sandbox> --force removes
 //       the worktree + swarm/* branch with the evidence files hash-identical.
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -50,7 +51,7 @@ const IDENTITY = ['-c', 'user.name=check-longpath', '-c', 'user.email=longpath@l
 const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: 'utf8', windowsHide: true, ...opts })
 
 // The throwaway sandbox, created and removed by this check (AGENTS.md #10).
-const SANDBOX = 'C:\\swarm\\verify-longpath'
+const SANDBOX = swarmRoot + '/verify-longpath'
 const RUNS = join(SANDBOX, 'runs') // the --run-root handed to the engine
 
 // ---------- the deterministic depth plan ----------
