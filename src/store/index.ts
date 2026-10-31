@@ -69,7 +69,6 @@
 import { createHash } from 'node:crypto'
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs'
 import { userInfo } from 'node:os'
-import { basename, dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { Attempt, CandidateReport, RunReport, RunSchedule } from '../types.js'
 
@@ -296,7 +295,18 @@ export function artifactId(candidateId: string | null, attemptNumber: number | n
     .update(`${candidateId ?? ''}\u0000${attemptNumber ?? ''}\u0000${path}`)
     .digest('hex')
     .slice(0, 16)
-  return `${scope}/${basename(path)}-${digest}`
+  return `${scope}/${recordedBasename(path)}-${digest}`
+}
+
+/**
+ * The basename of a RECORDED evidence path, reading both separators (T-065):
+ * a run captured on Windows stores backslash paths, and a POSIX store must
+ * still derive the same artifact id from them — `path.basename` cannot (a
+ * backslash is an ordinary character there). The digest already hashes the
+ * raw string; only the displayed basename was platform-fragile.
+ */
+function recordedBasename(p: string): string {
+  return p.substring(Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\')) + 1)
 }
 
 /** 1 MiB read chunks — evidence files (worker logs, diffs, bundles) hash
@@ -1460,10 +1470,25 @@ function eliminationReason(c: CandidateReport): string {
  *  the run dir root, candidate evidence one level below it). Null when the
  *  report carries no artifact paths at all. */
 function reportPathOf(report: RunReport): string | null {
-  if (report.planner?.rawOutputPath) return join(dirname(report.planner.rawOutputPath), 'report.json')
+  if (report.planner?.rawOutputPath) return siblingArtifact(report.planner.rawOutputPath)
   for (const c of report.candidates) {
     const ref = c.review?.rawOutputPath ?? c.diffPath
-    if (ref) return join(dirname(dirname(ref)), 'report.json')
+    if (ref) return siblingArtifact(ref, 2)
   }
   return null
+}
+
+/** 'report.json' beside a recorded artifact path: the reference walked
+ *  `levels` directories up, joined with the path's OWN separator (T-065).
+ *  `join(dirname(...))` cannot parse a backslash path on POSIX, and
+ *  re-joining with the host separator would rewrite the recorded shape —
+ *  the derived path must stay byte-faithful to the run that recorded it. */
+function siblingArtifact(ref: string, levels = 1): string {
+  let end = ref.length
+  while (levels-- > 0) {
+    while (end > 0 && ref[end - 1] !== '/' && ref[end - 1] !== '\\') end--
+    while (end > 0 && (ref[end - 1] === '/' || ref[end - 1] === '\\')) end--
+  }
+  if (end === 0) return 'report.json'
+  return ref.slice(0, end) + ref[end] + 'report.json'
 }

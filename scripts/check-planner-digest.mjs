@@ -58,6 +58,7 @@
 // prompt carries no tree/manifest bytes and no planner-digest.txt exists.
 // All subprocesses list-form (AGENTS.md #4); the sandbox under C:\swarm is
 // created and removed by this check (AGENTS.md #10).
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -77,7 +78,7 @@ const read = (p) => readFileSync(p, 'utf8')
 const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-planner-digest'
+const sandbox = swarmRoot + '/verify-planner-digest'
 const IDENTITY = ['-c', 'user.name=check-planner-digest', '-c', 'user.email=digest@local']
 
 rmSync(sandbox, { recursive: true, force: true })

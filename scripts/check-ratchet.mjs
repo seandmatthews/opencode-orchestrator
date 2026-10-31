@@ -37,6 +37,7 @@
 // this check mirrors are C:\swarm\20261021234438 (red) and
 // C:\swarm\20261021234632 (green) — recorded in VERIFICATION.md's ratchet
 // section; the fast tier never reads them back.
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -50,7 +51,7 @@ const t = (name, cond) => {
 const read = (p) => readFileSync(p, 'utf8')
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-ratchet'
+const sandbox = swarmRoot + '/verify-ratchet'
 const NODE = process.execPath
 const IDENTITY = ['-c', 'user.name=check-ratchet', '-c', 'user.email=ratchet@local']
 const NODE_EXE = NODE.replaceAll('\\', '/')

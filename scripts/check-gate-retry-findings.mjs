@@ -21,6 +21,7 @@
 // TRIES; the re-run gates decide what SURVIVES (decisions.md 2026-10-10 —
 // gates decide survival; models advise). All git calls are list-form
 // (AGENTS.md #4); the sandbox is removed at the end (AGENTS.md #10).
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
@@ -48,7 +49,7 @@ const orientationFor = (repo, baseSha, leasePath) =>
   composeWorkerOrientation({ leasePath, baseSha, digest: composePlannerDigest({ repo, baseSha }) }).text
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-gate-retry-findings'
+const sandbox = swarmRoot + '/verify-gate-retry-findings'
 const IDENTITY = ['-c', 'user.name=check-gate-retry-findings', '-c', 'user.email=findings@local']
 
 // The documented caps (src/runner.ts, VERIFICATION.md Gate 1.27). Asserted

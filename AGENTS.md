@@ -23,8 +23,10 @@ npm run integrate -- --run <runId> --candidate c01 --gate "build=node build.js" 
 node node_modules/tsx/dist/cli.mjs src/lock.ts acquire <repo>   # hold the checkout lock by hand (release to drop)
 ```
 
-Runs write artifacts to `C:\swarm\<runId>\` (`report.json`, per-candidate `worker.log`
-and `diff.patch`, worktrees under `wt/` unless `--clean`). Post-run disposal goes
+Runs write artifacts under the run root — `C:\swarm` on Windows, `$HOME/swarm`
+elsewhere, `SWARM_RUN_ROOT` overrides both (`<run-root>\<runId>\report.json`,
+per-candidate `worker.log` and `diff.patch`, worktrees under `wt/` unless
+`--clean`). Post-run disposal goes
 through `npm run clean`, never hand-rolled shell loops. Runs and clean serialize per
 target repo through the checkout lock (`src/lock.ts`); a refused lock names its
 holder, and only `--force-lock` takes one from a suspected-stale holder — nothing

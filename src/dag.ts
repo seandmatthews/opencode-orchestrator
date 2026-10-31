@@ -8,6 +8,7 @@
 // non-zero and print no DAG body (the T-005 refusal pattern): missing --run,
 // a DB file that does not exist (a dump must never create an empty
 // refinery.db as a side effect), a runId with no rows.
+import { defaultStoreDb } from './run-root.js'
 import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 
@@ -19,7 +20,7 @@ Usage:
 Options:
   --run <runId>    Run to dump (required)
   --db <path>      SQLite DB holding the durable run records (default:
-                   C:\\swarm\\refinery.db)
+                   ${defaultStoreDb()})
   --json           Emit the same structure as JSON
   --help           Show this help
 
@@ -34,7 +35,7 @@ interface Options {
 }
 
 function parseArgs(argv: string[]): Options {
-  const opts: { run: string | null; db: string; json: boolean } = { run: null, db: 'C:\\swarm\\refinery.db', json: false }
+  const opts: { run: string | null; db: string; json: boolean } = { run: null, db: defaultStoreDb(), json: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
     const value = (): string => {

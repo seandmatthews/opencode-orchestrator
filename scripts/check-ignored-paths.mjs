@@ -27,6 +27,7 @@
 // model tokens (fake WorkerAdapter + real CommandGates + the real integrate
 // CLI). All git calls list-form (AGENTS.md #4); sandbox removed at the end
 // (AGENTS.md #10).
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -47,7 +48,7 @@ const read = (p) => readFileSync(p, 'utf8')
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')
 const integrateTs = join(root, 'src', 'integrate.ts')
-const sandbox = 'C:/swarm/verify-ignored-paths'
+const sandbox = swarmRoot + '/verify-ignored-paths'
 const IDENTITY = ['-c', 'user.name=check-ignored-paths', '-c', 'user.email=ignored-paths@local']
 
 rmSync(sandbox, { recursive: true, force: true })

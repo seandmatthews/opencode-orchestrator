@@ -56,6 +56,7 @@
 //       result.cleanupFailures into the evidence array only; and both
 //       adapters route their pre-run write failures into the shared
 //       recorder (the wiring that makes C1/C2's exactly-one line possible).
+import { swarmRoot } from './swarm-root.mjs'
 import { spawn } from 'node:child_process'
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -73,7 +74,7 @@ const t = (name, cond) => {
 }
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-logloss'
+const sandbox = swarmRoot + '/verify-logloss'
 const NODE = process.execPath
 const MODEL = 'zai-coding-plan/glm-5.3-flash'
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -191,7 +192,10 @@ async function main() {
     chmodSync(logPath, 0o666) // restore so the sandbox sweep can remove it
     t('B1: the run completes despite the mid-run loss (exit 0)', r.exitCode === 0)
     const err = expectOneLine(r.cleanupFailures, logPath, Buffer.byteLength(FIRST), 'B1')
-    t('B1: the recorded error is the appendFileSync failure (EPERM on the read-only log)', err !== null && err.startsWith('Error: EPERM: operation not permitted, open'))
+    // T-065: the errno for writing a read-only file is EPERM on Windows,
+    // EACCES on POSIX — the recorded failure is the same either way.
+    t('B1: the recorded error is the appendFileSync failure on the read-only log (EPERM win32 / EACCES POSIX)',
+      err !== null && /^Error: (EPERM|EACCES): /.test(err) && err.includes('open'))
   }
 
   // ---------- C — both adapters (stub drives, the Gate 1.17 precedent) ----------

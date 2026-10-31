@@ -101,3 +101,5 @@ Rules:
 | T-062 | Adversarial-probe expected outcomes: correct input validation stops recording as a crash — per-case expectations on the engine-authored corpus (register R16) | medium | done 2026-10-27 |
 | T-063 | Probe construction-path validation: the capture-path contract enforced at the class boundary, not only in parseJobsSpec (register R18) | low | done 2026-10-27 |
 | T-064 | The no-gates warning tells the truth: elimination, not vacuous passing (register R8 — the T-043 fold never landed) | low | done 2026-10-27 |
+| T-065 | The engine runs on Linux/WSL: platform-aware run root (SWARM_RUN_ROOT), separator-robust recorded-evidence derivations, per-platform kill/identity contracts in the recovery gate — fast tier green on Ubuntu 22.04 WSL2 (Gate 1.51) | medium | done 2026-10-29 |
+| T-066 | Same-second runs on one run root share one artifacts dir (second-resolution run ids) — observed via Gate 1.22's C(n=1) leg on a fast Linux box; check-side isolated in T-065, engine fix filed | medium | filed 2026-10-31 |

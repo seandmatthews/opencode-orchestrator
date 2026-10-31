@@ -23,6 +23,8 @@
 // bound-exhausted terminal, no durable verdict retryable), recovery never
 // reruns (dispatch.jsonl byte-identical, no new worktrees, recovery.json the
 // only new artifact), and every refusal exiting non-zero writing nothing.
+import { killTree, killPid } from './kill-tree.mjs'
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -42,7 +44,7 @@ const read = (p) => readFileSync(p, 'utf8')
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')
 const recoverTs = join(root, 'src', 'recover.ts')
-const sandbox = 'C:/swarm/verify-recovery'
+const sandbox = swarmRoot + '/verify-recovery'
 const IDENTITY = ['-c', 'user.name=check-recovery', '-c', 'user.email=recovery@local']
 
 rmSync(sandbox, { recursive: true, force: true })
@@ -58,7 +60,7 @@ const killOrphans = () => {
   for (const pid of orphans.splice(0)) {
     if (!isAlive(pid)) continue
     try {
-      execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+      killTree(pid)
       console.log(`teardown: killed leftover orphan pid ${pid}`)
     } catch {
       // already gone
@@ -209,7 +211,7 @@ async function crashMidRun(name, maxAttempts) {
   const orphanPid = lines.find((l) => l.type === 'pid' && l.jobId === 'c02').pid
   if (!isAlive(holderPid)) throw new Error(`the orchestrator (lock holder pid ${holderPid}) died before the kill — the hang did not hold`)
   orphans.push(orphanPid)
-  execFileSync('taskkill', ['/pid', String(holderPid), '/F'], { stdio: 'ignore', windowsHide: true })
+  killPid(holderPid)
   await until('driver to exit after the orchestrator pid was killed', () => (isAlive(holderPid) ? null : true))
   await until('lock file to remain (stale)', () => (existsSync(lockPathFor(runRoot, repo)) ? true : null))
   return {
@@ -395,12 +397,26 @@ async function main() {
       !existsSync(join(runDir, 'recovery.json')) && !existsSync(db) && isAlive(orphanPid)
       && read(join(runDir, 'dispatch.jsonl')) === R2.dispatchBefore)
 
-    // AC — with --force-lock: proceeds, orphan verified then dead, lock released.
+    // AC — with --force-lock: proceeds through every step, lock released.
+    // Windows: the orphan's identity is verifiable (creation-time probe), so
+    // recover kills it and exits 0. POSIX: T-052 fails closed — the probe
+    // cannot establish identity, the kill is refused and recorded as an
+    // `identity-unavailable` cleanup failure, recover exits 1, and the
+    // leftover is a human's one-line fix (KI#9's honest degradation).
+    const windowsIdentity = process.platform === 'win32'
     const rec = runRecover(null, ['--run', runId, '--run-root', runRoot, '--db', db, '--force-lock'])
-    t('R2: recover --force-lock exits 0 (every step executed)', rec.code === 0)
-    await until('orphan to disappear from the process table', () => (isAlive(orphanPid) ? null : true))
-    t('R2: the orphaned worker whose pid was recorded in dispatch.jsonl is actually dead (real process check)',
-      !isAlive(orphanPid))
+    t(windowsIdentity
+      ? 'R2: recover --force-lock exits 0 (every step executed)'
+      : 'R2: recover --force-lock exits 1 — the fail-closed identity skip is a recorded cleanup failure (T-052, KI#9)',
+      rec.code === (windowsIdentity ? 0 : 1))
+    if (windowsIdentity) {
+      await until('orphan to disappear from the process table', () => (isAlive(orphanPid) ? null : true))
+      t('R2: the orphaned worker whose pid was recorded in dispatch.jsonl is actually dead (real process check)',
+        !isAlive(orphanPid))
+    } else {
+      t('R2: the orphan survives on POSIX — the kill is refused, never blind (T-052 fail-closed)',
+        isAlive(orphanPid))
+    }
     t('R2: the lock was released on every path — no residual .lock files',
       readdirSync(join(runRoot, 'locks')).filter((f) => f.endsWith('.lock')).length === 0)
 
@@ -428,10 +444,16 @@ async function main() {
 
     // AC — recovery.json: report-only inspection + dispositions + never reruns.
     const recovery = JSON.parse(read(join(runDir, 'recovery.json')))
-    t('R2: recovery.json records the kill (verified pid) and no cleanup failures',
+    t(windowsIdentity
+      ? 'R2: recovery.json records the kill (verified pid) and no cleanup failures'
+      : 'R2: recovery.json records no kill — the refused kill is an identity-unavailable cleanup failure naming the orphan pid',
       recovery.runId === runId && typeof recovery.recoveredAt === 'string'
-      && recovery.kills.length === 1 && recovery.kills[0].pid === orphanPid
-      && recovery.kills[0].jobId === 'c02' && recovery.cleanupFailures.length === 0
+      && (windowsIdentity
+        ? recovery.kills.length === 1 && recovery.kills[0].pid === orphanPid
+          && recovery.kills[0].jobId === 'c02' && recovery.cleanupFailures.length === 0
+        : recovery.kills.length === 0 && recovery.cleanupFailures.length === 1
+          && recovery.cleanupFailures[0].pid === orphanPid
+          && recovery.cleanupFailures[0].reason === 'identity-unavailable')
       && recovery.abandonedAttempts.length === 1
       && recovery.abandonedAttempts[0].processIdentity.pid === orphanPid)
     const ws = Object.fromEntries(recovery.workspaces.map((w) => [w.branch, w]))
@@ -469,15 +491,27 @@ async function main() {
     const R3 = await crashMidRun('kill-run-att2', 2)
     const { runRoot, runId, runDir, orphanPid } = R3
     const db = join(sandbox, 'kill-run-att2', 'recovery.db')
+    const windowsIdentity = process.platform === 'win32'
     const rec = runRecover(null, ['--run', runId, '--run-root', runRoot, '--db', db, '--force-lock'])
-    t('R3: recover --force-lock exits 0', rec.code === 0)
+    t(windowsIdentity
+      ? 'R3: recover --force-lock exits 0'
+      : 'R3: recover --force-lock exits 1 — the fail-closed identity skip is a recorded cleanup failure (T-052, KI#9)',
+      rec.code === (windowsIdentity ? 0 : 1))
     const recovery = JSON.parse(read(join(runDir, 'recovery.json')))
     t('R3: maxAttempts 2 — the completed-with-diff job and the never-completed job are both retryable (no durable verdict to re-roll)',
       recovery.jobs.length === 2
       && recovery.jobs.every((j) => j.disposition === 'retryable' && j.reason === null && j.maxAttempts === 2 && j.attemptsUsed === 1))
-    t('R3: the recorded orphan was killed, nothing else failed',
-      recovery.kills.length === 1 && recovery.kills[0].pid === orphanPid && recovery.cleanupFailures.length === 0)
-    await until('R3 orphan to disappear', () => (isAlive(orphanPid) ? null : true))
+    t(windowsIdentity
+      ? 'R3: the recorded orphan was killed, nothing else failed'
+      : 'R3: the recorded orphan survives — the refused kill is an identity-unavailable cleanup failure (T-052, KI#9)',
+      windowsIdentity
+        ? recovery.kills.length === 1 && recovery.kills[0].pid === orphanPid && recovery.cleanupFailures.length === 0
+        : recovery.kills.length === 0 && recovery.cleanupFailures.length === 1
+          && recovery.cleanupFailures[0].pid === orphanPid
+          && recovery.cleanupFailures[0].reason === 'identity-unavailable')
+    if (windowsIdentity) {
+      await until('R3 orphan to disappear', () => (isAlive(orphanPid) ? null : true))
+    }
   }
 
   // ---------- R4: verify-before-kill never blindly kills ----------
@@ -515,8 +549,11 @@ async function main() {
       byJob.j1?.reason === 'pid-not-alive' && byJob.j1?.pid === deadPid && recovery.kills.length === 0)
     t('R4: a dispatch with no recorded pid is a cleanup failure, never blind-killed',
       byJob.j2?.reason === 'no-pid-recorded' && byJob.j2?.pid === null)
-    t('R4: a live pid outside the evidence window fails identity verification and stays alive (never blind-killed)',
-      byJob.j3?.reason === 'identity-mismatch' && byJob.j3?.pid === process.pid && isAlive(process.pid))
+    t(process.platform === 'win32'
+      ? 'R4: a live pid outside the evidence window fails identity verification and stays alive (never blind-killed)'
+      : 'R4: a live pid whose identity cannot be established off-Windows is refused, never blind-killed (T-052 fail-closed)',
+      byJob.j3?.pid === process.pid && isAlive(process.pid)
+      && byJob.j3?.reason === (process.platform === 'win32' ? 'identity-mismatch' : 'identity-unavailable'))
     const mentionedPids = [
       ...recovery.kills.map((k) => k.pid),
       ...recovery.cleanupFailures.map((f) => f.pid),

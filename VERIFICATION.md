@@ -5955,6 +5955,40 @@ Required whenever the no-gates warning text/trigger in
 `src/runner.ts` changes — the two are pinned agreeing, so a change on
 either side must re-run this gate.
 
+## Gate 1.51 — platform-aware run root (seconds, fast tier)
+
+```bash
+node node_modules/tsx/dist/cli.mjs scripts/check-run-root.mjs
+```
+
+Token-free, deterministic (T-065). Pins the run-root resolution contract:
+- **S1 (unit)** — `defaultRunRoot()` (src/run-root.ts) is `C:\swarm` on
+  Windows (the documented default since decisions.md 2026-10-10),
+  `$HOME/swarm` elsewhere; `SWARM_RUN_ROOT` overrides both;
+  `defaultStoreDb()` derives the DB path from the resolved root. The
+  scripts-side mirror (`scripts/swarm-root.mjs`, plain node for verify.mjs)
+  reads the same env var with the same per-platform default.
+- **S2 (end-to-end)** — the REAL lock CLI (`src/lock.ts acquire`/`release`)
+  with NO `--run-root` and `SWARM_RUN_ROOT` set creates its lock under
+  `<SWARM_RUN_ROOT>/locks/` and releases it cleanly: the env override
+  reaches the engine's own defaulting chain, not just the exported
+  function.
+
+Red bar (AGENTS.md #8), recorded BEFORE the change, token-free, on the
+pristine WSL clone (= origin/main 35f799f): the tier had no run-root check
+at all — its red bar is the tier's own crash. The first WSL run died at
+Gate 1: `demo-target.mjs` received the backslashed `C:\swarm\demo-target`
+argv and created a single directory of that literal name inside the repo (a
+legal filename on POSIX), then the tier's next assertion failed on
+`fatal: cannot change to 'C:/swarm/demo-target'` (git -C with the
+forward-slash form). Full story in the T-065 ticket; the green bar is the
+same tier green end-to-end on Ubuntu 22.04.2 LTS (WSL2, Node 22) plus the
+Windows fast tier byte-identical on the win32 legs.
+
+Required whenever `src/run-root.ts`'s resolution changes, any engine CLI's
+`--run-root`/`--db` defaulting changes, or `scripts/swarm-root.mjs` drifts
+from the src resolver's contract.
+
 ## Gate 2 — harness end-to-end (minutes, spends model tokens)
 
 ```bash
@@ -6711,6 +6745,42 @@ landing in T-017's Landed section).
     output and propagates its exit code too (observed on an intermediate
     mis-argued run). Both bars are attached here, so the remedy now does
     what its paragraph claims.
+14. **Off-Windows, recovery's orphan kill is refused by design, and the
+    recovery gate now pins both platform shapes (T-065).** The T-052
+    creation-time probe has no POSIX implementation, so `recover` on
+    Linux/macOS cannot establish a recorded worker's identity and fails
+    closed: the kill is skipped, recorded in recovery.json's
+    `cleanupFailures` as `identity-unavailable` naming the pid ("kill it
+    manually if it is a leftover"), and recover exits 1 (its exit policy:
+    any cleanup failure is non-zero). That behavior is the composition of
+    Known issue #9 (kill verification is Windows-only) and T-052
+    (fail-closed identity) — not a new engine behavior; what T-065 added is
+    the honest gate: check-recovery's R2/R3/R4 legs assert the Windows
+    contract (verified kill, exit 0) on win32 and the POSIX contract
+    (refused kill, surviving orphan, exit 1, lock still released, abandonment
+    marks still written) elsewhere, after observing the POSIX shape
+    first-hand on Ubuntu 22.04 WSL2 (the forced reconciliation's
+    recovery.json, 2026-10-29). The Windows tier remains the primary tier;
+    the fast tier is additionally green on Ubuntu 22.04.2 LTS (WSL2, Node
+    22) as of the same date — Gate 2 (real-model) has NOT been exercised on
+    Linux (harness auth is per-OS; `opencode providers login` inside WSL is
+    the pending step).
+15. **Two runs started in the same wall-clock second on one run root share
+    ONE artifacts dir (observed 2026-10-31, T-065's WSL lane; engine fix
+    filed as T-066, deliberately not same-run).** Run ids are
+    second-resolution wall timestamps (src/cli.ts:716) and the artifacts dir
+    `<runRoot>/<runId>` is created without an existence check — a run
+    started in the same second as another run on the same root dispatches
+    INTO the first run's directory. Gate 1.22's C(n=1) leg exposed it on a
+    fast Linux box at ~50%: the one-round run landed in the 2-round loop
+    run's dir, its fake planner saw the loop's round-2 provenance marker,
+    emitted the round-2 briefs, and the run grew a NO-OP candidate whose
+    T-049 yield block tripped the leg's key-set pin (probe evidence in
+    T-066). Windows never hit it only because the whole sequence was slower
+    than one second. The check-side exposure is isolated in the T-065
+    change-set (the one-round run now uses its own run root); the engine
+    hazard — real for any operator — is ticketed, not folded into this lane
+    (findings promote via tickets, never same-run).
 
 ## Definition of done (per ticket)
 

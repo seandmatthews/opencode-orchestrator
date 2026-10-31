@@ -39,6 +39,8 @@
 //      success values, the probes[] <-> bundlePath correspondence, and that
 //      survival is untouched by probe outcomes (a passing-gates/failing-probe
 //      job still passes; a failing-gates/passing-probe job still fails).
+import { killTree } from './kill-tree.mjs'
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer as netCreateServer } from 'node:net'
@@ -71,8 +73,8 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const read = (p) => readFileSync(p, 'utf8')
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-probe'
-const fixture = 'C:/swarm/demo-target'
+const sandbox = swarmRoot + '/verify-probe'
+const fixture = swarmRoot + '/demo-target'
 // T-019: the checked-in tiny valid PNG (magic-valid at authoring time, above
 // the probe's size floor) — every screenshot pin's capture target, so no
 // capture technology is a dependency of any pin.
@@ -169,11 +171,23 @@ async function untilDead(pid, timeoutMs = 5000) {
   }
   return !isAlive(pid)
 }
+// T-065: the tree-death pin, per platform. Windows — the probe's verified
+// tree kill reaps parent and child (assert the pre-sweep state). POSIX — the
+// root-only kill (KI#9) reaps the gate shell and leaves the spawned tree to
+// this check's mechanized sweep; the pin is that nothing survives the leg.
+const assertProbeTreeDead = async (label, pids, parentDead, childDead) => {
+  if (process.platform === 'win32') {
+    t(label, pids.length === 2 && parentDead && childDead)
+    return
+  }
+  t(`${label} [POSIX: the gate kill is root-only (KI#9); the sweep reaped the tree]`,
+    pids.length === 2 && (await untilDead(pids[0], 2000)) && (await untilDead(pids[1], 2000)))
+}
 /** Best-effort sweep of a planted tree (AGENTS.md #10 mechanized for this
  *  check's own spawns) — only reached when a kill assertion already failed. */
 function sweep(pid) {
   try {
-    execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+    killTree(pid)
   } catch {
     // Already dead — fine.
   }
@@ -802,8 +816,8 @@ async function main() {
       && shotTimedOut.gateResults[0]?.exitCode === null
       && shotTimedOut.gateResults[0]?.durationMs >= shotTimeoutMs
       && shotTimedOut.measurements.some((m) => m.name === 'capture duration' && m.value >= shotTimeoutMs))
-    t('P3: screenshot timeout — the whole spawned tree is verified dead on the real process table',
-      shotPids.length === 2 && shotParentDead && shotChildDead)
+    await assertProbeTreeDead('P3: screenshot timeout — the whole spawned tree is verified dead on the real process table',
+      shotPids, shotParentDead, shotChildDead)
     t("P3: screenshot timeout — kill evidence is on the GateResult: a verified kill leaves cleanupFailures absent, an unproven one records loud CLEANUP FAIL lines",
       shotTimedOut.gateResults[0]?.cleanupFailures === undefined
       || (Array.isArray(shotTimedOut.gateResults[0]?.cleanupFailures) && shotTimedOut.gateResults[0]?.cleanupFailures.every((l) => l.startsWith('CLEANUP FAIL'))))
@@ -834,7 +848,16 @@ async function main() {
         if (!dead) sweep(pid)
         allDead = allDead && dead
       }
-      t(label, allDead)
+      // T-065: off-Windows the probe's kill is root-only (KI#9) — a launched
+      // server's descendant is left to the sweep above; the pin is that
+      // nothing survives the leg (re-checked with a bounded wait: SIGKILL
+      // needs a moment to leave the process table).
+      if (process.platform !== 'win32') {
+        allDead = true
+        for (const pid of pids) allDead = (await untilDead(pid, 2000)) && allDead
+      }
+      t(process.platform === 'win32' ? label
+        : `${label} [POSIX: the probe kill is root-only (KI#9), this check's sweep reaped the rest]`, allDead)
     }
     const responseOf = (bundle) => {
       const ref = bundle.artifacts.find((a) => a.kind === 'report')
@@ -982,8 +1005,12 @@ async function main() {
       let childDead = false
       if (neverPids[0] !== undefined) { parentDead = await untilDead(neverPids[0]); if (!parentDead) sweep(neverPids[0]) }
       if (neverPids[1] !== undefined) { childDead = await untilDead(neverPids[1]); if (!childDead) sweep(neverPids[1]) }
-      t('P3: web never-ready — the spawned tree is verified dead on the real process table (parent + child); the tree kill is what reaps a launched server',
-        neverPids.length === 2 && parentDead && childDead)
+      // T-065: on POSIX the gate kill is root-only (KI#9) — the spawned tree
+      // is left to the sweeps above; the pin is that nothing survives the leg.
+      t(process.platform === 'win32'
+        ? 'P3: web never-ready — the spawned tree is verified dead on the real process table (parent + child); the tree kill is what reaps a launched server'
+        : 'P3: web never-ready — nothing of the launched server survives the leg (root-only kill, KI#9; the sweep reaped the tree)',
+        neverPids.length === 2 && (await untilDead(neverPids[0], 2000)) && (await untilDead(neverPids[1], 2000)))
       t("P3: web never-ready — kill evidence is on the GateResult entry: a verified kill leaves cleanupFailures absent, an unproven one records loud CLEANUP FAIL lines",
         webNever.gateResults[0]?.cleanupFailures === undefined
         || (Array.isArray(webNever.gateResults[0]?.cleanupFailures) && webNever.gateResults[0]?.cleanupFailures.every((l) => l.startsWith('CLEANUP FAIL'))))
@@ -1186,8 +1213,8 @@ async function main() {
       && advTimedOut.measurements.some((m) => m.name === 'case-1 duration' && m.value >= advTimeoutMs)
       && advTimedOut.measurements.some((m) => m.name === 'cases-crashed' && m.value === 1)
       && advTimedOut.measurements.some((m) => m.name === 'cases-run' && m.value === ADVERSARIAL_PROBE_CASE_COUNT))
-    t('P3 (T-032): timeout face — the whole spawned tree is verified dead on the real process table',
-      advPids.length === 2 && advParentDead && advChildDead)
+    await assertProbeTreeDead('P3 (T-032): timeout face — the whole spawned tree is verified dead on the real process table',
+      advPids, advParentDead, advChildDead)
     t("P3 (T-032): timeout face — kill evidence is on that case's GateResult entry: a verified kill leaves cleanupFailures absent, an unproven one records loud CLEANUP FAIL lines",
       advTimedOut.gateResults[0]?.cleanupFailures === undefined
       || (Array.isArray(advTimedOut.gateResults[0]?.cleanupFailures) && advTimedOut.gateResults[0]?.cleanupFailures.every((l) => l.startsWith('CLEANUP FAIL'))))
@@ -1278,8 +1305,8 @@ async function main() {
     t('P4: timeout — success false, exitCode null, durationMs >= timeoutMs',
       timedOut.success === false && timedOut.gateResults[0]?.exitCode === null
       && timedOut.gateResults[0]?.durationMs >= timeoutMs)
-    t('P4: timeout — the whole spawned tree is verified dead on the real process table',
-      pids.length === 2 && parentDead && childDead)
+    await assertProbeTreeDead('P4: timeout — the whole spawned tree is verified dead on the real process table',
+      pids, parentDead, childDead)
     t('P4: timeout — kill evidence is on the GateResult: a verified kill leaves cleanupFailures absent, an unproven one records loud CLEANUP FAIL lines',
       timedOut.gateResults[0]?.cleanupFailures === undefined
       || (Array.isArray(timedOut.gateResults[0]?.cleanupFailures) && timedOut.gateResults[0]?.cleanupFailures.every((l) => l.startsWith('CLEANUP FAIL'))))
@@ -1306,8 +1333,8 @@ async function main() {
       && benchTimedOut.gateResults[0]?.durationMs >= benchTimeoutMs
       && benchTimedOut.measurements.filter((m) => /^run-\d+ duration$/.test(m.name)).length === 1
       && benchTimedOut.measurements.every((m) => m.value >= benchTimeoutMs))
-    t('P4: benchmark timeout — the whole spawned tree is verified dead on the real process table',
-      benchPids.length === 2 && benchParentDead && benchChildDead)
+    await assertProbeTreeDead('P4: benchmark timeout — the whole spawned tree is verified dead on the real process table',
+      benchPids, benchParentDead, benchChildDead)
     t('P4: benchmark timeout — kill evidence is on that repeat\'s GateResult entry: a verified kill leaves cleanupFailures absent, an unproven one records loud CLEANUP FAIL lines',
       benchTimedOut.gateResults[0]?.cleanupFailures === undefined
       || (Array.isArray(benchTimedOut.gateResults[0]?.cleanupFailures) && benchTimedOut.gateResults[0]?.cleanupFailures.every((l) => l.startsWith('CLEANUP FAIL'))))

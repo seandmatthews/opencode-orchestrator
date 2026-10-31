@@ -37,6 +37,7 @@
 //       evidence geometry) is DISPOSED by the no---force gc pass, and the
 //       same shape plus a post-capture edit is REFUSED per-item (worktree +
 //       branch + evidence survive); exit 1.
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -50,7 +51,7 @@ const t = (name, cond) => {
 }
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-gc'
+const sandbox = swarmRoot + '/verify-gc'
 const repo = join(sandbox, 'repo')
 const runs = join(sandbox, 'runs')
 const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')

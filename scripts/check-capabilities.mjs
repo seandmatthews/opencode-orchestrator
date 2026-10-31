@@ -31,6 +31,7 @@
 //
 // All git calls are list-form (AGENTS.md #4); the sandbox under C:\swarm is
 // created and removed by this check (AGENTS.md #10).
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
@@ -49,7 +50,7 @@ const read = (p) => readFileSync(p, 'utf8')
 const sortedKeys = (o) => Object.keys(o).sort()
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-capabilities'
+const sandbox = swarmRoot + '/verify-capabilities'
 
 rmSync(sandbox, { recursive: true, force: true })
 mkdirSync(sandbox, { recursive: true })

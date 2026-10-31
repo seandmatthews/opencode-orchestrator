@@ -45,6 +45,7 @@
 // T-055 helper; G/L/S drive the helper and report themselves as the
 // recorded red bar when it is absent (pre-change main — the T-052
 // seam-absence pattern).
+import { swarmRoot } from './swarm-root.mjs'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -56,8 +57,8 @@ const t = (name, cond) => {
   if (!cond) failures.push(name)
 }
 
-const sandbox = 'C:/swarm/verify-retention'
-const REAL_VERIFY_ROOT = 'C:/swarm/verify'
+const sandbox = swarmRoot + '/verify-retention'
+const REAL_VERIFY_ROOT = swarmRoot + '/verify'
 const RUN_DIR_RE = /^\d{14}$/
 
 // Local (helper-independent) run-dir listing for the R and H faces — the

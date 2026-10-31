@@ -36,6 +36,7 @@
 //       evidence at `<runDir>/<id>/attempt-2/diff.patch` and cleans green.
 // The gc lane (the same predicate riding shared disposeTargets) is pinned
 // by check-gc.mjs's pass D, both legs (Gate 1.18).
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -50,7 +51,7 @@ const t = (name, cond) => {
 }
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-t048'
+const sandbox = swarmRoot + '/verify-t048'
 const repo = join(sandbox, 'repo')
 const crlfRepo = join(sandbox, 'repo-crlf')
 const runs = join(sandbox, 'runs')
@@ -130,10 +131,13 @@ t('P0: evidenceDiffPath is exported from src/disposal.ts',
   typeof disposal.evidenceDiffPath === 'function')
 if (typeof disposal.evidenceDiffPath === 'function') {
   const ep = disposal.evidenceDiffPath
+  // T-065: the geometry maps the lease path to the evidence path in the
+  // platform's own separator shape — the recorded run's shape.
+  const sep = (p) => (process.platform === 'win32' ? p.replaceAll('/', '\\') : p)
   t('P0: attempt-1 lease wt/<id> maps to <runDir>/<id>/diff.patch',
-    ep('C:/x/runs/20260101000001/wt/c01') === 'C:/x/runs/20260101000001/c01/diff.patch'.replaceAll('/', '\\'))
+    ep('C:/x/runs/20260101000001/wt/c01') === sep('C:/x/runs/20260101000001/c01/diff.patch'))
   t('P0: retry lease wt/<id>-a2 maps to <runDir>/<id>/attempt-2/diff.patch',
-    ep('C:/x/runs/20260101000001/wt/c01-a2') === 'C:/x/runs/20260101000001/c01/attempt-2/diff.patch'.replaceAll('/', '\\'))
+    ep('C:/x/runs/20260101000001/wt/c01-a2') === sep('C:/x/runs/20260101000001/c01/attempt-2/diff.patch'))
   t('P0: a path off the wt/ convention maps to null (no evidence geometry)',
     ep('C:/x/some/other/shape/c01') === null)
 } else {

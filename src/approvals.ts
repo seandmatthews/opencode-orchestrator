@@ -19,6 +19,7 @@
 // double-decide (the audit record is not rewritable; the refusal names the
 // current state), unknown --decision value, missing flags. `list` is
 // read-only: the DB opens readOnly and the file is never touched.
+import { defaultStoreDb } from './run-root.js'
 import { existsSync } from 'node:fs'
 import { decideApproval, listPendingApprovals, requestApproval } from './store/index.js'
 
@@ -48,7 +49,7 @@ Options:
   --note <text>         A note recorded on the row (decide replaces the
                         row's note only when provided)
   --db <path>           SQLite DB holding the durable run records (default:
-                        C:\\swarm\\refinery.db)
+                        ${defaultStoreDb()})
   --json                list only: emit the same structure as JSON
   --help                Show this help
 
@@ -81,7 +82,7 @@ function parseArgs(argv: string[]): { subcommand: string; opts: BaseOptions } {
   if (subcommand !== 'request' && subcommand !== 'list' && subcommand !== 'decide') {
     refuse(`unknown subcommand '${subcommand}' (expected request|list|decide)\n\n${usage}`)
   }
-  const opts: BaseOptions = { run: null, job: null, decision: null, by: null, note: null, db: 'C:\\swarm\\refinery.db', json: false }
+  const opts: BaseOptions = { run: null, job: null, decision: null, by: null, note: null, db: defaultStoreDb(), json: false }
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]!
     const value = (): string => {

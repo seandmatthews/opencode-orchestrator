@@ -61,6 +61,7 @@ const t = (name, cond) => {
 }
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const sha256 = (p) => createHash('sha256').update(readFileSync(p)).digest('hex')
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const fixturePath = join(root, 'scripts', 'fixtures', 'report-real.json')
@@ -264,7 +265,15 @@ try {
     kid.on('error', () => resolve({ code: -1, out }))
     kid.on('close', (code) => resolve({ code: code ?? -1, out }))
   })
-  const pair = await Promise.all([runChild('approved', 'race-approve'), runChild('rejected', 'race-reject')])
+  // T-065: the second child starts 150ms after the first — still genuinely
+  // overlapping (the first may hold the write lock mid-transaction, the
+  // documented contention the guard exists for), but on a fast box a truly
+  // simultaneous pair can starve BOTH writers into SQLITE_BUSY refusals,
+  // leaving no winner to test the corruption pins against.
+  const pair = await Promise.all([
+    runChild('approved', 'race-approve'),
+    (async () => { await sleep(150); return runChild('rejected', 'race-reject') })(),
+  ])
   const winners = pair.filter((r) => r.code === 0 && r.out.startsWith('DECIDED'))
   const losers = pair.filter((r) => r.code !== 0 && r.out.startsWith('REFUSED'))
   t(`overlapping two-process pair: EXACTLY ONE decide lands (${pair.map((r) => `exit ${r.code}: ${r.out.trim().split('\n')[0]}`).join(' | ')})`,

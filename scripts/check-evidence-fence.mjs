@@ -65,6 +65,7 @@
 //
 // All subprocess calls are list-form (AGENTS.md #4); the sandbox under
 // C:\swarm is created and removed by this check (AGENTS.md #10).
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -83,7 +84,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const read = (p) => readFileSync(p, 'utf8')
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-evidence-fence'
+const sandbox = swarmRoot + '/verify-evidence-fence'
 const IDENTITY = ['-c', 'user.name=check-evidence-fence', '-c', 'user.email=fence@local']
 
 rmSync(sandbox, { recursive: true, force: true })

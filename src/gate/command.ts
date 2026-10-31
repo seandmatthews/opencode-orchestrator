@@ -68,13 +68,28 @@ export class CommandGate implements Gate {
         timedOut = true
         // The ChildProcess knows its own exit before the exec callback
         // delivers it — never taskkill a shell that exited naturally at the
-        // boundary (a just-exited or reused pid is not ours to kill).
-        if (child.exitCode !== null || child.signalCode !== null) return
+        // boundary (a just-exited or reused pid is not ours to kill). Its
+        // stdio can still be held open by a pipe-holding descendant though,
+        // which wedges the close-gated callback forever — end the streams
+        // (the callback then delivers the partial output, T-065).
+        if (child.exitCode !== null || child.signalCode !== null) {
+          child.stdin?.destroy()
+          child.stdout?.destroy()
+          child.stderr?.destroy()
+          return
+        }
         if (child.pid === undefined) {
           cleanupFailures = ['CLEANUP FAIL: no root pid to kill for this gate']
           return
         }
         cleanupFailures = killFailureLines(child.pid, killTreeVerified(child.pid))
+        // The kill is root-only off-Windows (KI#9): a surviving descendant
+        // can hold exec's stdio open forever, wedging the close-gated
+        // callback past the kill. The root is dead or dying; end the streams
+        // so the timeout verdict resolves with the output collected so far.
+        child.stdin?.destroy()
+        child.stdout?.destroy()
+        child.stderr?.destroy()
       }, this.timeoutMs)
     })
   }

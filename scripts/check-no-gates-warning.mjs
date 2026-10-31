@@ -35,6 +35,7 @@
 //
 // All subprocess calls are list-form (AGENTS #4); the sandbox under C:\swarm
 // is created and removed by this check (AGENTS #10).
+import { swarmRoot } from './swarm-root.mjs'
 import { spawnSync, execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
@@ -50,7 +51,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')
 const cliTs = join(root, 'src', 'cli.ts')
-const sandbox = 'C:/swarm/verify-no-gates-warning'
+const sandbox = swarmRoot + '/verify-no-gates-warning'
 const IDENTITY = ['-c', 'user.name=check-no-gates-warning', '-c', 'user.email=no-gates-warning@local']
 const NODE = process.execPath
 

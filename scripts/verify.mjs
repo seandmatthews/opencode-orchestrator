@@ -3,6 +3,7 @@
 //   node scripts/verify.mjs full   fast + Gate 2 (real e2e run, ~3-5 min, model tokens)
 // All subprocesses are list-form and shell-free: npm.cmd shims and string-joined
 // commands are exactly how Windows quoting bugs happen (AGENTS.md #4).
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -11,9 +12,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { ARCHIVE_KEEP_RUNS, archiveExistingRuns, listRunDirs } from './verify-retention.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const fixture = 'C:/swarm/demo-target'
-const verifyRoot = 'C:/swarm/verify'
-const verifyArchiveRoot = 'C:/swarm/verify-archive'
+const fixture = swarmRoot + '/demo-target'
+const verifyRoot = swarmRoot + '/verify'
+const verifyArchiveRoot = swarmRoot + '/verify-archive'
+// The historical forward-slash roots were re-slashed for Windows argvs; a
+// no-op on every other platform (T-065).
+const asWinPaths = (p) => (process.platform === 'win32' ? p.replace(/\//g, '\\') : p)
 const tier = process.argv[2] ?? 'fast'
 
 if (tier !== 'fast' && tier !== 'full') {
@@ -45,7 +49,7 @@ try {
 
 section('Gate 1 — fixture baseline')
 try {
-  run(process.execPath, [join(root, 'scripts', 'demo-target.mjs'), fixture.replace(/\//g, '\\')], { cwd: root, stdio: 'inherit' })
+  run(process.execPath, [join(root, 'scripts', 'demo-target.mjs'), asWinPaths(fixture)], { cwd: root, stdio: 'inherit' })
   ok(true, 'fixture regenerated and baseline gates printed build ok + tests ok')
 } catch (e) {
   fail(`fixture generation failed: ${e.status ?? e.message}`)
@@ -65,7 +69,7 @@ try {
 // ---------- Gate 1.5: run artifact cleanup (T-002) ----------
 section('Gate 1.5 — run artifact cleanup (fast tier)')
 const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')
-const cleanRoot = 'C:/swarm/verify-clean'
+const cleanRoot = swarmRoot + '/verify-clean'
 const cleanRepo = join(cleanRoot, 'repo')
 const cleanRuns = join(cleanRoot, 'runs')
 rmSync(cleanRoot, { recursive: true, force: true })
@@ -208,7 +212,7 @@ ok(lockFilesIn(locksDir).length === 0, 'lock CLI release leaves no lock file beh
 const runCheckRoot = join(cleanRoot, 'runs-runcheck')
 mkdirSync(runCheckRoot, { recursive: true })
 expectLockCli(0, 'acquire (run side)', ['acquire', cleanRepo, '--run-root', runCheckRoot])
-const refusedRun = expectSkeleton(1, 'locked run', ['--repo', cleanRepo.replace(/\//g, '\\'), '--goal', 'lock refusal check', '--run-root', runCheckRoot.replace(/\//g, '\\')])
+const refusedRun = expectSkeleton(1, 'locked run', ['--repo', asWinPaths(cleanRepo), '--goal', 'lock refusal check', '--run-root', asWinPaths(runCheckRoot)])
 ok(refusedRun.code === 1, `run under a held lock refuses with exit 1 (got ${refusedRun.code})`)
 ok(refusedRun.out.includes('checkout lock held'), 'run refusal names the checkout lock')
 ok(readdirSync(runCheckRoot).filter((d) => /^\d{14}$/.test(d)).length === 0, 'no artifacts dir created under a held lock')
@@ -216,7 +220,7 @@ ok(worktreeCount() === 3, 'no worktree created under a held lock')
 expectLockCli(0, 'release (run side)', ['release', cleanRepo, '--run-root', runCheckRoot])
 
 // AC#4 — release-on-error: a failure after acquisition leaves no lock file.
-const badBase = expectSkeleton(1, 'bad base', ['--repo', cleanRepo.replace(/\//g, '\\'), '--goal', 'release-on-error check', '--base', 'no-such-ref', '--run-root', runCheckRoot.replace(/\//g, '\\')])
+const badBase = expectSkeleton(1, 'bad base', ['--repo', asWinPaths(cleanRepo), '--goal', 'release-on-error check', '--base', 'no-such-ref', '--run-root', asWinPaths(runCheckRoot)])
 ok(badBase.code === 1, `bad --base run exits non-zero (got ${badBase.code})`)
 ok(lockFilesIn(join(runCheckRoot, 'locks')).length === 0, 'failed run released its lock')
 
@@ -266,7 +270,7 @@ ok(lockFilesIn(cleanRuns).length === 0 && lockFilesIn(join(runCheckRoot, 'locks'
 
 // ---------- Gate 1.5: integration replay (T-005) ----------
 section('Gate 1.5 — integration replay (fast tier)')
-const intRoot = 'C:/swarm/verify-integrate'
+const intRoot = swarmRoot + '/verify-integrate'
 const intRepo = join(intRoot, 'repo')
 const intRuns = join(intRoot, 'runs')
 rmSync(intRoot, { recursive: true, force: true })
@@ -1172,6 +1176,16 @@ try {
   finish()
 }
 
+// ---------- Gate 1.51: platform-aware run root (T-065) ----------
+section('Gate 1.51 — platform-aware run root: C:\\swarm on Windows, $HOME/swarm elsewhere, SWARM_RUN_ROOT overrides (fast tier)')
+try {
+  run(process.execPath, [tsxCli, join(root, 'scripts', 'check-run-root.mjs')], { cwd: root, stdio: 'inherit' })
+  ok(true, 'run-root self-check exit 0')
+} catch (e) {
+  fail(`run-root self-check failed: ${e.status ?? e.message}`)
+  finish()
+}
+
 if (tier === 'fast') finish()
 
 // ---------- Gate 2: real end-to-end run ----------
@@ -1199,7 +1213,7 @@ try {
 const skeletonArgs = [
   join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs'),
   join(root, 'src', 'cli.ts'),
-  '--repo', fixture.replace(/\//g, '\\'),
+  '--repo', asWinPaths(fixture),
   '--goal', 'Make the demo-target calculator more capable for flight-sim style math.',
   '--gate', 'build=node build.js',
   '--gate', 'test=node test.js',
@@ -1229,7 +1243,7 @@ const skeletonArgs = [
   // gate-decided, and the verifier block is asserted structurally (present,
   // honest ok flag, well-formed observations), never on content.
   '--verifier-model', 'zai-coding-plan/glm-5.3-flash',
-  '--run-root', verifyRoot.replace(/\//g, '\\'),
+  '--run-root', asWinPaths(verifyRoot),
 ]
 console.log('$ tsx src/cli.ts', skeletonArgs.slice(3).join(' '))
 // The outer ceiling bounds CI; it must never preempt the runner's OWN verdict
@@ -1381,7 +1395,7 @@ for (const stray of ['calc.js', 'test.js']) {
 // in the worktrees are disposable by definition.
 console.log(`$ tsx src/clean.ts --run ${runDirs[0]} --run-root ${verifyRoot} --force`)
 try {
-  run(process.execPath, [tsxCli, join(root, 'src', 'clean.ts'), '--run', runDirs[0], '--run-root', verifyRoot.replace(/\//g, '\\'), '--force'], { cwd: root, stdio: 'inherit' })
+  run(process.execPath, [tsxCli, join(root, 'src', 'clean.ts'), '--run', runDirs[0], '--run-root', asWinPaths(verifyRoot), '--force'], { cwd: root, stdio: 'inherit' })
   ok(true, `clean command disposed run ${runDirs[0]} (exit 0)`)
 } catch (e) {
   fail(`clean command failed: ${e.status ?? e.message}`)

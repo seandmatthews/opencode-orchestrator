@@ -1,3 +1,4 @@
+import { defaultRunRoot, defaultStoreDb } from './run-root.js'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
@@ -107,7 +108,7 @@ Options:
   --gate "name=command"    Machine gate; repeatable with UNIQUE names — a repeated
                            name refuses at parse time, before any side effect
                            (e.g. --gate "build=node build.js")
-  --run-root <path>        Where runs live (default: C:\\swarm)
+  --run-root <path>        Where runs live (default: ${defaultRunRoot()})
   --force-lock             Take the checkout lock even if another (suspected-
                            stale) holder still owns it
   --allow-red-base         Proceed over a base whose own gates fail (T-043).
@@ -120,7 +121,7 @@ Options:
                            with it the run proceeds and the red-base evidence
                            rides <runDir>/baseline-check.json.
   --db <path>              SQLite DB for durable run records (default:
-                           C:\\swarm\\refinery.db)
+                           ${defaultStoreDb()})
   --timeout-min <n>        Per-worker wall-clock limit in minutes (default: 15)
   --max-attempts <n>       Retry a mechanically failed candidate (worker
                            non-zero exit/timeout or thrown error) as a fresh
@@ -233,10 +234,10 @@ function parseArgs(argv: string[]): Options {
     plannerContext: true,
     concurrency: 0,
     base: 'HEAD',
-    runRoot: 'C:\\swarm',
+    runRoot: defaultRunRoot(),
     forceLock: false,
     allowRedBase: false,
-    db: 'C:\\swarm\\refinery.db',
+    db: defaultStoreDb(),
     timeoutMs: 15 * 60_000,
     maxAttempts: 1,
     gateRetry: false,
@@ -245,7 +246,11 @@ function parseArgs(argv: string[]): Options {
     opencodeBin: '',
   }
   const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)))
-  opts.opencodeBin = join(projectRoot, 'node_modules', 'opencode-ai', 'bin', process.platform === 'win32' ? 'opencode.exe' : 'opencode')
+  // The opencode-ai postinstall installs the platform binary as bin/opencode.exe
+  // on EVERY platform (its own targetBinary constant — on Linux that file is
+  // the ELF build); prefer the unprefixed name where one exists (T-065).
+  const openCodeBinDir = join(projectRoot, 'node_modules', 'opencode-ai', 'bin')
+  opts.opencodeBin = join(openCodeBinDir, process.platform === 'win32' || !existsSync(join(openCodeBinDir, 'opencode')) ? 'opencode.exe' : 'opencode')
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!

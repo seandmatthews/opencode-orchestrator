@@ -52,6 +52,7 @@
 //
 // All git calls and subprocesses are list-form (AGENTS.md #4); the sandbox
 // under C:\swarm is created and removed by this check (AGENTS.md #10).
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -71,7 +72,7 @@ const norm = (p) => p.replaceAll('\\', '/').toLowerCase()
 const uniq = (arr) => [...new Set(arr)]
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-verifier'
+const sandbox = swarmRoot + '/verify-verifier'
 const NODE = process.execPath
 const VERIFIER_MODEL = 'fake/verifier-model'
 

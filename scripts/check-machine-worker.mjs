@@ -31,6 +31,8 @@
 //       byte-identical output without it, malformed shapes refused) and the
 //       pure commandPairingRefusal helper (both directions, default-worker
 //       resolution, refusal names the job).
+import { killTree } from './kill-tree.mjs'
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -47,7 +49,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const read = (p) => readFileSync(p, 'utf8')
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-machine'
+const sandbox = swarmRoot + '/verify-machine'
 const NODE = process.execPath
 const IDENTITY = ['-c', 'user.name=check-machine', '-c', 'user.email=machine@local']
 
@@ -64,6 +66,13 @@ const isAlive = (pid) => {
     return e.code === 'EPERM'
   }
 }
+// T-065: the tree-kill contract is per-platform (KI#9). Windows: a verified
+// tree kill — the whole planted tree dies, the log carries the verified-kill
+// line, cleanupFailures stays absent. POSIX: a root-only SIGKILL reported
+// verified:false — the direct child (the machine worker) dies, its spawned
+// descendant is left to this check's sweep, and the evidence is the
+// could-not-be-verified line.
+const windowsKill = process.platform === 'win32'
 async function untilDead(pid, timeoutMs = 5000) {
   const t0 = Date.now()
   while (Date.now() - t0 < timeoutMs) {
@@ -76,7 +85,7 @@ async function untilDead(pid, timeoutMs = 5000) {
  *  check's own spawns) — only reached when a kill assertion already failed. */
 function sweep(pid) {
   try {
-    execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+    killTree(pid)
   } catch {
     // Already dead — fine.
   }
@@ -187,10 +196,19 @@ async function main() {
     if (pids[1] !== undefined && !childDead) sweep(pids[1])
     t('S4: a timed-out command — ok false, timedOut true, durationMs >= timeoutMs (the kill exit code is whatever the killed child reports — only ok/timedOut are the contract)',
       r.result.ok === false && r.result.timedOut === true && r.result.durationMs >= timeoutMs)
-    t('S4: the verified tree kill fired — the log carries "tree killed, verified:" and the drained child stdout',
-      log.includes('tree killed, verified:') && log.includes('PARENT_PID='))
-    t('S4: the whole planted tree is dead on the real process table',
-      pids.length === 2 && parentDead && childDead)
+    t(windowsKill
+      ? 'S4: the verified tree kill fired — the log carries "tree killed, verified:" and the drained child stdout'
+      : 'S4: the POSIX root kill logs its documented CLEANUP FAIL (KI#9) and still drains the child stdout',
+      windowsKill
+        ? log.includes('tree killed, verified:') && log.includes('PARENT_PID=')
+        : !log.includes('tree killed, verified:') && log.includes('could not be verified') && log.includes('PARENT_PID='))
+    if (windowsKill) {
+      t('S4: the whole planted tree is dead on the real process table',
+        pids.length === 2 && parentDead && childDead)
+    } else {
+      t('S4 (POSIX): the parent died to the root-only kill; the swept child leaves nothing alive (KI#9)',
+        pids.length === 2 && parentDead && (await untilDead(pids[1], 2000)))
+    }
     t('S4: cleanupFailures pass through onto WorkerResult — a verified kill leaves the key absent, an unproven one records loud CLEANUP FAIL lines',
       r.result.cleanupFailures === undefined
       || (Array.isArray(r.result.cleanupFailures) && r.result.cleanupFailures.every((l) => l.startsWith('CLEANUP FAIL'))))

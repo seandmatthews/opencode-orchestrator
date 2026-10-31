@@ -13,6 +13,7 @@
 // (VERIFICATION.md Known issues #4).
 // Since T-004 each run's disposal happens under the per-target-repo checkout
 // lock (src/lock.ts): a refused lock removes nothing and names the holder.
+import { defaultRunRoot } from './run-root.js'
 import { existsSync, readdirSync, rmdirSync } from 'node:fs'
 import { basename, join } from 'node:path'
 // readReport/RunResult/removeBranch/disposeTargets are the shared disposal
@@ -37,7 +38,7 @@ Options:
                        from it)
   --force-lock         Take the checkout lock even if another (suspected-stale)
                        holder still owns it
-  --run-root <path>    Where runs live (default: C:\\swarm)
+  --run-root <path>    Where runs live (default: ${defaultRunRoot()})
   --help               Show this help
 
 Worktrees are taken from the run's report.json, plus anything else discovered
@@ -54,7 +55,7 @@ interface Options {
 }
 
 function parseArgs(argv: string[]): Options {
-  const opts: Options = { runRoot: 'C:\\swarm', run: null, all: false, force: false, forceLock: false }
+  const opts: Options = { runRoot: defaultRunRoot(), run: null, all: false, force: false, forceLock: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
     const value = (): string => {

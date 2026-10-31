@@ -28,6 +28,7 @@
 //       commit-carrying branch (exit 1, loud line, branch survives, the now-
 //       clean worktree still disposed) while the at-base sibling branch is
 //       removed un-refused; `--force` finishes the job.
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -42,7 +43,7 @@ const t = (name, cond) => {
 }
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-t044'
+const sandbox = swarmRoot + '/verify-t044'
 const repo = join(sandbox, 'repo')
 const runs = join(sandbox, 'runs')
 const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')

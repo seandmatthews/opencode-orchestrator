@@ -52,6 +52,7 @@
 //
 // All subprocesses are list-form (AGENTS.md #4); the sandbox under C:\swarm
 // is created and removed by this check (AGENTS.md #10).
+import { swarmRoot } from './swarm-root.mjs'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -68,7 +69,7 @@ const t = (name, cond) => {
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const tsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')
-const sandbox = 'C:/swarm/verify-duplicate-gates'
+const sandbox = swarmRoot + '/verify-duplicate-gates'
 rmSync(sandbox, { recursive: true, force: true })
 mkdirSync(sandbox, { recursive: true })
 const runRoot = join(sandbox, 'runs')

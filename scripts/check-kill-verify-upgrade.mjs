@@ -50,6 +50,7 @@
 //       the fifth observation's signature end to end (the recorded red
 //       bar): the real snapshot failure around a kill whose tree the real
 //       process table proves dead, reported as a CLEANUP FAIL.
+import { swarmRoot } from './swarm-root.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -65,7 +66,7 @@ const t = (name, cond) => {
 }
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-killverify'
+const sandbox = swarmRoot + '/verify-killverify'
 rmSync(sandbox, { recursive: true, force: true })
 mkdirSync(sandbox, { recursive: true })
 
@@ -164,27 +165,50 @@ const alwaysDownSnapshot = () => () => {
 // sweep at the end proves it).
 const forcedAlive = (pid) => (p) => (p === pid ? true : isAlive(p))
 
+// T-065: the T-054 machinery — pre-kill snapshot, tree kill, post-kill
+// re-check — is Windows-only code; off-Windows killTreeVerified takes its
+// best-effort root-SIGKILL early return (KI#9) and every injected lens is
+// unreachable. The machinery legs below run on Windows; their POSIX twins
+// pin the contract the platform OWNS: verification is never claimed, the
+// root dies, the descendants survive as the documented leak.
+const windowsKill = process.platform === 'win32'
+const posixRootKillPin = async (label, pids) => {
+  const r = killTreeVerified(pids[3])
+  const lines = killFailureLines(pids[3], r)
+  t(`${label} (POSIX): the root-only kill never claims verification — verified false, no survivor claim, reaped 0 (KI#9)`,
+    r.rootWasLive === true && r.verified === false && Array.isArray(r.survivors) && r.survivors.length === 0 && r.reaped === 0)
+  t(`${label} (POSIX): the loud named line verbatim (fail-closed, T-011)`,
+    lines.length === 1 && lines[0] === `CLEANUP FAIL: pid ${pids[3]} tree kill could not be verified (descendant verification unavailable)`)
+  await waitUntilDead([pids[3]])
+  t(`${label} (POSIX): the root is dead; the spawned descendants survive as the documented KI#9 leak`,
+    !isAlive(pids[3]) && isAlive(pids[2]) && isAlive(pids[1]))
+}
+
 // ---------- A — the diagnosed leg: transient snapshot failure, outcome proven good ----------
 {
   const { pids } = await plantTree('a')
-  let calls = 0
-  const snap = transientSnapshot()
-  const r = killTreeVerified(pids[3], {
-    snapshotTree: (pid) => {
-      calls++
-      return snap(pid)
-    },
-  })
-  const lines = killFailureLines(pids[3], r)
-  console.log(`    A observed failure lines: ${JSON.stringify(lines)}`)
-  t('A: the transient-snapshot leg reports a live root', r.rootWasLive === true)
-  t('A: verified-when-proven-dead — verified true, no survivors', r.verified === true && Array.isArray(r.survivors) && r.survivors.length === 0)
-  t('A: reaped counts the full pre-kill tree (root, mid, leaf)', r.reaped === 3)
-  t('A: NO failure line for the proven-dead outcome', lines.length === 0)
-  t('A: the success line carries the verified reaped count', killSuccessLine(r) === 'tree killed, verified: 3 processes reaped')
-  t('A: exactly one bounded pre-kill retry (no unbounded loop)', calls === 2)
-  await waitUntilDead([pids[1], pids[2], pids[3]])
-  t('A: whole tree dead on the real process table', treeReallyDead([pids[1], pids[2], pids[3]]))
+  if (windowsKill) {
+    let calls = 0
+    const snap = transientSnapshot()
+    const r = killTreeVerified(pids[3], {
+      snapshotTree: (pid) => {
+        calls++
+        return snap(pid)
+      },
+    })
+    const lines = killFailureLines(pids[3], r)
+    console.log(`    A observed failure lines: ${JSON.stringify(lines)}`)
+    t('A: the transient-snapshot leg reports a live root', r.rootWasLive === true)
+    t('A: verified-when-proven-dead — verified true, no survivors', r.verified === true && Array.isArray(r.survivors) && r.survivors.length === 0)
+    t('A: reaped counts the full pre-kill tree (root, mid, leaf)', r.reaped === 3)
+    t('A: NO failure line for the proven-dead outcome', lines.length === 0)
+    t('A: the success line carries the verified reaped count', killSuccessLine(r) === 'tree killed, verified: 3 processes reaped')
+    t('A: exactly one bounded pre-kill retry (no unbounded loop)', calls === 2)
+    await waitUntilDead([pids[1], pids[2], pids[3]])
+    t('A: whole tree dead on the real process table', treeReallyDead([pids[1], pids[2], pids[3]]))
+  } else {
+    await posixRootKillPin('A', pids)
+  }
 }
 
 // ---------- B — the reporting surface, pure (never-weakened pins) ----------
@@ -203,111 +227,131 @@ const forcedAlive = (pid) => (p) => (p === pid ? true : isAlive(p))
 // ---------- C — genuine survivors keep their per-pid lines (normal path) ----------
 {
   const { pids } = await plantTree('c')
-  const r = killTreeVerified(pids[3], { isAlive: forcedAlive(pids[2]) })
-  const lines = killFailureLines(pids[3], r)
-  t('C: a survivor keeps the loud verdict — verified false, survivor named, reaped 0', r.verified === false && r.survivors.length === 1 && r.survivors[0] === pids[2] && r.reaped === 0)
-  t('C: the survivor keeps its per-pid line verbatim', lines.some((l) => l === `CLEANUP FAIL: pid ${pids[2]} survived taskkill /T /F`))
-  await waitUntilDead([pids[1], pids[2], pids[3]])
-  t('C: the forced-alive pin was a reporting stub, not a real survivor — tree really dead', treeReallyDead([pids[1], pids[2], pids[3]]))
+  if (windowsKill) {
+    const r = killTreeVerified(pids[3], { isAlive: forcedAlive(pids[2]) })
+    const lines = killFailureLines(pids[3], r)
+    t('C: a survivor keeps the loud verdict — verified false, survivor named, reaped 0', r.verified === false && r.survivors.length === 1 && r.survivors[0] === pids[2] && r.reaped === 0)
+    t('C: the survivor keeps its per-pid line verbatim', lines.some((l) => l === `CLEANUP FAIL: pid ${pids[2]} survived taskkill /T /F`))
+    await waitUntilDead([pids[1], pids[2], pids[3]])
+    t('C: the forced-alive pin was a reporting stub, not a real survivor — tree really dead', treeReallyDead([pids[1], pids[2], pids[3]]))
+  } else {
+    await posixRootKillPin('C', pids)
+  }
 }
 
 // ---------- D — genuinely unverifiable stays loud; the kill is never skipped ----------
 {
   const { pids } = await plantTree('d')
-  let calls = 0
-  const snap = alwaysDownSnapshot()
-  const r = killTreeVerified(pids[3], {
-    snapshotTree: (pid) => {
-      calls++
-      return snap(pid)
-    },
-  })
-  const lines = killFailureLines(pids[3], r)
-  t('D: the unverifiable outcome reports verified false with no survivor claim', r.rootWasLive === true && r.verified === false && r.reaped === 0 && Array.isArray(r.survivors) && r.survivors.length === 0)
-  t('D: genuinely unverifiable stays loud — the named line verbatim (fail-closed, T-011)', lines.length === 1 && lines[0] === `CLEANUP FAIL: pid ${pids[3]} tree kill could not be verified (descendant verification unavailable)`)
-  t('D: bounded verification attempts (two pre-kill + one post-kill re-check)', calls === 3)
-  await waitUntilDead([pids[1], pids[2], pids[3]])
-  t('D: the kill was never skipped — whole tree dead on the real process table', treeReallyDead([pids[1], pids[2], pids[3]]))
+  if (windowsKill) {
+    let calls = 0
+    const snap = alwaysDownSnapshot()
+    const r = killTreeVerified(pids[3], {
+      snapshotTree: (pid) => {
+        calls++
+        return snap(pid)
+      },
+    })
+    const lines = killFailureLines(pids[3], r)
+    t('D: the unverifiable outcome reports verified false with no survivor claim', r.rootWasLive === true && r.verified === false && r.reaped === 0 && Array.isArray(r.survivors) && r.survivors.length === 0)
+    t('D: genuinely unverifiable stays loud — the named line verbatim (fail-closed, T-011)', lines.length === 1 && lines[0] === `CLEANUP FAIL: pid ${pids[3]} tree kill could not be verified (descendant verification unavailable)`)
+    t('D: bounded verification attempts (two pre-kill + one post-kill re-check)', calls === 3)
+    await waitUntilDead([pids[1], pids[2], pids[3]])
+    t('D: the kill was never skipped — whole tree dead on the real process table', treeReallyDead([pids[1], pids[2], pids[3]]))
+  } else {
+    await posixRootKillPin('D', pids)
+  }
 }
 
 // ---------- E — the post-kill re-check leg: upgrade to verified-when-proven-dead ----------
 {
   const { pids } = await plantTree('e')
-  let calls = 0
-  const snap = downThroughKillSnapshot()
-  const r = killTreeVerified(pids[3], {
-    snapshotTree: (pid) => {
-      calls++
-      return snap(pid)
-    },
-  })
-  const lines = killFailureLines(pids[3], r)
-  console.log(`    E observed failure lines: ${JSON.stringify(lines)}`)
-  t('E: the post-kill re-check upgrades the outcome — verified true, no survivors', r.rootWasLive === true && r.verified === true && Array.isArray(r.survivors) && r.survivors.length === 0)
-  t('E: reaped counts the re-check enumeration (root + anything still linked)', r.reaped >= 1)
-  t('E: NO failure line for the proven-dead outcome', lines.length === 0)
-  t('E: bounded verification attempts (two pre-kill + one post-kill re-check)', calls === 3)
-  await waitUntilDead([pids[1], pids[2], pids[3]])
-  t('E: whole tree dead on the real process table', treeReallyDead([pids[1], pids[2], pids[3]]))
+  if (windowsKill) {
+    let calls = 0
+    const snap = downThroughKillSnapshot()
+    const r = killTreeVerified(pids[3], {
+      snapshotTree: (pid) => {
+        calls++
+        return snap(pid)
+      },
+    })
+    const lines = killFailureLines(pids[3], r)
+    console.log(`    E observed failure lines: ${JSON.stringify(lines)}`)
+    t('E: the post-kill re-check upgrades the outcome — verified true, no survivors', r.rootWasLive === true && r.verified === true && Array.isArray(r.survivors) && r.survivors.length === 0)
+    t('E: reaped counts the re-check enumeration (root + anything still linked)', r.reaped >= 1)
+    t('E: NO failure line for the proven-dead outcome', lines.length === 0)
+    t('E: bounded verification attempts (two pre-kill + one post-kill re-check)', calls === 3)
+    await waitUntilDead([pids[1], pids[2], pids[3]])
+    t('E: whole tree dead on the real process table', treeReallyDead([pids[1], pids[2], pids[3]]))
+  } else {
+    await posixRootKillPin('E', pids)
+  }
 }
 
 // ---------- F — the post-kill re-check stays loud on a live process ----------
 {
   const { pids } = await plantTree('f')
-  let calls = 0
-  const snap = downThroughKillSnapshot()
-  // The re-check's enumeration on a cleanly-killed tree is the root alone
-  // (the fresh table no longer links the dead descendants), so the loud
-  // direction is forced on the ROOT: a kill that did not take is caught by
-  // the re-check and keeps its per-pid line.
-  const r = killTreeVerified(pids[3], {
-    snapshotTree: (pid) => {
-      calls++
-      return snap(pid)
-    },
-    isAlive: forcedAlive(pids[3]),
-  })
-  const lines = killFailureLines(pids[3], r)
-  t('F: a live process the re-check finds stays loud — verified false, survivor named, reaped 0', r.verified === false && r.survivors.length === 1 && r.survivors[0] === pids[3] && r.reaped === 0)
-  t('F: the survivor keeps its per-pid line verbatim', lines.some((l) => l === `CLEANUP FAIL: pid ${pids[3]} survived taskkill /T /F`))
-  await waitUntilDead([pids[1], pids[2], pids[3]])
-  t('F: the forced-alive pin was a reporting stub, not a real survivor — tree really dead', treeReallyDead([pids[1], pids[2], pids[3]]))
+  if (windowsKill) {
+    let calls = 0
+    const snap = downThroughKillSnapshot()
+    // The re-check's enumeration on a cleanly-killed tree is the root alone
+    // (the fresh table no longer links the dead descendants), so the loud
+    // direction is forced on the ROOT: a kill that did not take is caught by
+    // the re-check and keeps its per-pid line.
+    const r = killTreeVerified(pids[3], {
+      snapshotTree: (pid) => {
+        calls++
+        return snap(pid)
+      },
+      isAlive: forcedAlive(pids[3]),
+    })
+    const lines = killFailureLines(pids[3], r)
+    t('F: a live process the re-check finds stays loud — verified false, survivor named, reaped 0', r.verified === false && r.survivors.length === 1 && r.survivors[0] === pids[3] && r.reaped === 0)
+    t('F: the survivor keeps its per-pid line verbatim', lines.some((l) => l === `CLEANUP FAIL: pid ${pids[3]} survived taskkill /T /F`))
+    await waitUntilDead([pids[1], pids[2], pids[3]])
+    t('F: the forced-alive pin was a reporting stub, not a real survivor — tree really dead', treeReallyDead([pids[1], pids[2], pids[3]]))
+  } else {
+    await posixRootKillPin('F', pids)
+  }
 }
 
 // ---------- R — the REAL-failure leg: powershell unresolvable, fail-closed end to end ----------
 {
   const { pids } = await plantTree('r')
-  // Both preconditions asserted (the T-052 check's R6 pattern), so a machine
-  // where the unavailability cannot be forced fails this leg loudly instead
-  // of running it vacuously.
-  const positive = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { windowsHide: true })
-  t('R precondition: powershell.exe resolves under the normal PATH (the snapshot works when present)', positive.status === 0)
-  const strippedPath = process.env.PATH.split(';').filter((seg) => seg.trim() !== '' && !/WindowsPowerShell/i.test(seg)).join(';')
-  const envStripped = { ...process.env }
-  delete envStripped.PATH
-  envStripped.PATH = strippedPath
-  const negative = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { windowsHide: true, env: envStripped })
-  t('R precondition: powershell.exe does NOT resolve under the stripped PATH (unavailability forced deterministically)', negative.error !== undefined || negative.status !== 0)
-  // The REAL drive — no stubs: every snapshot attempt fails for real (ENOENT),
-  // the kill fires anyway, and the outcome stays exactly the loud
-  // unverifiable shape. On main's engine this was the recorded red bar: the
-  // fifth observation's signature (a real snapshot failure around a kill
-  // whose tree the real table proves dead, reported as a CLEANUP FAIL).
-  const savedPath = process.env.PATH
-  let r
-  try {
-    process.env.PATH = strippedPath
-    r = killTreeVerified(pids[3])
-  } finally {
-    process.env.PATH = savedPath
+  if (windowsKill) {
+    // Both preconditions asserted (the T-052 check's R6 pattern), so a machine
+    // where the unavailability cannot be forced fails this leg loudly instead
+    // of running it vacuously.
+    const positive = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { windowsHide: true })
+    t('R precondition: powershell.exe resolves under the normal PATH (the snapshot works when present)', positive.status === 0)
+    const strippedPath = process.env.PATH.split(';').filter((seg) => seg.trim() !== '' && !/WindowsPowerShell/i.test(seg)).join(';')
+    const envStripped = { ...process.env }
+    delete envStripped.PATH
+    envStripped.PATH = strippedPath
+    const negative = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { windowsHide: true, env: envStripped })
+    t('R precondition: powershell.exe does NOT resolve under the stripped PATH (unavailability forced deterministically)', negative.error !== undefined || negative.status !== 0)
+    // The REAL drive — no stubs: every snapshot attempt fails for real (ENOENT),
+    // the kill fires anyway, and the outcome stays exactly the loud
+    // unverifiable shape. On main's engine this was the recorded red bar: the
+    // fifth observation's signature (a real snapshot failure around a kill
+    // whose tree the real table proves dead, reported as a CLEANUP FAIL).
+    const savedPath = process.env.PATH
+    let r
+    try {
+      process.env.PATH = strippedPath
+      r = killTreeVerified(pids[3])
+    } finally {
+      process.env.PATH = savedPath
+    }
+    const lines = killFailureLines(pids[3], r)
+    console.log(`    R observed failure lines: ${JSON.stringify(lines)}`)
+    t('R: the real-failure drive reports a live root, unverified, no survivor claim, reaped 0', r.rootWasLive === true && r.verified === false && Array.isArray(r.survivors) && r.survivors.length === 0 && r.reaped === 0)
+    t('R: genuinely unverifiable stays loud — the named line verbatim (fail-closed, T-011)', lines.length === 1 && lines[0] === `CLEANUP FAIL: pid ${pids[3]} tree kill could not be verified (descendant verification unavailable)`)
+    await waitUntilDead([pids[1], pids[2], pids[3]])
+    t('R: the kill was never skipped — whole tree dead on the real process table', treeReallyDead([pids[1], pids[2], pids[3]]))
+    t('R: the normal PATH is restored after the drive', process.env.PATH === savedPath)
+  } else {
+    await posixRootKillPin('R', pids)
   }
-  const lines = killFailureLines(pids[3], r)
-  console.log(`    R observed failure lines: ${JSON.stringify(lines)}`)
-  t('R: the real-failure drive reports a live root, unverified, no survivor claim, reaped 0', r.rootWasLive === true && r.verified === false && Array.isArray(r.survivors) && r.survivors.length === 0 && r.reaped === 0)
-  t('R: genuinely unverifiable stays loud — the named line verbatim (fail-closed, T-011)', lines.length === 1 && lines[0] === `CLEANUP FAIL: pid ${pids[3]} tree kill could not be verified (descendant verification unavailable)`)
-  await waitUntilDead([pids[1], pids[2], pids[3]])
-  t('R: the kill was never skipped — whole tree dead on the real process table', treeReallyDead([pids[1], pids[2], pids[3]]))
-  t('R: the normal PATH is restored after the drive', process.env.PATH === savedPath)
 }
 
 // ---------- sweep: nothing planted outlives this check ----------

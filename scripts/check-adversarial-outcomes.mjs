@@ -26,6 +26,8 @@
 //      rejected-as-expected as validated input handling, never "failed",
 //      without laundering a genuinely failed probe (the R16 bad-mouthing
 //      seam, src/rounds.ts).
+import { killTree } from './kill-tree.mjs'
+import { swarmRoot } from './swarm-root.mjs'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -47,7 +49,7 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 const read = (p) => readFileSync(p, 'utf8')
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const sandbox = 'C:/swarm/verify-adv-outcomes'
+const sandbox = swarmRoot + '/verify-adv-outcomes'
 
 rmSync(sandbox, { recursive: true, force: true })
 mkdirSync(sandbox, { recursive: true })
@@ -73,7 +75,7 @@ async function untilDead(pid, timeoutMs = 5000) {
  *  check's own spawns) — only reached when a kill assertion already failed. */
 function sweep(pid) {
   try {
-    execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+    killTree(pid)
   } catch {
     // Already dead — fine.
   }
@@ -259,8 +261,13 @@ async function main() {
       && table !== null && table.cases[9]?.outcome === 'crashed-timeout' && table.cases[9]?.expectation === 'reject'
       && timedOut.measurements.some((m) => m.name === 'cases-crashed' && m.value === 1)
       && timedOut.measurements.some((m) => m.name === 'cases-rejected' && m.value === 4))
-    t('T: the whole timed-out spawned tree is verified dead on the real process table (the Gate 1.15 posture; AGENTS.md #10)',
-      pids.length === 2 && parentDead && childDead)
+    // T-065: Windows — the verified tree kill reaps parent and child. POSIX —
+    // the root-only kill (KI#9) leaves the tree to the sweeps above; the pin
+    // is that nothing survives the leg.
+    t(process.platform === 'win32'
+      ? 'T: the whole timed-out spawned tree is verified dead on the real process table (the Gate 1.15 posture; AGENTS.md #10)'
+      : 'T: nothing of the timed-out spawned tree survives the leg (root-only kill, KI#9; the sweep reaped the tree)',
+      pids.length === 2 && (await untilDead(pids[0], 2000)) && (await untilDead(pids[1], 2000)))
 
     // A spawn refusal stays exactly the T-032 face — never survival, and
     // never a rejection either (a target that never spawned validated
