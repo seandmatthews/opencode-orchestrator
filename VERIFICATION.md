@@ -6762,9 +6762,15 @@ landing in T-017's Landed section).
     first-hand on Ubuntu 22.04 WSL2 (the forced reconciliation's
     recovery.json, 2026-10-29). The Windows tier remains the primary tier;
     the fast tier is additionally green on Ubuntu 22.04.2 LTS (WSL2, Node
-    22) as of the same date — Gate 2 (real-model) has NOT been exercised on
-    Linux (harness auth is per-OS; `opencode providers login` inside WSL is
-    the pending step).
+    22) as of the same date. **2026-10-31: Gate 2 has also been exercised on
+    Linux — `npm run verify:full` on Ubuntu 22.04.2 WSL2 completed
+    `=== verify (full) complete: ALL GREEN ===` (exit 0), including the
+    real-model two-round end-to-end run (all four candidates survived with
+    gates PASS and parsed reviews; evidence kept at
+    `$HOME/swarm/verify/20261031170503/`)** — the WSL harness's own
+    `zai-coding-plan` auth store carried over from its June login with no
+    re-auth; OpenCode's prompt arrives on stdin (T-042), so a manual
+    `opencode run` smoke test must pipe it.
 15. **Two runs started in the same wall-clock second on one run root share
     ONE artifacts dir (observed 2026-10-31, T-065's WSL lane; engine fix
     filed as T-066, deliberately not same-run).** Run ids are

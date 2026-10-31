@@ -1,6 +1,6 @@
 # T-065 — The engine runs on Linux/WSL: platform-aware run root + per-platform kill/identity contracts
 
-**Status:** done 2026-10-29 (Linux green bars) / 2026-10-31 (Windows re-verification, full change-set)
+**Status:** done 2026-10-29 (Linux green bars) / 2026-10-31 (Windows re-verification + Linux FULL tier incl. real-model Gate 2, green)
 **Category:** engine
 **Value (1-5):** 3 · **Risk (1-5):** 2
 **Depends on:** —
@@ -151,14 +151,31 @@ ENGINE hazard is filed as **T-066**, deliberately not fixed in this lane
   kill invocations, same report shapes (the sweeper call sites' win32 leg
   is the verbatim taskkill line, moved behind one function; the store's
   pinned literals derive identically on Windows).
-- The full tier (Gate 2) has not been run on Linux: it needs
-  `opencode providers login` inside WSL (harness auth is per-OS). Tier-2
-  Linux verification is the explicit follow-up.
 - README/decisions.md doc-wide path mentions: the uncommitted handoff-doc
   lane on the Windows checkout touches those files; its C:\swarm mentions
   update with that lane, not here. AGENTS.md's run-root line IS updated
   here.
 - The same-second run-id collision: filed (T-066), not fixed (rule 11).
+
+## Tier 2 — the full tier, real models, on Linux (2026-10-31)
+
+The full tier was run on the same WSL box after all of the above landed:
+
+1. **Manual skeleton run** (demo-target fixture, the fixture's own suggested
+   goal, 2 candidates, build+test gates, default zai models): exit 0 — both
+   candidates worker-ok with real 1.0 KiB diffs, both gates PASS, both
+   survived; the WSL harness's existing `zai-coding-plan` auth (June's
+   login) was still valid, so NO re-auth and NO credential transfer was
+   needed. Disposed through `npm run clean` (4 removed, 0 refused, evidence
+   kept).
+2. **`npm run verify:full`** — Gates 0–1.51 plus the real-model Gate 2
+   end-to-end: `=== verify (full) complete: ALL GREEN ===`, exit 0. The
+   Gate 2 run (report kept at `$HOME/swarm/verify/20261031170503/`) was a
+   real 2-round loop: c01 (302s, 3.8 KiB diff) and c02 (199s, 3.0 KiB)
+   survived round 1, and both round-2 re-leases (c01-r2 41s / c02-r2 375s)
+   survived with gates PASS and parsed reviews (4–6 observations each).
+3. Manual `opencode run` smoke tests in WSL must pipe the prompt on stdin
+   (T-042's transport) — an argv prompt hangs waiting on stdin.
 
 ## Acceptance criteria (all token-free)
 
@@ -223,7 +240,11 @@ same change-set (worktree at the lane commit, Node 22, win32):
 (2026-10-31). The first Windows attempt hit the known one-off CIM transient
 class (Gate 1.12 S4 reported an unverified outcome around a kill the real
 table proved dead — KI#10's shape, no code implicated); the documented
-remedy is the re-run, which came back green end to end.
+remedy is the re-run, which came back green end to end. **And the Linux
+FULL tier — `npm run verify:full`, Gates 0–1.51 plus the real-model Gate 2
+end-to-end — completed `=== verify (full) complete: ALL GREEN ===`, exit 0
+(2026-10-31; evidence above and at
+`$HOME/swarm/verify/20261031170503/`).**
 
 ## Re-run requirements
 
